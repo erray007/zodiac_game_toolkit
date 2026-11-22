@@ -30,8 +30,9 @@
 //   sides closely in time, and the whole run takes about 45 s on the release preset. --op (repeatable) measures only the
 //   named operations, --detail also prints each operation's median ratio per pair of engine and context to stderr, --list
 //   prints the names. For diagnosis only (tools/bench_diagnose.py, never the gate): --diagnostic adds the operations
-//   dict_keys_<n> and dict_get_ordered_<n> (to --list and to the names --op takes) and prints, per operation, the page faults
-//   each side's timed runs took ("bench_types: faults <op> zodiac <n> addon <n> ..."), and --layout prints, per dictionary
+//   dict_keys_<n> and dict_get_ordered_<n> and report-only order operations on 1000 keys (to --list and to the names --op
+//   takes) and implies --faults; --faults alone (the gate passes it, it changes no output line) prints, per operation, the page
+//   faults each side's timed runs took ("bench_types: faults <op> zodiac <n> addon <n> ..."); --layout prints, per dictionary
 //   operation and Zodiac engine, a line "bench_types: layout {json}" to stderr with the table's addresses (mod 4096), index
 //   size, each key's home slot and probe length, and the cache lines the lookups of all its keys touch.
 // - Exit codes: 0 measured, 1 bad arguments, 2 a snippet did not build or run, 3 the two sides disagree on a checksum.
@@ -1006,6 +1007,7 @@ const char* out_path=nullptr;
 bool list=false;
 bool detail=false;
 bool layout=false;
+bool faults=false;
 // --diagnostic may follow the --op that names a diagnostic operation, so it is found first.
 bool diagnostic=false;
 for(int i=1;i<argc;++i)diagnostic=diagnostic||std::string_view(argv[i])=="--diagnostic";
@@ -1028,8 +1030,9 @@ else if(arg=="--out"&&has_value)out_path=argv[++i];
 else if(arg=="--list")list=true;
 else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
+else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--layout] [--diagnostic] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--layout] [--faults] [--diagnostic] [--list]");
 }
 if(list){
 for(const Job& job:jobs)std::printf("%s\n",job.name.c_str());
@@ -1057,7 +1060,7 @@ for(const Job& job:jobs){
 if(!only.empty()&&std::find(only.begin(),only.end(),job.name)==only.end())continue;
 measurements.emplace_back(job,rounds);
 }
-g_count_faults=diagnostic;
+g_count_faults=diagnostic||faults;
 for(Measurement& m:measurements)calibrate(m,target_ns);
 for(Measurement& m:measurements)m.zodiac.faults=m.addon.faults=0;
 // The rounds go over every operation in turn, so each operation's rounds spread over the whole run (see the contract).
@@ -1071,7 +1074,7 @@ const std::string line=detail_line(m);
 std::fwrite(line.data(),1,line.size(),stderr);
 }
 }
-if(diagnostic){
+if(g_count_faults){
 for(const Measurement& m:measurements){
 const double runs=static_cast<double>(m.ratios.size());
 char line[256];

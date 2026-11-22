@@ -102,7 +102,8 @@ jobs:
           "$bench" --list > bench-ops.txt
           run_bench() {
             local status=0
-            "$bench" --detail --out "$1.json" 2> "$1-stderr.txt" || status=$?
+            # --faults and --layout only add stderr lines (each op's page faults, the dictionaries' layout) for telling a slow mode apart.
+            "$bench" --detail --faults --layout --out "$1.json" 2> "$1-stderr.txt" || status=$?
             cat "$1-stderr.txt"
             return $status
           }
@@ -225,7 +226,7 @@ jobs:
           bench=build/linux-release/tests/bench/bench_types
           "$bench" --list > bench-ops.txt
           status=0
-          "$bench" --detail --out bench.json 2> bench-stderr.txt || status=$?
+          "$bench" --detail --faults --layout --out bench.json 2> bench-stderr.txt || status=$?
           cat bench-stderr.txt
           if [ "$status" -ne 0 ]; then
             echo "::error::bench_types failed with exit code $status"
