@@ -112,7 +112,9 @@ if(ScriptArray* sample=d.keys()){
 if(sample->length()>0)out+=",\"keys_array_mod4096\":"+std::to_string(low(sample->at(0)));
 sample->release();
 }
-out+=",\"keys\":["+keys+"]}";
+// Each key's own record only for small tables (the large ones would write megabytes per run).
+if(d.live_<=64)out+=",\"keys\":["+keys+"]";
+out+="}";
 return out;
 }
 static std::string hex(std::uint64_t value)
@@ -514,7 +516,7 @@ s.addon_lookup=addon_setup+lookup;
 // Every key and its value: keys() in Zodiac, getKeys() in the add-on, then get of each key.
 s.zodiac_iterate=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.keys();for(int i=0,c=k.length();i<c;++i){int64 v;table.get(k[i],v);n+=v;}}return n;}";
 s.addon_iterate=addon_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.getKeys();for(uint i=0,c=k.length();i<c;++i){int64 v;table.get(k[i],v);n+=v;}}return n;}";
-// The order operations (sizes 10 and 1000 only): the add-on dictionary has no order, so its side keeps the keys' order in an
+// The order operations (gated at size 10 only, see all_jobs): the add-on dictionary has no order, so its side keeps the keys' order in an
 // array<string> as a script would, finding a key with find() and swapping it with its neighbour for a move by one.
 s.move_by_name="dict_move_by_"+count;
 s.index_of_name="dict_index_of_"+count;
@@ -557,7 +559,9 @@ DictionarySnippets s=dictionary_snippets(size);
 jobs.push_back({s.insert_name,size,s.zodiac_insert,s.addon_insert});
 jobs.push_back({s.lookup_name,size,s.zodiac_lookup,s.addon_lookup});
 jobs.push_back({s.iterate_name,size,s.zodiac_iterate,s.addon_iterate});
-if(size<=1000){
+// Size 10 only (an inventory): at 1000 the add-on side's array find takes about 0.8 ms per key, which would add minutes to every
+// gate run for a comparison Zodiac wins by three orders of magnitude.
+if(size==10){
 jobs.push_back({s.move_by_name,size,s.zodiac_move_by,s.addon_move_by});
 jobs.push_back({s.index_of_name,size,s.zodiac_index_of,s.addon_index_of});
 }

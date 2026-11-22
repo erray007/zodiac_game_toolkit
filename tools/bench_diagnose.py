@@ -165,10 +165,32 @@ def summary(records: list, focus: str, slow: float) -> str:
     return "\n".join(lines)
 
 
+def from_dir(directory: Path, focus: str) -> list:
+    """The records of the runs whose raw files are in directory (a cut-short diagnosis), in run order."""
+    records = []
+    for results in sorted(directory.glob("*.json"), key=lambda path: path.stat().st_mtime):
+        name = results.stem
+        stderr = directory / f"{name}-stderr.txt"
+        if not stderr.exists():
+            continue
+        try:
+            record = parse_run(results.read_text(encoding="utf-8"), stderr.read_text(encoding="utf-8"), focus)
+        except (DiagnoseError, ValueError, KeyError):
+            continue
+        if name.startswith("seed"):
+            seed, number = name[4:].split("-pass")
+            record.update({"kind": "seed", "seed": int(seed), "pass": int(number)})
+        else:
+            record.update({"kind": "unfixed", "seed": None, "pass": int(name[len("unfixed"):])})
+        records.append(record)
+    return records
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Tell whether a slow bench mode follows the table hash seed or the process.")
-    parser.add_argument("--bench", type=Path, required=True)
-    parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--from-dir", type=Path, help="only summarize the raw runs already in this directory (no bench run)")
+    parser.add_argument("--bench", type=Path)
+    parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--seeds", type=int, default=64)
     parser.add_argument("--passes", type=int, default=2)
     parser.add_argument("--unfixed", type=int, default=64)
@@ -178,6 +200,16 @@ def main(argv=None) -> int:
     parser.add_argument("--op", action="append", default=None)
     parser.add_argument("--all", action="store_true", help="every gated operation (bench_types --list) plus the --op ones, as the CI gate runs them")
     args = parser.parse_args(argv)
+    if args.from_dir:
+        records = from_dir(args.from_dir, args.focus)
+        if not records:
+            print("bench_diagnose: no complete run in that directory", file=sys.stderr)
+            return 2
+        print(summary(records, args.focus, args.slow), flush=True)
+        return 0
+    if args.bench is None or args.out_dir is None:
+        print("bench_diagnose: --bench and --out-dir are needed unless --from-dir is given", file=sys.stderr)
+        return 1
     if args.all:
         listed = subprocess.run([str(args.bench), "--list"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
         ops = listed + [op for op in (args.op or ["dict_keys_10", "dict_get_ordered_10"]) if op not in listed]
@@ -197,7 +229,9 @@ def main(argv=None) -> int:
             record = run_once(args.bench, args.out_dir, name, seed, args.rounds, ops, args.focus)
             record.update({"kind": kind, "seed": seed, "pass": number})
             records.append(record)
-            print(f"bench_diagnose: {index} of {len(runs)}: {name} {args.focus} {record['ops'][args.focus]['ratio']:.3f}", file=sys.stderr, flush=True)
+            # One line per run, so a cut-short diagnosis still has its data in the log.
+            shown = " ".join(f"{op} {record['ops'][op]['ratio']:.3f}" for op in (args.focus, "dict_keys_10", "dict_get_ordered_10", "dict_lookup_10", "string_byte_ascii") if op in record["ops"])
+            print(f"bench_diagnose: {index} of {len(runs)}: {name} {shown} z_ns {record['ops'][args.focus]['new_ns']:.1f} probe_total {sum(t['probe_total'] for t in record['layouts'])} key0 {record['layouts'][0]['table_key0']}", file=sys.stderr, flush=True)
     except (DiagnoseError, OSError, ValueError, KeyError) as error:
         print(f"bench_diagnose: {error}", file=sys.stderr)
         return 2

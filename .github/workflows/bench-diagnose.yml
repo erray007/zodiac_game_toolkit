@@ -36,6 +36,9 @@ on:
       os:
         description: "both, windows or linux"
         default: "both"
+      hooks:
+        description: "ON: a ZODIAC_TEST_HOOKS tree; OFF: the plain release tree the gate measures (then seeds must be 0)"
+        default: "ON"
 
 permissions:
   contents: read
@@ -48,6 +51,7 @@ env:
   OPS: ${{ inputs.ops || '' }}
   FOCUS: ${{ inputs.focus || 'dict_iterate_10' }}
   ALL: ${{ inputs.all || 'false' }}
+  HOOKS: ${{ inputs.hooks || 'ON' }}
 
 jobs:
   windows:
@@ -77,9 +81,9 @@ jobs:
         run: python bootstrap.py
       - name: Build bench_types with the test hooks
         run: |
-          .tools/cmake/bin/cmake --preset windows-release -B build/hooks -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --preset windows-release -B build/hooks "-DZODIAC_TEST_HOOKS=$env:HOOKS"
           .tools/cmake/bin/cmake --build build/hooks --target bench_types zodiac
-      - name: Show that the hooks tree holds the hook
+      - name: Show that the hooks tree holds the hook (or, with hooks OFF, that it does not)
         run: .tools/cmake/bin/ctest --test-dir build/hooks -R test_no_test_hooks --output-on-failure
       - name: Show the CPU
         shell: pwsh
@@ -132,7 +136,7 @@ jobs:
         run: python bootstrap.py
       - name: Build bench_types with the test hooks
         run: |
-          .tools/cmake/bin/cmake --preset linux-release -B build/hooks -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --preset linux-release -B build/hooks -DZODIAC_TEST_HOOKS=$HOOKS
           .tools/cmake/bin/cmake --build build/hooks --target bench_types zodiac
       - name: Show that the hooks tree holds the hook
         run: .tools/cmake/bin/ctest --test-dir build/hooks -R test_no_test_hooks --output-on-failure
