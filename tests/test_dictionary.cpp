@@ -165,7 +165,8 @@ void node_destroyed()
 TEST_CASE("dictionary is Zodiac's dictionary with style-C names only")
 {
 ScriptFixture fixture;
-CHECK(compiles(fixture,"dictionary d;d.set(\"a\",1);int64 i;d.get(\"a\",i);bool e=d.exists(\"a\");bool r=d.remove(\"a\");array<string>@ k=d.keys();int n=d.length();bool m=d.empty();d.clear();string s=d.serialize();bool ok=d.deserialize(s);dictionary_value v=d[\"a\"];dictionary c=d;c=d;"));
+CHECK(compiles(fixture,"dictionary d;d.set(\"a\",1);int64 i;d.get(\"a\",i);bool e=d.exists(\"a\");bool r=d.remove(\"a\");array<string>@ k=d.keys();int n=d.length();bool m=d.empty();d.clear();string s=d.serialize();bool ok=d.deserialize(s);dictionary_value v=d[\"a\"];dictionary c=d;c=d;"
+"bool b1=d.move_by(\"a\",1);bool b2=d.move(\"a\",0);int p=d.index_of(\"a\");string q=d.key_at(0);"));
 for(std::string_view call:{"getKeys()","isEmpty()","getSize()","delete(\"a\")","deleteAll()","size()","erase(\"a\")"}){
 CAPTURE(call);
 CHECK_FALSE(compiles(fixture,"dictionary d;d."+std::string(call)+";"));
@@ -215,6 +216,76 @@ CHECK(value_of(fixture,"dictionary d;for(int i=0;i<100;++i)d.set(\"k\"+i,i);for(
 CHECK(value_of(fixture,"dictionary d;for(int i=0;i<40;++i)d.set(\"k\"+i,i);d.clear();d.set(\"x\",1);d.set(\"y\",2);d.remove(\"x\");d.set(\"x\",3);return show(d)+\"|\"+d.length();")=="y,x|2");
 // keys() is a copy.
 CHECK(value_of(fixture,"dictionary d;d.set(\"a\",1);array<string>@ k=d.keys();d.set(\"b\",2);k.insert_last(\"z\");return show(d)+\"|\"+k.length();")=="a,b|2");
+}
+
+TEST_CASE("move_by moves a key by places, by one at either end, and refuses every impossible move")
+{
+ScriptFixture fixture;
+const std::string start="dictionary d;d.set(\"a\",1);d.set(\"b\",2);d.set(\"c\",3);d.set(\"d\",4);d.set(\"e\",5);string r;\n";
+// By one, at the ends and back.
+CHECK(value_of(fixture,start+"r+=d.move_by(\"a\",-1)+\":\"+show(d);r+=\"|\"+d.move_by(\"e\",1)+\":\"+show(d);"
+"r+=\"|\"+d.move_by(\"a\",1)+\":\"+show(d);r+=\"|\"+d.move_by(\"a\",-1)+\":\"+show(d);"
+"r+=\"|\"+d.move_by(\"e\",-1)+\":\"+show(d);r+=\"|\"+d.move_by(\"e\",1)+\":\"+show(d);return r;")
+=="false:a,b,c,d,e|false:a,b,c,d,e|true:b,a,c,d,e|true:a,b,c,d,e|true:a,b,c,e,d|true:a,b,c,d,e");
+// Long moves, exactly to either end and one place past it.
+CHECK(value_of(fixture,start+"r+=d.move_by(\"a\",4)+\":\"+show(d);r+=\"|\"+d.move_by(\"a\",-4)+\":\"+show(d);"
+"r+=\"|\"+d.move_by(\"a\",5)+\":\"+show(d);r+=\"|\"+d.move_by(\"c\",-3)+\":\"+show(d);r+=\"|\"+d.move_by(\"c\",3)+\":\"+show(d);"
+"r+=\"|\"+d.move_by(\"c\",-2)+\":\"+show(d);r+=\"|\"+d.move_by(\"b\",2)+\":\"+show(d);return r;")
+=="true:b,c,d,e,a|true:a,b,c,d,e|false:a,b,c,d,e|false:a,b,c,d,e|false:a,b,c,d,e|true:c,a,b,d,e|true:c,a,d,e,b");
+// A missing key, a zero delta, the int limits and a one-key or empty dictionary change nothing.
+CHECK(value_of(fixture,start+"r+=d.move_by(\"x\",1)+\",\"+d.move_by(\"c\",0)+\",\"+d.move_by(\"c\",2147483647)+\",\"+d.move_by(\"c\",int(0x80000000))+\":\"+show(d);"
+"dictionary one;one.set(\"k\",1);r+=\"|\"+one.move_by(\"k\",1)+\",\"+one.move_by(\"k\",-1)+\",\"+one.move(\"k\",0)+\":\"+show(one);"
+"dictionary none;r+=\"|\"+none.move_by(\"k\",1)+\",\"+none.move(\"k\",0)+\",\"+none.index_of(\"k\");return r;")
+=="false,false,false,false:a,b,c,d,e|false,false,true:k|false,false,-1");
+}
+
+TEST_CASE("move puts a key at an index, and index_of and key_at follow moves, removes and re-adds")
+{
+ScriptFixture fixture;
+const std::string start="dictionary d;d.set(\"a\",1);d.set(\"b\",2);d.set(\"c\",3);d.set(\"d\",4);d.set(\"e\",5);string r;\n";
+CHECK(value_of(fixture,start+"r+=d.move(\"a\",4)+\":\"+show(d);r+=\"|\"+d.move(\"a\",0)+\":\"+show(d);r+=\"|\"+d.move(\"d\",1)+\":\"+show(d);"
+"r+=\"|\"+d.move(\"b\",3)+\":\"+show(d);r+=\"|\"+d.move(\"c\",3)+\":\"+show(d);r+=\"|\"+d.move(\"e\",4)+\":\"+show(d);"
+"r+=\"|\"+d.move(\"x\",0)+\",\"+d.move(\"a\",-1)+\",\"+d.move(\"a\",5)+\":\"+show(d);return r;")
+=="true:b,c,d,e,a|true:a,b,c,d,e|true:a,d,b,c,e|true:a,d,c,b,e|true:a,d,b,c,e|true:a,d,b,c,e|false,false,false:a,d,b,c,e");
+CHECK(value_of(fixture,start+"d.move_by(\"e\",-4);d.remove(\"c\");d.set(\"c\",9);d.move(\"c\",1);d.remove(\"a\");d.set(\"f\",6);"
+"for(int i=0;i<d.length();++i){if(i>0)r+=\",\";r+=d.key_at(i)+\"=\"+d.index_of(d.key_at(i));}r+=\"|\"+d.index_of(\"a\")+\":\"+show(d);return r;")
+=="e=0,c=1,b=2,d=3,f=4|-1:e,c,b,d,f");
+// Against a script model of the order: thousands of random moves, removes and re-adds on a larger dictionary.
+CHECK(value_of(fixture,"return run();",
+"uint seed=7;\n"
+"int rnd(int n){seed=seed*1103515245+12345;return int((seed>>8)%uint(n));}\n"
+"string join(const array<string>&in a){string s;for(int i=0;i<a.length();++i){if(i>0)s+=\",\";s+=a[i];}return s;}\n"
+"bool consistent(const dictionary&in d,const array<string>&in m){if(show(d)!=join(m)||d.length()!=m.length())return false;"
+"for(int i=0;i<m.length();++i){if(d.key_at(i)!=m[i]||d.index_of(m[i])!=i)return false;}return true;}\n"
+"string run(){dictionary d;array<string> m;for(int i=0;i<60;++i){d.set(\"k\"+i,i);m.insert_last(\"k\"+i);}\n"
+"for(int step=0;step<4000;++step){\n"
+"if(m.length()==0||rnd(9)==0){string k=\"n\"+step;d.set(k,step);m.insert_last(k);continue;}\n"
+"int at=rnd(m.length());string k=m[at];int kind=rnd(4);\n"
+"if(kind==0){int delta=rnd(2)==0?rnd(3)-1:rnd(m.length()*2+1)-m.length();int to=at+delta;bool ok=d.move_by(k,delta);"
+"if(ok!=(delta!=0&&to>=0&&to<m.length()))return \"move_by \"+k+\" \"+delta;if(ok){m.remove_at(at);m.insert_at(to,k);}}\n"
+"else if(kind==1){int to=rnd(m.length()+2)-1;bool ok=d.move(k,to);if(ok!=(to>=0&&to<m.length()))return \"move \"+k+\" \"+to;if(ok){m.remove_at(at);m.insert_at(to,k);}}\n"
+"else if(kind==2){d.remove(k);m.remove_at(at);}\n"
+"else{if(d.index_of(k)!=at||d.key_at(at)!=k)return \"index \"+k;}\n"
+"if(step%97==0&&!consistent(d,m))return \"step \"+step;}\n"
+"return consistent(d,m)?\"ok\":\"end\";}\n")
+=="ok");
+}
+
+TEST_CASE("key_at and index_of misuse, and the moved order in serialize() and keys()")
+{
+ScriptFixture fixture;
+for(std::string_view call:{"string k=d.key_at(-1);","string k=d.key_at(3);","string k=d.key_at(2147483647);","string k=d.key_at(int(0x80000000));","d.clear();string k=d.key_at(0);"}){
+CAPTURE(call);
+CHECK(error_of(fixture,"dictionary d;d.set(\"a\",1);d.set(\"b\",2);d.set(\"c\",3);"+std::string(call))=="index out of range");
+}
+CHECK(value_of(fixture,"dictionary d;d.set(\"a\",1);d.set(\"b\",2);const dictionary@ c=d;return c.index_of(\"b\")+\",\"+c.index_of(\"z\")+\",\"+c.key_at(0);")=="1,-1,a");
+// The moved order is the order of serialize()'s lines, of keys() and of a deserialized copy, nested dictionaries included.
+CHECK(value_of(fixture,
+"dictionary d;d.set(\"a\",1);d.set(\"b\",\"two\");dictionary inner;inner.set(\"x\",1);inner.set(\"y\",2);inner.move_by(\"y\",-1);d.set(\"n\",@inner);d.set(\"c\",3.5);\n"
+"d.move(\"c\",0);d.move_by(\"a\",2);string s=d.serialize();dictionary e;bool ok=e.deserialize(s);\n"
+"dictionary@ back=cast<dictionary>(e[\"n\"]);\n"
+"return ok+\"|\"+show(d)+\"|\"+show(e)+\"|\"+show(back)+\"|\"+e.index_of(\"a\")+\"|\"+(e.serialize()==s)+\"|\"+s;")
+=="true|c,b,n,a|c,b,n,a|y,x|3|true|zodiac-dictionary 1\ndouble \"c\" 3.5\nstring \"b\" \"two\"\ndictionary \"n\" 2\nint64 \"y\" 2\nint64 \"x\" 1\nint64 \"a\" 1\n");
 }
 
 TEST_CASE("d[key] is a value proxy with conversions")

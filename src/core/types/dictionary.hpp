@@ -11,6 +11,16 @@
 //   bool exists(key), bool remove(key), array<string>@ keys() (insertion order), int length(), bool empty(), clear(),
 //   string serialize(), bool deserialize(text). dictionary_value: opAssign and opHndlAssign from any value or another
 //   dictionary_value, opConv/opCast to any type, int64 and double opConv.
+// - Order (for inventories and menus): positions are 0-based in the order keys(), iteration and serialize() follow, which a
+//   new key joins at the back. bool move_by(key, int delta) moves key delta places (negative: towards the front) and
+//   returns false, changing nothing, when key is missing, delta is 0 or the move would pass either end; it costs O(|delta|),
+//   so a move by one is O(1). bool move(key, int index) moves key so that it ends at index and returns false, changing
+//   nothing, when key is missing or index is outside [0, length()-1] (true when it is there already). int index_of(key)
+//   (-1 when missing) walks from the key towards both ends at once and stops at the first: min(i, length()-1-i) steps for a
+//   key at i, so the ends of the order are O(1). string key_at(int index) walks from the nearer end, the same
+//   min(index, length()-1-index) steps, and throws "index out of range" outside [0, length()-1]. move costs index_of's walk
+//   plus the shorter of the walks from the key and from the nearer end to index. None of them runs script code or
+//   allocates, and a remove or re-insert keeps the order of the other keys.
 // - Values: every integer type (and enums) is stored as int64 (uint64 bit for bit), float and double as double, bool as
 //   bool; objects as their own copy (a counted reference for handles, null handles included). An empty value (a key made
 //   by d[key]) has type id 0. Reading converts between all numeric types and bool (integers wrap, doubles truncate and
@@ -164,6 +174,12 @@ void put(const String& key,DictionaryValue& value);
 bool get(const String& key,void* out,int type_id) const;
 bool remove(const String& key) noexcept;
 void clear() noexcept;
+// The order operations of the contract (positions 0-based in the insertion-order chain).
+bool move_by(const String& key,int delta) noexcept;
+bool move(const String& key,int index) noexcept;
+int index_of(const String& key) const noexcept;
+// The key at index, or nullptr when index is outside [0, length()-1].
+const String* key_at(int index) const noexcept;
 // The keys in insertion order; nullptr after a raised failure.
 ScriptArray* keys() const;
 // Replaces the content with copies of other's; false after a raised failure (the content is then unchanged).
@@ -217,7 +233,16 @@ void add_segment();
 std::uint32_t insert_new(String&& key,std::uint64_t hash,DictionaryValue& value) noexcept;
 void erase_position(std::uint32_t position) noexcept;
 void link_last(std::uint32_t index) noexcept;
+// Link an unlinked entry just before or just after the live entry at.
+void link_before(std::uint32_t index,std::uint32_t at) noexcept;
+void link_after(std::uint32_t index,std::uint32_t at) noexcept;
 void unlink(std::uint32_t index) noexcept;
+// The position of a live entry in the order chain: min(position, live_-1-position) steps, walking towards both ends at once.
+std::uint32_t position_of(std::uint32_t index) const noexcept;
+// The live entry at position (< live_): min(position, live_-1-position) steps from the nearer end.
+std::uint32_t entry_at(std::uint32_t position) const noexcept;
+// The live entry steps places from index towards the front (backward) or the back, or no entry when the chain ends first.
+std::uint32_t walk(std::uint32_t index,std::uint32_t steps,bool backward) const noexcept;
 void free_entry(std::uint32_t index) noexcept;
 // Moves every entry of source (a private temporary) into this dictionary, replacing its content.
 void commit(Dictionary& source);

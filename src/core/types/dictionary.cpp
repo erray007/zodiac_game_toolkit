@@ -4,6 +4,7 @@
 #include <core/text.hpp>
 #include <core/types/array.hpp>
 #include <core/types/script_guard.hpp>
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cfloat>
@@ -592,6 +593,109 @@ if(item.prev!=no_entry)entry(item.prev).next=item.next;
 else first_=item.next;
 if(item.next!=no_entry)entry(item.next).prev=item.prev;
 else last_=item.prev;
+}
+
+void Dictionary::link_before(std::uint32_t index,std::uint32_t at) noexcept
+{
+Entry& item=entry(index);
+Entry& after=entry(at);
+item.prev=after.prev;
+item.next=at;
+if(after.prev!=no_entry)entry(after.prev).next=index;
+else first_=index;
+after.prev=index;
+}
+
+void Dictionary::link_after(std::uint32_t index,std::uint32_t at) noexcept
+{
+Entry& item=entry(index);
+Entry& before=entry(at);
+item.next=before.next;
+item.prev=at;
+if(before.next!=no_entry)entry(before.next).prev=index;
+else last_=index;
+before.next=index;
+}
+
+std::uint32_t Dictionary::position_of(std::uint32_t index) const noexcept
+{
+// Two independent chains, one per direction, so their loads overlap; the first to run out says where the entry is.
+const Entry& item=entry(index);
+std::uint32_t back=item.prev;
+std::uint32_t ahead=item.next;
+for(std::uint32_t steps=0;;++steps){
+if(back==no_entry)return steps;
+if(ahead==no_entry)return live_-1-steps;
+back=entry(back).prev;
+ahead=entry(ahead).next;
+}
+}
+
+std::uint32_t Dictionary::walk(std::uint32_t index,std::uint32_t steps,bool backward) const noexcept
+{
+if(backward){
+while(steps--&&index!=no_entry)index=entry(index).prev;
+}else{
+while(steps--&&index!=no_entry)index=entry(index).next;
+}
+return index;
+}
+
+std::uint32_t Dictionary::entry_at(std::uint32_t position) const noexcept
+{
+const std::uint32_t from_back=live_-1-position;
+return position<=from_back?walk(first_,position,false):walk(last_,from_back,true);
+}
+
+bool Dictionary::move_by(const String& key,int delta) noexcept
+{
+if(delta==0)return false;
+const std::uint32_t found=find_position(key,key.table_hash());
+if(found==no_entry)return false;
+const std::uint32_t index=index_[found].entry-1;
+const bool backward=delta<0;
+// |delta| without overflow at INT_MIN; a move past either end needs more places than there are other keys.
+const std::uint64_t places=backward?std::uint64_t{0}-static_cast<std::uint64_t>(static_cast<std::int64_t>(delta)):static_cast<std::uint64_t>(delta);
+if(places>=live_)return false;
+const std::uint32_t at=walk(index,static_cast<std::uint32_t>(places),backward);
+if(at==no_entry)return false;
+unlink(index);
+if(backward)link_before(index,at);
+else link_after(index,at);
+return true;
+}
+
+bool Dictionary::move(const String& key,int index) noexcept
+{
+if(index<0||static_cast<std::uint32_t>(index)>=live_)return false;
+const std::uint32_t found=find_position(key,key.table_hash());
+if(found==no_entry)return false;
+const std::uint32_t item=index_[found].entry-1;
+const std::uint32_t target=static_cast<std::uint32_t>(index);
+const std::uint32_t from=position_of(item);
+if(from==target)return true;
+// The entry now at target: from the key itself or from the nearer end, whichever walk is shorter.
+const bool backward=target<from;
+const std::uint32_t distance=backward?from-target:target-from;
+const std::uint32_t from_end=std::min(target,live_-1-target);
+const std::uint32_t at=distance<=from_end?walk(item,distance,backward):entry_at(target);
+unlink(item);
+// Moving back, the key goes before the entry at target; moving on, that entry slides back one place and the key follows it.
+if(backward)link_before(item,at);
+else link_after(item,at);
+return true;
+}
+
+int Dictionary::index_of(const String& key) const noexcept
+{
+const std::uint32_t found=find_position(key,key.table_hash());
+return found==no_entry?-1:static_cast<int>(position_of(index_[found].entry-1));
+}
+
+const String* Dictionary::key_at(int index) const noexcept
+{
+if(index<0||static_cast<std::uint32_t>(index)>=live_)return nullptr;
+return &entry(entry_at(static_cast<std::uint32_t>(index))).key;
 }
 
 void Dictionary::free_entry(std::uint32_t index) noexcept
@@ -1561,6 +1665,12 @@ ScriptArray* keys(const Dictionary& self)
 {
 return self.keys();
 }
+String key_at(const Dictionary& self,int index)
+{
+const String* key=self.key_at(index);
+if(!key)throw std::out_of_range("index out of range");
+return *key;
+}
 String serialize(const Dictionary& self)
 {
 return self.serialize();
@@ -1660,6 +1770,10 @@ method("void clear()",asMETHOD(Dictionary,clear),asCALL_THISCALL);
 method("int length() const",asMETHOD(Dictionary,length),asCALL_THISCALL);
 method("bool empty() const",asMETHOD(Dictionary,empty),asCALL_THISCALL);
 method("array<string>@ keys() const",asFUNCTION(guarded<&keys>::call),asCALL_CDECL_OBJFIRST);
+method("bool move_by(const string &in key, int delta)",asMETHOD(Dictionary,move_by),asCALL_THISCALL);
+method("bool move(const string &in key, int index)",asMETHOD(Dictionary,move),asCALL_THISCALL);
+method("int index_of(const string &in key) const",asMETHOD(Dictionary,index_of),asCALL_THISCALL);
+method("string key_at(int index) const",asFUNCTION(guarded<&key_at>::call),asCALL_CDECL_OBJFIRST);
 method("string serialize() const",asFUNCTION(guarded<&serialize>::call),asCALL_CDECL_OBJFIRST);
 method("bool deserialize(const string &in text)",asFUNCTION(guarded<&deserialize>::call),asCALL_CDECL_OBJFIRST);
 cache->dictionary_type=engine->GetTypeInfoByName("dictionary");

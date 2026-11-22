@@ -483,8 +483,9 @@ engine->RegisterObjectMethod("random_generator","int random(int,int)",asFUNCTION
 // The diagnostic pair (--diagnostic, never gated) splits iterate into its two parts: keys() alone, and get of every key in
 // insertion order from the setup's array.
 struct DictionarySnippets {
-std::string insert_name,lookup_name,iterate_name,keys_name,ordered_name;
-std::string zodiac_insert,addon_insert,zodiac_lookup,addon_lookup,zodiac_iterate,addon_iterate,zodiac_keys,addon_keys,zodiac_ordered,addon_ordered;
+std::string insert_name,lookup_name,iterate_name,move_by_name,index_of_name,keys_name,ordered_name;
+std::string zodiac_insert,addon_insert,zodiac_lookup,addon_lookup,zodiac_iterate,addon_iterate,zodiac_move_by,addon_move_by,zodiac_index_of,addon_index_of;
+std::string zodiac_keys,addon_keys,zodiac_ordered,addon_ordered;
 };
 
 DictionarySnippets dictionary_snippets(int size)
@@ -513,6 +514,21 @@ s.addon_lookup=addon_setup+lookup;
 // Every key and its value: keys() in Zodiac, getKeys() in the add-on, then get of each key.
 s.zodiac_iterate=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.keys();for(int i=0,c=k.length();i<c;++i){int64 v;table.get(k[i],v);n+=v;}}return n;}";
 s.addon_iterate=addon_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.getKeys();for(uint i=0,c=k.length();i<c;++i){int64 v;table.get(k[i],v);n+=v;}}return n;}";
+// The order operations (sizes 10 and 1000 only): the add-on dictionary has no order, so its side keeps the keys' order in an
+// array<string> as a script would, finding a key with find() and swapping it with its neighbour for a move by one.
+s.move_by_name="dict_move_by_"+count;
+s.index_of_name="dict_index_of_"+count;
+const std::string addon_order_setup="array<string> keys;array<string> probes;array<string> order;dictionary table;\n"
+"void setup(){keys.reserve(ITEMS);for(int i=0;i<ITEMS;++i){keys.insertLast(\"key\"+i);table.set(keys[i],int64(i));}probes=keys;order=keys;"
+"for(int i=ITEMS-1;i>0;--i){int j=next_random()%(i+1);string t=probes[i];probes[i]=probes[j];probes[j]=t;}}\n"
+"bool move_by(const string &in key,int delta){int at=order.find(key);if(at<0||delta==0)return false;int to=at+delta;if(to<0||to>=int(order.length()))return false;"
+"if(delta==1||delta==-1){string t=order[at];order[at]=order[to];order[to]=t;}else{order.removeAt(uint(at));order.insertAt(uint(to),key);}return true;}\n";
+// Every key moved by one, alternately towards the back and the front, in shuffled order (the order drifts the same way on both sides).
+s.zodiac_move_by=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){if(table.move_by(probes[i],(i&1)==0?1:-1))++n;}return n;}";
+s.addon_move_by=addon_order_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){if(move_by(probes[i],(i&1)==0?1:-1))++n;}return n;}";
+// The position of every key, in shuffled order.
+s.zodiac_index_of=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=table.index_of(probes[i]);return n;}";
+s.addon_index_of=addon_order_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=order.find(probes[i]);return n;}";
 s.keys_name="dict_keys_"+count;
 s.ordered_name="dict_get_ordered_"+count;
 s.zodiac_keys=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.keys();n+=k.length();}return n*ITEMS;}";
@@ -541,6 +557,10 @@ DictionarySnippets s=dictionary_snippets(size);
 jobs.push_back({s.insert_name,size,s.zodiac_insert,s.addon_insert});
 jobs.push_back({s.lookup_name,size,s.zodiac_lookup,s.addon_lookup});
 jobs.push_back({s.iterate_name,size,s.zodiac_iterate,s.addon_iterate});
+if(size<=1000){
+jobs.push_back({s.move_by_name,size,s.zodiac_move_by,s.addon_move_by});
+jobs.push_back({s.index_of_name,size,s.zodiac_index_of,s.addon_index_of});
+}
 extra.push_back({s.keys_name,size,s.zodiac_keys,s.addon_keys});
 extra.push_back({s.ordered_name,size,s.zodiac_ordered,s.addon_ordered});
 }
