@@ -29,9 +29,10 @@
 
 namespace zodiac::platform {
 // read and read_write open an existing file; create_truncate creates it or empties it; create_or_open creates it or keeps its bytes;
-// create_new creates it and fails with EEXIST when anything is there (O_EXCL, CREATE_NEW: never through a link).
+// create_new creates it and fails with EEXIST when anything is there (O_EXCL, CREATE_NEW: never through a link); create_private
+// is create_new with POSIX mode 0600 (a temporary file that takes another file's mode with copy_mode only once it is complete).
 // Every mode but read opens the file for writing too. Opening a folder fails with EISDIR in every mode.
-enum class FileAccess{read,read_write,create_truncate,create_or_open,create_new};
+enum class FileAccess{read,read_write,create_truncate,create_or_open,create_new,create_private};
 // Equal for two paths or handles of one file (links and other spellings included), different for different files.
 struct FileIdentity{
 std::uint64_t volume=0;
@@ -70,6 +71,12 @@ std::expected<void,std::error_code> truncate(std::uint64_t size) noexcept;
 std::expected<FileIdentity,std::error_code> identity() const noexcept;
 // Flushes the file's data and metadata to the device.
 bool sync() noexcept;
+// Flushes the file's written data (and what reading it back needs) to the device: fdatasync (fsync on macOS, whose fdatasync
+// is not a flush), FlushFileBuffers on Windows.
+std::expected<void,std::error_code> sync_data() noexcept;
+// POSIX: gives the file the permission bits of model (fchmod); nothing when model does not exist. Windows: nothing (a new file
+// takes its folder's inherited ACL).
+std::error_code copy_mode(const std::filesystem::path& model) noexcept;
 void close() noexcept;
 private:
 static constexpr std::intptr_t invalid_handle=-1;
@@ -125,12 +132,23 @@ std::error_code metadata;
 // Only the bytes are meant to carry over, as with a copy written byte by byte: to gets the current time as its modification time,
 // and Windows' copy of the time, of the read-only, hidden and system attributes and of the Zone.Identifier stream (the mark of the
 // web) is undone; other alternate data streams are copied as CopyFileExW copies them. Nothing is promised about to after a failure.
-// CopyFileExW refuses a hidden or system target with access denied. With create_new, to is made by the copy itself and must not
-// exist (EEXIST otherwise): O_EXCL, COPY_FILE_FAIL_IF_EXISTS; no identity is compared then, since a file the copy made cannot be
-// from. This is how the Vfs writes the temporary file it then renames over the target.
-CopyResult copy_file(const std::filesystem::path& from,const std::filesystem::path& to,bool create_new=false);
-// POSIX: gives path the permission bits of model (a file a replacement takes the place of), so a replaced file keeps them. Windows:
-// nothing (a new file takes its folder's inherited ACL, as one written in place keeps its own). Success when model is missing.
-std::error_code keep_permissions(const std::filesystem::path& model,const std::filesystem::path& path);
+// CopyFileExW refuses a hidden or system target with access denied.
+struct CopyOptions{
+// to is made by the copy itself and must not exist (EEXIST otherwise): O_EXCL (mode 0600 when mode_of exists), CopyFileExW's
+// COPY_FILE_FAIL_IF_EXISTS. No identity is compared then, since a file the copy made cannot be from. This is how the Vfs writes
+// the temporary file it then renames over the target.
+bool create_new=false;
+// POSIX: once the bytes are written, to takes this file's permission bits (fchmod; a failure fails the copy); nothing when it
+// does not exist. Windows: ignored.
+const std::filesystem::path* mode_of=nullptr;
+// Flushes to's data to the device before returning (File::sync_data's calls).
+bool sync=false;
+};
+CopyResult copy_file(const std::filesystem::path& from,const std::filesystem::path& to,const CopyOptions& options={});
+// Removes a file even when it is read-only (Windows clears FILE_ATTRIBUTE_READONLY first; POSIX needs nothing).
+std::error_code discard_file(const std::filesystem::path& path);
+// POSIX: fsyncs folder path, so a rename or a new name in it reaches the device. Windows: nothing (NTFS journals its metadata, and
+// a folder handle cannot be flushed without the backup privilege).
+std::error_code sync_directory(const std::filesystem::path& path);
 std::filesystem::path user_data_folder();
 }

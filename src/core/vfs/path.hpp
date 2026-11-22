@@ -19,8 +19,10 @@
 //   on such a path fail with is_directory; folder operations and mount points accept it.
 // Each <path> in a message is the path as given, through one_line. Path-rule failures are never wrapped in another message.
 #pragma once
+#include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -44,8 +46,18 @@ std::expected<VfsPath,std::string> parse_path(std::string_view path,bool host_pa
 bool valid_name(std::string_view name) noexcept;
 // The start of the name of every temporary file the Vfs writes next to a file it replaces (write_file, copies).
 inline constexpr std::string_view temp_prefix=".zodiac-tmp-";
-// True when name begins with temp_prefix, ASCII case-insensitively.
+// True when name begins with temp_prefix, ASCII case-insensitively (hidden from scripts).
 bool is_temp_name(std::string_view name) noexcept;
+// The name the Vfs gives a temporary file: temp_prefix, 16 lowercase hexadecimal digits (the creation time in seconds since 1970
+// UTC, as 8 digits, then 8 random ones) and ".tmp". Only names of exactly this form are ever removed as a crash's leftovers.
+std::string make_temp_name(std::int64_t unix_seconds,std::uint32_t random);
+// The creation time (seconds since 1970 UTC) of a name of make_temp_name's exact form; nullopt for any other name.
+std::optional<std::int64_t> temp_name_time(std::string_view name) noexcept;
+// The temporary files this process is writing, by name (a name is unique: its time and random digits): the Vfs holds each from
+// before it is made until it is renamed or removed, and a scan never removes a held one. Thread-safe.
+void hold_temp(const std::string& name);
+void release_temp(const std::string& name) noexcept;
+bool temp_held(std::string_view name);
 // The case fold of UTF-8 text: unicode::to_upper (Unicode simple uppercase, as NTFS's upcase table) per code point. Bytes that are
 // not well-formed UTF-8 are kept as they are, and nothing is normalized (NFC and NFD spellings stay different).
 std::string fold_name(std::string_view utf8);

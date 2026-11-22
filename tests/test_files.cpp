@@ -152,6 +152,7 @@ std::optional<FileError> fail_remove;
 // A write target fails once it has taken this many bytes in all; a reader fails reading at or past this offset.
 std::optional<std::uint64_t> fail_write_after;
 std::optional<std::uint64_t> fail_read_at;
+int syncs=0;
 std::expected<zodiac::vfs::EntryInfo,FileError> stat(std::string_view relative) override
 {
 zodiac::vfs::EntryInfo info;
@@ -253,6 +254,12 @@ std::expected<void,FileError> commit() override
 {
 if(source_.fail_commit)return std::unexpected(*source_.fail_commit);
 source_.files[name_]=bytes_;
+return {};
+}
+// Memory has no device to flush to; the count shows the flush was asked for.
+std::expected<void,FileError> sync() override
+{
+++source_.syncs;
 return {};
 }
 private:
@@ -843,14 +850,58 @@ const fs::path root=fixture.root();
 CHECK(text_of(fixture,"bool written=write_file(\".zodiac-tmp-mine.tmp\", \"x\"); return written+\",\"+last_file_error();")=="false,\".zodiac-tmp-mine.tmp\" is not a valid file name");
 CHECK(text_of(fixture,"bool written=write_file(\"sub/.ZODIAC-TMP-x\", \"x\"); return written+\",\"+last_file_error();")=="false,\"sub/.ZODIAC-TMP-x\" is not a valid file name");
 CHECK(holds(fixture,"return write_file(\".zodiac-tmpx\", \"not reserved\")&&write_file(\"zodiac-tmp-y\", \"not reserved\");"));
-// A day-old leftover is removed when the folder is next scanned; a fresh one (a write in progress) is kept. Neither is listed.
-put(root/".zodiac-tmp-0123456789abcdef.tmp","left by a crash");
-put(root/".zodiac-tmp-fedcba9876543210.tmp","being written");
-fs::last_write_time(root/".zodiac-tmp-0123456789abcdef.tmp",fs::file_time_type::clock::now()-std::chrono::hours(48));
+// The generated form is exact: the prefix, 8 hex digits of the creation time, 8 random ones, ".tmp".
+CHECK(zodiac::vfs::make_temp_name(0x01234567,0x89abcdef)==".zodiac-tmp-0123456789abcdef.tmp");
+CHECK(zodiac::vfs::temp_name_time(".zodiac-tmp-0123456789abcdef.tmp")==std::optional<std::int64_t>(0x01234567));
+CHECK_FALSE(zodiac::vfs::temp_name_time(".zodiac-tmp-0123456789ABCDEF.tmp"));
+CHECK_FALSE(zodiac::vfs::temp_name_time(".ZODIAC-TMP-0123456789abcdef.tmp"));
+CHECK_FALSE(zodiac::vfs::temp_name_time(".zodiac-tmp-0123456789abcde.tmp"));
+CHECK_FALSE(zodiac::vfs::temp_name_time(".zodiac-tmp-notes.txt"));
+// At the next scan: a leftover made two days ago (by its name) goes, whatever its file time; one made now stays even with an old
+// file time (CopyFileExW gives the temporary file its source's time); one this process holds stays however old; a name of another
+// form stays, even with the prefix. None is listed.
+const auto now_s=zodiac::platform::utc_now_ms()/1000;
+const std::string crashed=zodiac::vfs::make_temp_name(now_s-2*86400,1);
+const std::string copying=zodiac::vfs::make_temp_name(now_s,2);
+const std::string held=zodiac::vfs::make_temp_name(now_s-2*86400,3);
+const auto old_time=fs::file_time_type::clock::now()-std::chrono::hours(48);
+for(const std::string& name:{crashed,copying,held,std::string(".zodiac-tmp-notes.txt")}){
+put(root/name,"temporary");
+fs::last_write_time(root/name,old_time);
+}
+zodiac::vfs::hold_temp(held);
 CHECK(text_of(fixture,"return join(list_files(\"/\"), \"|\");")==".zodiac-tmpx|zodiac-tmp-y");
-CHECK_FALSE(fs::exists(root/".zodiac-tmp-0123456789abcdef.tmp"));
-CHECK(fs::exists(root/".zodiac-tmp-fedcba9876543210.tmp"));
-CHECK_FALSE(holds(fixture,"return file_exists(\".zodiac-tmp-fedcba9876543210.tmp\");"));
+zodiac::vfs::release_temp(held);
+CHECK_FALSE(fs::exists(root/crashed));
+CHECK(fs::exists(root/copying));
+CHECK(fs::exists(root/held));
+CHECK(fs::exists(root/".zodiac-tmp-notes.txt"));
+CHECK_FALSE(holds(fixture,"return file_exists(\""+copying+"\")||file_exists(\".zodiac-tmp-notes.txt\");"));
+}
+
+TEST_CASE("sync flushes saves and open files")
+{
+ScriptFixture fixture;
+auto memory=std::make_shared<MemorySource>();
+REQUIRE(fixture.vfs.mount("mem",memory,true,nullptr));
+CHECK(holds(fixture,"return write_file(\"s.txt\", \"synced\", true)&&read_file(\"s.txt\")==\"synced\";"));
+CHECK(holds(fixture,"return write_file(\"s.txt\", \"again\", true)&&read_file(\"s.txt\")==\"again\";"));
+CHECK(holds(fixture,"return copy_file(\"s.txt\", \"data:/s.txt\", true)&&read_file(\"data:/s.txt\")==\"again\";"));
+CHECK(holds(fixture,"return move_file(\"data:/s.txt\", \"moved.txt\", true)&&read_file(\"moved.txt\")==\"again\"&&!file_exists(\"data:/s.txt\");"));
+CHECK(temp_files(fixture.root()).empty());
+// Without host files the flush is the write target's.
+CHECK(holds(fixture,"return write_file(\"mem/a.txt\", \"x\", true)&&copy_file(\"s.txt\", \"mem/b.txt\", true)&&move_file(\"moved.txt\", \"mem/c.txt\", true);"));
+CHECK(memory->syncs==3);
+CHECK(memory->files.at("c.txt")=="again");
+CHECK(holds(fixture,"return write_file(\"mem/d.txt\", \"x\")&&copy_file(\"s.txt\", \"mem/e.txt\");"));
+CHECK(memory->syncs==3);
+// file.sync(): what was written so far reaches the device; nothing to do for "r"; misuse when closed.
+CHECK(text_of(fixture,"file f; f.open(\"w.txt\", \"w\"); f.write(\"part\"); bool a=f.sync(); f.write(\" more\"); bool b=f.sync(); f.close(); return a+\",\"+b+\",\"+read_file(\"w.txt\");")=="true,true,part more");
+CHECK(holds(fixture,"file f; f.open(\"w.txt\", \"r\"); return f.sync()&&f.error==\"\";"));
+CHECK(holds(fixture,"file f; f.open(\"mem/f.txt\", \"w\"); f.write(\"x\"); return f.sync();"));
+CHECK(memory->syncs==4);
+CHECK(error_of(fixture,"file f; f.sync();")=="file is not open");
+CHECK(error_of(fixture,"file f; f.open(\"w.txt\", \"r\"); f.close(); f.sync();")=="file is not open");
 }
 
 #ifdef _WIN32
@@ -896,5 +947,18 @@ CHECK(text_of(fixture,"bool copied=copy_file(\"web.bin\", \"hidden.bin\"); retur
 REQUIRE(SetFileAttributesW((root/"hidden.bin").c_str(),FILE_ATTRIBUTE_SYSTEM));
 CHECK(holds(fixture,"return write_file(\"web2.bin\", \"second\")&&copy_file(\"web2.bin\", \"hidden.bin\")&&read_file(\"hidden.bin\")==\"second\";"));
 SetFileAttributesW((root/"hidden.bin").c_str(),FILE_ATTRIBUTE_NORMAL);
+// A read-only source: CopyFileExW copies the attribute to the temporary file, which is cleared before the rename.
+put(root/"locked.bin","read only");
+REQUIRE(SetFileAttributesW((root/"locked.bin").c_str(),FILE_ATTRIBUTE_READONLY));
+CHECK(holds(fixture,"return copy_file(\"locked.bin\", \"unlocked.bin\")&&read_file(\"unlocked.bin\")==\"read only\"&&write_file(\"unlocked.bin\", \"writable\");"));
+CHECK((GetFileAttributesW((root/"unlocked.bin").c_str())&FILE_ATTRIBUTE_READONLY)==0);
+CHECK(temp_files(root).empty());
+// A read-only target cannot be replaced (as it cannot be written in place): the copy fails, the target and source stay, and the
+// read-only temporary file is still removed.
+CHECK(text_of(fixture,"bool copied=copy_file(\"web.bin\", \"locked.bin\"); return copied+\",\"+last_file_error()+\",\"+read_file(\"locked.bin\");")=="false,cannot write \"locked.bin\": access denied,read only");
+CHECK(text_of(fixture,"bool copied=copy_file(\"locked.bin\", \"locked2.bin\"); bool again=copy_file(\"web.bin\", \"locked2.bin\"); return copied+\",\"+again;")=="true,true");
+CHECK(temp_files(root).empty());
+CHECK(zodiac::platform::discard_file(root/"locked.bin").value()==0);
+CHECK_FALSE(fs::exists(root/"locked.bin"));
 }
 #endif

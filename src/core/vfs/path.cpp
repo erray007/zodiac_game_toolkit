@@ -3,7 +3,10 @@
 #include <core/text.hpp>
 #include <core/types/unicode.hpp>
 #include <cstdint>
+#include <mutex>
+#include <string>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 
 namespace zodiac::vfs {
@@ -184,6 +187,58 @@ const char c=name[i];
 if((c>='A'&&c<='Z'?static_cast<char>(c+32):c)!=temp_prefix[i])return false;
 }
 return true;
+}
+
+namespace {
+constexpr char hex_digits[]="0123456789abcdef";
+constexpr std::string_view temp_suffix=".tmp";
+std::mutex held_mutex;
+std::unordered_set<std::string>& held_temps()
+{
+static std::unordered_set<std::string> names;
+return names;
+}
+}
+
+std::string make_temp_name(std::int64_t unix_seconds,std::uint32_t random)
+{
+std::string name(temp_prefix);
+const auto seconds=static_cast<std::uint32_t>(unix_seconds);
+for(int shift=28;shift>=0;shift-=4)name.push_back(hex_digits[(seconds>>shift)&0xF]);
+for(int shift=28;shift>=0;shift-=4)name.push_back(hex_digits[(random>>shift)&0xF]);
+name.append(temp_suffix);
+return name;
+}
+
+std::optional<std::int64_t> temp_name_time(std::string_view name) noexcept
+{
+if(name.size()!=temp_prefix.size()+16+temp_suffix.size()||!name.starts_with(temp_prefix)||!name.ends_with(temp_suffix))return std::nullopt;
+std::uint32_t seconds=0;
+for(std::size_t i=0;i<16;++i){
+const char c=name[temp_prefix.size()+i];
+const int digit=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:-1;
+if(digit<0)return std::nullopt;
+if(i<8)seconds=(seconds<<4)|static_cast<std::uint32_t>(digit);
+}
+return static_cast<std::int64_t>(seconds);
+}
+
+void hold_temp(const std::string& name)
+{
+const std::lock_guard lock(held_mutex);
+held_temps().insert(name);
+}
+
+void release_temp(const std::string& name) noexcept
+{
+const std::lock_guard lock(held_mutex);
+held_temps().erase(name);
+}
+
+bool temp_held(std::string_view name)
+{
+const std::lock_guard lock(held_mutex);
+return held_temps().contains(std::string(name));
 }
 
 bool valid_name(std::string_view name) noexcept

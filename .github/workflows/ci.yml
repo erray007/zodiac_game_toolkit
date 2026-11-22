@@ -42,8 +42,11 @@ jobs:
       - name: Show that the file link test ran
         shell: pwsh
         run: |
-          & build/windows-debug/tests/test_files.exe "--test-case=a link moved or copied*"
+          $out = & build/windows-debug/tests/test_files.exe "--test-case=a link moved or copied*" 2>&1 | Out-String
+          Write-Output $out
           if ($LASTEXITCODE -ne 0) { throw "test_files failed with exit code $LASTEXITCODE" }
+          # A renamed test would match no case and pass: the line itself must be there.
+          if (-not $out.Contains("link test ran with a real symbolic link")) { throw "the link test did not run" }
       # AngelScript's number literal scanner (cmake/patches/angelscript-exact-literals.patch): which way this build reads literals, then its strtod_l
       # fallback and the branch for a null "C" locale handle, which a toolchain with a correctly rounded floating-point from_chars never compiles:
       # test_script_literals alone, built with ZODIAC_AS_STRTOD_FALLBACK in a tree of its own that reuses the sources the step above fetched and patched.
@@ -149,7 +152,10 @@ jobs:
         run: .tools/cmake/bin/cmake --workflow --preset linux
       # As in the windows job.
       - name: Show that the file link test ran
-        run: build/linux-debug/tests/test_files "--test-case=a link moved or copied*"
+        run: |
+          set -o pipefail
+          build/linux-debug/tests/test_files "--test-case=a link moved or copied*" | tee link-test.txt
+          grep -q "link test ran with a real symbolic link" link-test.txt || { echo "::error::the link test did not run"; exit 1; }
       # As in the windows job. The null-handle test needs a locale whose decimal point is a comma.
       - name: Test the literal scanner fallback
         run: |

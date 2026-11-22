@@ -55,6 +55,11 @@ size_=size;
 return {};
 }
 std::expected<void,FileError> commit() override{return {};}
+std::expected<void,FileError> sync() override
+{
+if(auto synced=file_.sync_data();!synced)return std::unexpected(detail::file_error(synced.error()));
+return {};
+}
 private:
 platform::File file_;
 std::uint64_t size_;
@@ -315,10 +320,11 @@ names->names.reserve(entries.size());
 for(platform::DirectoryEntry& entry:entries){
 if(entry.kind!=platform::NodeKind::file&&entry.kind!=platform::NodeKind::directory)continue;
 if(!valid_name(entry.name)){
-// A temporary file of a write or copy that a crash interrupted: unchanged for stale_temp_ns, so no writer still has it.
-if(!read_only_&&entry.kind==platform::NodeKind::file&&!entry.link&&is_temp_name(entry.name)){
-const fs::path temp=folder/path_from_utf8(entry.name);
-if(const auto node=platform::stat_path(temp);node&&scanned_ns-node->modified_utc_ns>stale_temp_ns)platform::remove_file(temp);
+// A temporary file of a write or copy that a crash interrupted: only the exact generated form, made over stale_temp_ns ago by its
+// name's own time (any process's, whatever its modification time says) and not held by a write of this process.
+if(!read_only_&&entry.kind==platform::NodeKind::file&&!entry.link){
+const std::optional<std::int64_t> made=temp_name_time(entry.name);
+if(made&&scanned_ns/1000000000-*made>stale_temp_ns/1000000000&&!temp_held(entry.name))platform::discard_file(folder/path_from_utf8(entry.name));
 }
 continue;
 }

@@ -103,6 +103,9 @@ virtual std::expected<void,FileError> write_at(std::uint64_t offset,std::span<co
 virtual std::uint64_t size() const=0;
 virtual std::expected<void,FileError> truncate(std::uint64_t size)=0;
 virtual std::expected<void,FileError> commit()=0;
+// Flushes what has been written so far (and, after commit, the stored entry) to the device, so it survives a crash of the system:
+// a folder's file is File::sync_data. A source must really flush here, or fail; it may never report a flush it did not make.
+virtual std::expected<void,FileError> sync()=0;
 };
 // A failure about one of two paths (rename, copy, move): to is false for the first (from), true for the second (to).
 struct MoveError{
@@ -200,13 +203,16 @@ std::expected<bool,MoveFailure> rename(std::string_view from,std::string_view to
 // - to anything else: open_write (truncate) in 256 KiB pieces, then commit, which a source without host files makes the moment
 //   the entry changes (Source::host_file).
 // from and to being one file (by identity, when both are host files) is a success that changes nothing.
-std::expected<void,MoveFailure> copy(std::string_view from,std::string_view to);
+// With sync, the copy's bytes reach the device before the rename (and, POSIX, the folder's new entry after it), or before commit
+// returns for a target without host files (WriteTarget::sync after commit).
+std::expected<void,MoveFailure> copy(std::string_view from,std::string_view to,bool sync=false);
 // Replaces file path with bytes as copy does: to a host file through a temporary file and a rename, else through open_write
-// (truncate) and commit. Failures as open_write's.
-std::expected<void,Failure> write_file(std::string_view path,std::span<const std::byte> bytes);
+// (truncate) and commit. Failures as open_write's. sync as for copy.
+std::expected<void,Failure> write_file(std::string_view path,std::span<const std::byte> bytes,bool sync=false);
 // rename, else copy then remove(from). A copy that finds one file on both sides removes nothing. A failed remove after the copy
 // is MoveFailure::removing (both files are then there).
-std::expected<void,MoveFailure> move(std::string_view from,std::string_view to);
+// sync only concerns that copy: a rename moves no data.
+std::expected<void,MoveFailure> move(std::string_view from,std::string_view to,bool sync=false);
 // The names in folder path of the kind asked for that match pattern ('*' any run, '?' one character), name and pattern compared by
 // fold_name; sorted by fold, then by bytes, without duplicates.
 std::expected<std::vector<std::string>,Failure> list(std::string_view path,ListKind kind,std::string_view pattern="*");
@@ -261,7 +267,7 @@ void written(std::string_view path,const VfsPath& p,const End& end) noexcept;
 // Dev mode: a system copy whose bytes are right but whose metadata reset failed (platform::CopyResult::metadata). Never throws.
 void warn_copy_metadata(std::string_view path,const std::error_code& error) const noexcept;
 // copy; true when from and to turned out to be one file (nothing was written).
-std::expected<bool,MoveFailure> copy_file(std::string_view from,std::string_view to);
+std::expected<bool,MoveFailure> copy_file(std::string_view from,std::string_view to,bool sync);
 // Calls visit(Target) for the mounts covering p, newest first, until it returns true; returns whether one did. Allocates nothing
 // unless a mount point below the root has to be compared by fold.
 template<class Visit>

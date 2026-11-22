@@ -142,6 +142,7 @@ String read_count(std::int64_t count);
 String read_line();
 bool write(std::string_view data);
 bool seek(std::int64_t position) noexcept;
+bool sync();
 void close() noexcept;
 bool is_open() const noexcept{return reader_||writer_;}
 std::int64_t size() const noexcept{return static_cast<std::int64_t>(size_);}
@@ -427,6 +428,22 @@ error_.clear();
 return true;
 }
 
+// Flushes what was written to the device. A file opened "r" has written nothing: nothing to flush.
+bool ScriptFile::sync()
+{
+if(!is_open()){
+raise_script_exception(kNotOpen);
+return false;
+}
+if(!writer_)return true;
+if(auto synced=writer_->sync();!synced){
+error_=vfs::write_failure_text(path_,Failure{synced.error(),{}});
+return false;
+}
+error_.clear();
+return true;
+}
+
 bool ScriptFile::seek(std::int64_t position) noexcept
 {
 if(!is_open()){
@@ -489,6 +506,10 @@ bool file_eof(const ScriptFile& file) noexcept
 {
 return file.eof();
 }
+bool file_sync(ScriptFile& file)
+{
+return file.sync();
+}
 bool file_seek(ScriptFile& file,std::int64_t position) noexcept
 {
 return file.seek(position);
@@ -545,10 +566,10 @@ raise_current_exception();
 }
 return String();
 }
-bool write_file(const String& path,const String& data) noexcept
+bool write_file(const String& path,const String& data,bool sync) noexcept
 {
 // Through a temporary file and a rename (Vfs::write_file): the file is the old one or the new one, never a part.
-const auto written=vfs_.write_file(path.bytes(),bytes_of(data.bytes()));
+const auto written=vfs_.write_file(path.bytes(),bytes_of(data.bytes()),sync);
 return written?succeeded():failed(FileAction::write,path.bytes(),written.error());
 }
 bool append_file(const String& path,const String& data) noexcept
@@ -560,14 +581,14 @@ bool delete_file(const String& path) noexcept
 const auto removed=vfs_.remove(path.bytes());
 return removed?succeeded():failed(FileAction::remove,path.bytes(),removed.error());
 }
-bool copy_file(const String& from,const String& to) noexcept
+bool copy_file(const String& from,const String& to,bool sync) noexcept
 {
-const auto copied=vfs_.copy(from.bytes(),to.bytes());
+const auto copied=vfs_.copy(from.bytes(),to.bytes(),sync);
 return copied?succeeded():failed(from.bytes(),to.bytes(),copied.error());
 }
-bool move_file(const String& from,const String& to) noexcept
+bool move_file(const String& from,const String& to,bool sync) noexcept
 {
-const auto moved=vfs_.move(from.bytes(),to.bytes());
+const auto moved=vfs_.move(from.bytes(),to.bytes(),sync);
 return moved?succeeded():failed(from.bytes(),to.bytes(),moved.error());
 }
 std::int64_t file_size(const String& path) noexcept
@@ -714,6 +735,7 @@ method(engine,"int64 get_size() const property",asFUNCTION(file_get_size));
 method(engine,"int64 get_position() const property",asFUNCTION(file_position));
 method(engine,"bool get_eof() const property",asFUNCTION(file_eof));
 method(engine,"bool seek(int64 position)",asFUNCTION(file_seek));
+method(engine,"bool sync()",asFUNCTION(guarded<&file_sync>::call));
 method(engine,"void close()",asFUNCTION(file_close));
 method(engine,"bool get_is_open() const property",asFUNCTION(file_is_open));
 method(engine,"string get_error() const property",asFUNCTION(guarded<&file_error>::call));
@@ -721,11 +743,11 @@ method(engine,"string get_error() const property",asFUNCTION(guarded<&file_error
 helper(engine,library,"bool file_exists(const string &in path)",asMETHOD(FileLibrary,file_exists));
 helper(engine,library,"bool directory_exists(const string &in path)",asMETHOD(FileLibrary,directory_exists));
 helper(engine,library,"string read_file(const string &in path)",asMETHOD(FileLibrary,read_file));
-helper(engine,library,"bool write_file(const string &in path, const string &in data)",asMETHOD(FileLibrary,write_file));
+helper(engine,library,"bool write_file(const string &in path, const string &in data, bool sync = false)",asMETHOD(FileLibrary,write_file));
 helper(engine,library,"bool append_file(const string &in path, const string &in data)",asMETHOD(FileLibrary,append_file));
 helper(engine,library,"bool delete_file(const string &in path)",asMETHOD(FileLibrary,delete_file));
-helper(engine,library,"bool copy_file(const string &in from, const string &in to)",asMETHOD(FileLibrary,copy_file));
-helper(engine,library,"bool move_file(const string &in from, const string &in to)",asMETHOD(FileLibrary,move_file));
+helper(engine,library,"bool copy_file(const string &in from, const string &in to, bool sync = false)",asMETHOD(FileLibrary,copy_file));
+helper(engine,library,"bool move_file(const string &in from, const string &in to, bool sync = false)",asMETHOD(FileLibrary,move_file));
 helper(engine,library,"int64 file_size(const string &in path)",asMETHOD(FileLibrary,file_size));
 helper(engine,library,"date_time file_modified(const string &in path)",asMETHOD(FileLibrary,file_modified));
 helper(engine,library,"bool create_directory(const string &in path, bool recursive = true)",asMETHOD(FileLibrary,create_directory));

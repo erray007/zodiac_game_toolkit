@@ -184,6 +184,7 @@ desired|=GENERIC_WRITE;
 disposition=OPEN_ALWAYS;
 break;
 case FileAccess::create_new:
+case FileAccess::create_private:
 desired|=GENERIC_WRITE;
 disposition=CREATE_NEW;
 break;
@@ -260,6 +261,17 @@ return identity_of(handle_of(handle_));
 bool File::sync() noexcept
 {
 return FlushFileBuffers(handle_of(handle_))!=0;
+}
+
+std::expected<void,std::error_code> File::sync_data() noexcept
+{
+if(!FlushFileBuffers(handle_of(handle_)))return std::unexpected(last_error());
+return {};
+}
+
+std::error_code File::copy_mode(const fs::path&) noexcept
+{
+return {};
 }
 
 void File::close() noexcept
@@ -481,13 +493,24 @@ return error;
 }
 }
 
-std::error_code keep_permissions(const fs::path&,const fs::path&)
+std::error_code discard_file(const fs::path& path)
+{
+const NativePath name(path);
+// DeleteFileW refuses a read-only file (CopyFileExW copies the attribute from its source).
+const DWORD attributes=GetFileAttributesW(name.c_str());
+if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_READONLY))SetFileAttributesW(name.c_str(),attributes&~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
+if(!DeleteFileW(name.c_str()))return last_error();
+return {};
+}
+
+std::error_code sync_directory(const fs::path&)
 {
 return {};
 }
 
-CopyResult copy_file(const fs::path& from,const fs::path& to,bool create_new)
+CopyResult copy_file(const fs::path& from,const fs::path& to,const CopyOptions& options)
 {
+const bool create_new=options.create_new;
 CopyResult result;
 const NativePath source(from);
 const NativePath target(to);
@@ -540,6 +563,10 @@ result.from_failed=GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES;
 return result;
 }
 result.metadata=reset_copy(to,target);
+if(options.sync){
+const OwnedHandle written{CreateFileW(target.c_str(),GENERIC_WRITE,share_all,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)};
+if(written.handle==INVALID_HANDLE_VALUE||!FlushFileBuffers(written.handle))result.error=last_error();
+}
 return result;
 }
 

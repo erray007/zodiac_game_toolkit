@@ -72,12 +72,14 @@ case FileAccess::create_or_open:
 flags|=O_RDWR|O_CREAT;
 break;
 case FileAccess::create_new:
+case FileAccess::create_private:
 flags|=O_RDWR|O_CREAT|O_EXCL;
 break;
 }
+const mode_t mode=access==FileAccess::create_private?0600:0666;
 int fd;
 do{
-fd=::open(path.c_str(),flags,0666);
+fd=::open(path.c_str(),flags,mode);
 }while(fd<0&&errno==EINTR);
 if(fd<0)return std::unexpected(errno_code(errno));
 // A folder opens read-only on POSIX; a device, FIFO or socket is no file either.
@@ -149,6 +151,43 @@ return identity_of(info);
 bool File::sync() noexcept
 {
 return ::fsync(static_cast<int>(handle_))==0;
+}
+
+namespace {
+int sync_descriptor(int fd) noexcept
+{
+int result;
+do{
+#ifdef __APPLE__
+result=::fsync(fd);
+#else
+result=::fdatasync(fd);
+#endif
+}while(result!=0&&errno==EINTR);
+return result==0?0:errno;
+}
+int copy_mode_of(int fd,const fs::path& model) noexcept
+{
+struct stat info;
+if(::stat(model.c_str(),&info)!=0)return errno==ENOENT?0:errno;
+int result;
+do{
+result=::fchmod(fd,info.st_mode&07777);
+}while(result!=0&&errno==EINTR);
+return result==0?0:errno;
+}
+}
+
+std::expected<void,std::error_code> File::sync_data() noexcept
+{
+if(const int error=sync_descriptor(static_cast<int>(handle_)))return std::unexpected(errno_code(error));
+return {};
+}
+
+std::error_code File::copy_mode(const fs::path& model) noexcept
+{
+const int error=copy_mode_of(static_cast<int>(handle_),model);
+return error?errno_code(error):std::error_code();
 }
 
 void File::close() noexcept
@@ -294,11 +333,11 @@ fd=-1;
 return result==0||errno==EINTR?0:errno;
 }
 };
-int open_retry(const fs::path& path,int flags) noexcept
+int open_retry(const fs::path& path,int flags,mode_t mode=0666) noexcept
 {
 int fd;
 do{
-fd=::open(path.c_str(),flags,0666);
+fd=::open(path.c_str(),flags,mode);
 }while(fd<0&&errno==EINTR);
 return fd;
 }
@@ -369,16 +408,27 @@ return 0;
 }
 }
 
-std::error_code keep_permissions(const fs::path& model,const fs::path& path)
+std::error_code discard_file(const fs::path& path)
 {
-struct stat info;
-if(::stat(model.c_str(),&info)!=0)return errno==ENOENT?std::error_code():errno_code(errno);
-if(::chmod(path.c_str(),info.st_mode&07777)!=0)return errno_code(errno);
+return remove_file(path);
+}
+
+std::error_code sync_directory(const fs::path& path)
+{
+Descriptor folder{open_retry(path,O_RDONLY|O_CLOEXEC|O_DIRECTORY)};
+if(folder.fd<0)return errno_code(errno);
+int result;
+do{
+result=::fsync(folder.fd);
+}while(result!=0&&errno==EINTR);
+// Some file systems cannot sync a folder; the rename itself is then as durable as they make it.
+if(result!=0&&errno!=EINVAL&&errno!=EROFS)return errno_code(errno);
 return {};
 }
 
-CopyResult copy_file(const fs::path& from,const fs::path& to,bool create_new)
+CopyResult copy_file(const fs::path& from,const fs::path& to,const CopyOptions& options)
 {
+const bool create_new=options.create_new;
 CopyResult result;
 const auto fail=[&result](int error){
 result.error=errno_code(error);
@@ -393,7 +443,9 @@ if(!S_ISREG(info.st_mode))return fail(S_ISDIR(info.st_mode)?EISDIR:EINVAL);
 result.from_failed=false;
 // Opened without O_TRUNC and compared by the descriptors' identities first, so no path change in between can make the copy empty
 // its own source.
-Descriptor out{open_retry(to,O_WRONLY|O_CREAT|O_CLOEXEC|O_NONBLOCK|(create_new?O_EXCL:0))};
+// A new file that will take another's mode starts private (0600), so no one can open it in a wider mode meanwhile.
+const bool private_file=create_new&&options.mode_of&&::access(options.mode_of->c_str(),F_OK)==0;
+Descriptor out{open_retry(to,O_WRONLY|O_CREAT|O_CLOEXEC|O_NONBLOCK|(create_new?O_EXCL:0),private_file?0600:0666)};
 if(out.fd<0)return fail(errno);
 if(!create_new){
 struct stat target;
@@ -410,6 +462,8 @@ cut=::ftruncate(out.fd,0);
 if(cut!=0)return fail(errno);
 }
 if(const int error=copy_bytes(in.fd,out.fd,static_cast<std::uint64_t>(info.st_size),result.from_failed))return fail(error);
+if(options.mode_of)if(const int error=copy_mode_of(out.fd,*options.mode_of))return fail(error);
+if(options.sync)if(const int error=sync_descriptor(out.fd))return fail(error);
 if(const int error=out.close_checked())return fail(error);
 return result;
 }

@@ -36,7 +36,7 @@
 - Owner rule: after each task's review is clean, stop and ask the owner before starting the next one.
 - Exact texts (each `<path>` is the script's path as given, through `one_line`):
   - `"<path>" leaves its mount`; `"<path>" is a host path; set [files] host_paths = true to use it`; `"<path>" is not a valid file name`; `"<path>" matches both "<a>" and "<b>"; rename one of them`; `"<path>" matches more than one name; rename one of them` (an ambiguity whose source cannot name the matches).
-  - `cannot read "<path>": <reason>` (reading, `r`, `r+` on a missing file, the from side of copy and move); `cannot write "<path>": <reason>` (`w` and `a`, `r+` otherwise, `file.write`, the commit in `file.close`, `write_file`, `append_file`, the to side of copy and move); `cannot delete "<path>": <reason>` (`delete_file`, `delete_directory`, the source delete of a move made by copy and delete); `cannot create "<path>": <reason>` (`create_directory`). Reasons `file not found`, `access denied`, `damaged data`, `is a directory`, `directory not empty`, `disk full`.
+  - `cannot read "<path>": <reason>` (reading, `r`, `r+` on a missing file, the from side of copy and move); `cannot write "<path>": <reason>` (`w` and `a`, `r+` otherwise, `file.write`, `file.sync`, the commit in `file.close`, `write_file`, `append_file`, the to side of copy and move); `cannot delete "<path>": <reason>` (`delete_file`, `delete_directory`, the source delete of a move made by copy and delete); `cannot create "<path>": <reason>` (`create_directory`). Reasons `file not found`, `access denied`, `damaged data`, `is a directory`, `directory not empty`, `disk full`.
   - `"<path>" is in a read-only pack; save files in data:/ instead`.
   - `wrong key or damaged pack`; `integer overflow`; `file is not open`; `file is not open for writing`; `"<mode>" is not a file mode`; `random_choice on an empty array`; `clamp: low is greater than high`; `invalid date`.
 
@@ -261,7 +261,7 @@
   - `file` is a reference type with a factory. It has:
     - `bool open(const string &in path, const string &in mode)`, with the modes `r w a r+` and a `b` suffix (`rb`, `wb`, `ab`, `r+b` or `rb+`).
     - Reading: `string read()`, `string read(int64 count)` (count bytes from the file, then text conversion), `string read_line()` (without the line end, `""` at end).
-    - Writing: `bool write(const string &in)`.
+    - Writing: `bool write(const string &in)`; `bool sync()` flushes what was written so far to the device (FlushFileBuffers; fdatasync, fsync on macOS), true at once for a file opened `r`, and throws `file is not open` when closed.
     - Position: getters `int64 size`, `int64 position`, `bool eof`; `bool seek(int64)`.
     - State: `void close()`, getters `bool is_open` and `string error`.
   - Text mode reads `\r\n` as `\n` and skips a UTF-8 BOM at position 0. Writing never converts, so the bytes are identical on both platforms.
@@ -270,6 +270,7 @@
     - `file_exists`, `directory_exists`.
     - `string read_file(path)` throws `cannot read "<path>": <reason>`.
     - `write_file`, `append_file`, `delete_file`, `copy_file(from,to)` and `move_file(from,to)` all overwrite. A move between sources is a copy then a delete.
+    - `bool write_file(const string &in path, const string &in data, bool sync = false)`, `bool copy_file(const string &in from, const string &in to, bool sync = false)` and `bool move_file(const string &in from, const string &in to, bool sync = false)`: the replaced file is the old one or the complete new one (a temporary file renamed over it). The default survives a crash of the game; `sync = true` flushes the new file to the device before the rename (and, on POSIX, its folder after it). A move's sync concerns only the copy it falls back to; a rename moves no data. Failures use `cannot write "<path>": <reason>`.
     - `int64 file_size(path)` returns -1 when missing. `date_time file_modified(path)` throws like `read_file` and gives local civil time.
     - `create_directory(path, bool recursive = true)`, `delete_directory(path, bool recursive = false)`.
     - `array<string>@ list_files(path, const string &in pattern = "*")` matches `*` and `?` case-insensitively by `fold_name`. `array<string>@ list_directories(path)`. Both return names, sorted by fold, then bytes.
