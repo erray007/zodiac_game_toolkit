@@ -27,6 +27,9 @@ on:
       ops:
         description: "Operations, space-separated (empty: the size-10 dictionary operations and the diagnostic ones)"
         default: ""
+      all:
+        description: "true: every gated operation as the CI gate runs them, plus the ops above (default dict_keys_10 dict_get_ordered_10)"
+        default: "false"
       focus:
         description: "The operation whose slow mode is diagnosed"
         default: "dict_iterate_10"
@@ -44,6 +47,7 @@ env:
   ROUNDS: ${{ inputs.rounds || '101' }}
   OPS: ${{ inputs.ops || '' }}
   FOCUS: ${{ inputs.focus || 'dict_iterate_10' }}
+  ALL: ${{ inputs.all || 'false' }}
 
 jobs:
   windows:
@@ -85,6 +89,7 @@ jobs:
         run: |
           ops=()
           for op in $OPS; do ops+=(--op "$op"); done
+          if [ "$ALL" = "true" ]; then ops+=(--all); fi
           python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types.exe --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" "${ops[@]}"
       - name: Upload the diagnosis
         if: always()
@@ -137,6 +142,7 @@ jobs:
         run: |
           ops=()
           for op in $OPS; do ops+=(--op "$op"); done
+          if [ "$ALL" = "true" ]; then ops+=(--all); fi
           python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" "${ops[@]}"
       - name: Upload the diagnosis
         if: always()

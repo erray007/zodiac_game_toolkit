@@ -9,7 +9,8 @@ The bench must come from a tree configured with ZODIAC_TEST_HOOKS=ON (only there
 checks that it did). Runs, interleaved so a drift of the machine spreads over every kind: seed s = 1..seeds in each of passes passes (the
 same seed in two processes: a layout cause gives both the same mode), and unfixed processes with the variable removed from the
 environment. Each run is bench_types --diagnostic --layout --rounds R --op ... (default ops: the size-10 dictionary operations and the
-diagnostic ones that split dict_iterate_10 into keys() and the lookups).
+diagnostic ones that split dict_iterate_10 into keys() and the lookups; --all runs every gated operation as the CI gate does, plus
+dict_keys_10 and dict_get_ordered_10 or the --op ones: the slow mode of dict_iterate_10 has only been seen in such a full run).
 
 Writes <dir>/runs.jsonl (one object per process: kind, seed, pass, machine, every op's ratio and nanoseconds, and the layout of the focus
 op's four Zodiac tables) and each run's raw output, and prints a table per process and a summary: how many processes of each kind were
@@ -115,6 +116,9 @@ def mean(values: list) -> float:
 def summary(records: list, focus: str, slow: float) -> str:
     lines = []
     ops = list(records[0]["ops"])
+    if len(ops) > 8:
+        # A full run: the table shows the size-10 dictionary operations, the focus and string_byte_ascii (runs.jsonl has them all).
+        ops = [op for op in ops if (op.startswith("dict_") and op.endswith("_10")) or op in (focus, "string_byte_ascii")]
     machines = sorted({r["machine"]["cpu"] + " / " + str(r["machine"]["logical_cores"]) + " cores / " + r["machine"]["os"] for r in records})
     lines.append("machines: " + "; ".join(machines))
     header = ["kind", "seed", "pass"] + ops + [f"{focus}_z_ns", "probe_total", "lines", "index_mod", "seg0_mod", "keys_mod"]
@@ -172,8 +176,13 @@ def main(argv=None) -> int:
     parser.add_argument("--focus", default="dict_iterate_10")
     parser.add_argument("--slow", type=float, default=1.3)
     parser.add_argument("--op", action="append", default=None)
+    parser.add_argument("--all", action="store_true", help="every gated operation (bench_types --list) plus the --op ones, as the CI gate runs them")
     args = parser.parse_args(argv)
-    ops = args.op or list(DEFAULT_OPS)
+    if args.all:
+        listed = subprocess.run([str(args.bench), "--list"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
+        ops = listed + [op for op in (args.op or ["dict_keys_10", "dict_get_ordered_10"]) if op not in listed]
+    else:
+        ops = args.op or list(DEFAULT_OPS)
     if args.focus not in ops:
         ops.append(args.focus)
     if args.seeds < 0 or args.unfixed < 0 or args.passes < 1 or args.seeds + args.unfixed == 0:
