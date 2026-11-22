@@ -20,11 +20,13 @@ jobs:
         with:
           path: .tools
           key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      # FetchContent's sub-builds in .deps record the absolute checkout path, which the repository's name is part of: the key names
+      # it, so a renamed repository never restores sub-builds made under the old path.
       - name: Cache dependency downloads
         uses: actions/cache@v4
         with:
           path: .deps
-          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+          key: deps-${{ runner.os }}-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
       # The .tools cache is only saved on a key miss, so the UCD files get a cache of their own; gen_unicode.py still verifies each SHA-256.
       - name: Cache Unicode data
         uses: actions/cache@v4
@@ -124,7 +126,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps
-          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+          key: deps-${{ runner.os }}-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
       # lld-18 links (full LTO, --icf=safe) and llvm-18 brings llvm-ar, llvm-ranlib and llvm-nm for the bitcode archives; cmake/toolchain-clang-linux.cmake
       # finds them by the compiler's version suffix (ld.lld-18, llvm-ar-18, ...).
       - name: Install and select clang 18 with libc++, lld and the LLVM tools
@@ -236,7 +238,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps
-          key: deps-${{ runner.os }}-release-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
       - name: Bootstrap
         run: python bootstrap.py
       - name: Build and test the release preset
