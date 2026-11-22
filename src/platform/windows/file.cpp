@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <climits>
 #include <cstddef>
@@ -461,8 +462,10 @@ HANDLE handle;
 };
 // After CopyFileExW: a fresh modification time, no read-only, hidden or system attribute and no Zone.Identifier stream, as a copy
 // written byte by byte would have. The bytes are right whatever this reports.
+std::atomic<bool> fail_reset{false};
 std::error_code reset_copy(const fs::path& to,const NativePath& target)
 {
+if(fail_reset.exchange(false,std::memory_order_relaxed))return errno_code(EACCES);
 std::error_code error;
 {
 const OwnedHandle handle{CreateFileW(target.c_str(),FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,share_all,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)};
@@ -491,6 +494,11 @@ if(code!=ERROR_FILE_NOT_FOUND&&code!=ERROR_PATH_NOT_FOUND&&!error)error=errno_co
 }
 return error;
 }
+}
+
+void testing::fail_next_copy_reset() noexcept
+{
+fail_reset.store(true,std::memory_order_relaxed);
 }
 
 std::error_code discard_file(const fs::path& path)
@@ -564,6 +572,9 @@ return result;
 }
 result.metadata=reset_copy(to,target);
 if(options.sync){
+// A read-only attribute the reset could not clear (copied from a read-only source) would refuse the write handle the flush
+// needs; the copy is meant not to have it anyway.
+if(const DWORD attributes=GetFileAttributesW(target.c_str());attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_READONLY))SetFileAttributesW(target.c_str(),attributes&~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
 const OwnedHandle written{CreateFileW(target.c_str(),GENERIC_WRITE,share_all,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)};
 if(written.handle==INVALID_HANDLE_VALUE||!FlushFileBuffers(written.handle))result.error=last_error();
 }

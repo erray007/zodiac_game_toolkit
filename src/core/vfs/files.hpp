@@ -46,7 +46,12 @@
 //   target being created; a link to an existing file is followed, and that file is replaced. By default the result survives a
 //   crash of the game but not necessarily of the system; sync = true flushes the new bytes to the device before the rename (and,
 //   POSIX, the folder after it), at the cost of a device flush. move_file's sync concerns only the copy it falls back to between
-//   volumes or sources: a rename moves no data.
+//   volumes or sources: a rename moves no data. With sync = true a false result may come after the new file has already replaced
+//   the old one (the folder's flush after the rename, or a pack's flush after its commit, failed): a script must not take false
+//   to mean that the old bytes are still there, only that the new ones may not have reached the device.
+// - Temporary files of a crash are removed by name date, a day either way from the clock of the machine that scans: on a folder
+//   shared between machines, one whose clock is more than a day off may see its live temporary files removed by another, and its
+//   write then fails, the target kept (no data is lost).
 //   append_file adds to the file in place (a failure may leave part of the added bytes). move_file is Vfs::move (a rename where
 //   one source or the system can, else a copy, then a delete). One file on both sides (one entry under two spellings, or one host
 //   file under two mounts or a host path) is a success that changes nothing.

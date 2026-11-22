@@ -51,8 +51,12 @@ bool is_temp_name(std::string_view name) noexcept;
 // The name the Vfs gives a temporary file: temp_prefix, 16 lowercase hexadecimal digits (the creation time in seconds since 1970
 // UTC, as 8 digits, then 8 random ones) and ".tmp". Only names of exactly this form are ever removed as a crash's leftovers.
 std::string make_temp_name(std::int64_t unix_seconds,std::uint32_t random);
-// The creation time (seconds since 1970 UTC) of a name of make_temp_name's exact form; nullopt for any other name.
+// The creation time (seconds since 1970 UTC, modulo 2^32) of a name of make_temp_name's exact form; nullopt for any other name.
 std::optional<std::int64_t> temp_name_time(std::string_view name) noexcept;
+// now_seconds minus the creation time of a name of make_temp_name's exact form, as the wrap-aware signed difference of the two
+// 32-bit second counts (so the wrap in 2106 never makes a fresh name look ancient): negative for a name dated in the future;
+// nullopt for any other name.
+std::optional<std::int64_t> temp_name_age(std::string_view name,std::int64_t now_seconds) noexcept;
 // The temporary files this process is writing, by name (a name is unique: its time and random digits): the Vfs holds each from
 // before it is made until it is renamed or removed, and a scan never removes a held one. Thread-safe.
 void hold_temp(const std::string& name);

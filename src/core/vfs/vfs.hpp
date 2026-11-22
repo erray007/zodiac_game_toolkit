@@ -204,10 +204,11 @@ std::expected<bool,MoveFailure> rename(std::string_view from,std::string_view to
 //   the entry changes (Source::host_file).
 // from and to being one file (by identity, when both are host files) is a success that changes nothing.
 // With sync, the copy's bytes reach the device before the rename (and, POSIX, the folder's new entry after it), or before commit
-// returns for a target without host files (WriteTarget::sync after commit).
+// returns for a target without host files (WriteTarget::sync after commit). A failure of the folder's flush or of
+// WriteTarget::sync comes after the replace: the new file is then in place, only perhaps not on the device yet.
 std::expected<void,MoveFailure> copy(std::string_view from,std::string_view to,bool sync=false);
 // Replaces file path with bytes as copy does: to a host file through a temporary file and a rename, else through open_write
-// (truncate) and commit. Failures as open_write's. sync as for copy.
+// (truncate) and commit. Failures as open_write's. sync as for copy (a sync failure may come after the replace).
 std::expected<void,Failure> write_file(std::string_view path,std::span<const std::byte> bytes,bool sync=false);
 // rename, else copy then remove(from). A copy that finds one file on both sides removes nothing. A failed remove after the copy
 // is MoveFailure::removing (both files are then there).

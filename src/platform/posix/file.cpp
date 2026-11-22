@@ -413,6 +413,10 @@ std::error_code discard_file(const fs::path& path)
 return remove_file(path);
 }
 
+void testing::fail_next_copy_reset() noexcept
+{
+}
+
 std::error_code sync_directory(const fs::path& path)
 {
 Descriptor folder{open_retry(path,O_RDONLY|O_CLOEXEC|O_DIRECTORY)};

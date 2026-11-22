@@ -145,6 +145,11 @@ const std::filesystem::path* mode_of=nullptr;
 bool sync=false;
 };
 CopyResult copy_file(const std::filesystem::path& from,const std::filesystem::path& to,const CopyOptions& options={});
+namespace testing {
+// For tests only: on Windows, the next copy_file leaves the copied time and attributes (a read-only one included) as CopyFileExW
+// set them and reports a metadata failure, as when the system refuses the reset. Nothing elsewhere.
+void fail_next_copy_reset() noexcept;
+}
 // Removes a file even when it is read-only (Windows clears FILE_ATTRIBUTE_READONLY first; POSIX needs nothing).
 std::error_code discard_file(const std::filesystem::path& path);
 // POSIX: fsyncs folder path, so a rename or a new name in it reaches the device. Windows: nothing (NTFS journals its metadata, and

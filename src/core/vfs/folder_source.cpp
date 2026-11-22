@@ -320,11 +320,12 @@ names->names.reserve(entries.size());
 for(platform::DirectoryEntry& entry:entries){
 if(entry.kind!=platform::NodeKind::file&&entry.kind!=platform::NodeKind::directory)continue;
 if(!valid_name(entry.name)){
-// A temporary file of a write or copy that a crash interrupted: only the exact generated form, made over stale_temp_ns ago by its
-// name's own time (any process's, whatever its modification time says) and not held by a write of this process.
+// A temporary file of a write or copy that a crash interrupted: only the exact generated form, dated more than stale_temp_ns
+// away from now by its name's own time, either way (a clock set back, or another machine's, cannot keep a leftover forever; a
+// live temp of another process removed so makes only its own write fail, its target kept), and not held by a write of this process.
 if(!read_only_&&entry.kind==platform::NodeKind::file&&!entry.link){
-const std::optional<std::int64_t> made=temp_name_time(entry.name);
-if(made&&scanned_ns/1000000000-*made>stale_temp_ns/1000000000&&!temp_held(entry.name))platform::discard_file(folder/path_from_utf8(entry.name));
+const std::optional<std::int64_t> age=temp_name_age(entry.name,scanned_ns/1000000000);
+if(age&&(*age<0?-*age:*age)>stale_temp_ns/1000000000&&!temp_held(entry.name))platform::discard_file(folder/path_from_utf8(entry.name));
 }
 continue;
 }

@@ -59,7 +59,7 @@ class FolderSource final:public Source{
 public:
 static constexpr std::int64_t racy_window_ns=2'000'000'000;
 // A temporary file of make_temp_name's exact form is taken for one a crash left behind, and removed when a writable source scans
-// its folder, once the creation time in its name is this old (a day, far beyond any copy) and this process does not hold it
+// its folder, once the creation time in its name is this far from now, either way (a day, far beyond any copy), and this process does not hold it
 // (temp_held). The name's time is used, not the file's: a folder listing's time may lag a file being written, and CopyFileExW
 // gives the new file its source's time while it copies. Any other name, even with temp_prefix, is never removed.
 static constexpr std::int64_t stale_temp_ns=86'400'000'000'000;

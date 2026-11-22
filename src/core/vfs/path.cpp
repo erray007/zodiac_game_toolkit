@@ -223,6 +223,14 @@ if(i<8)seconds=(seconds<<4)|static_cast<std::uint32_t>(digit);
 return static_cast<std::int64_t>(seconds);
 }
 
+std::optional<std::int64_t> temp_name_age(std::string_view name,std::int64_t now_seconds) noexcept
+{
+const std::optional<std::int64_t> made=temp_name_time(name);
+if(!made)return std::nullopt;
+const std::uint32_t difference=static_cast<std::uint32_t>(now_seconds)-static_cast<std::uint32_t>(*made);
+return static_cast<std::int64_t>(static_cast<std::int32_t>(difference));
+}
+
 void hold_temp(const std::string& name)
 {
 const std::lock_guard lock(held_mutex);

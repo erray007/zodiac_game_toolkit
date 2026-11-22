@@ -857,6 +857,12 @@ CHECK_FALSE(zodiac::vfs::temp_name_time(".zodiac-tmp-0123456789ABCDEF.tmp"));
 CHECK_FALSE(zodiac::vfs::temp_name_time(".ZODIAC-TMP-0123456789abcdef.tmp"));
 CHECK_FALSE(zodiac::vfs::temp_name_time(".zodiac-tmp-0123456789abcde.tmp"));
 CHECK_FALSE(zodiac::vfs::temp_name_time(".zodiac-tmp-notes.txt"));
+// Ages are wrap-aware: the 32-bit seconds wrap in 2106, and a name made just before the wrap is seconds old just after it.
+CHECK(zodiac::vfs::temp_name_age(zodiac::vfs::make_temp_name(1000,0),1000+86401)==std::optional<std::int64_t>(86401));
+CHECK(zodiac::vfs::temp_name_age(zodiac::vfs::make_temp_name(0xFFFFFFF0,0),std::int64_t{0x100000010})==std::optional<std::int64_t>(32));
+CHECK(zodiac::vfs::temp_name_age(zodiac::vfs::make_temp_name(std::int64_t{0x100000010},0),0xFFFFFFF0)==std::optional<std::int64_t>(-32));
+CHECK(zodiac::vfs::temp_name_age(zodiac::vfs::make_temp_name(5000,0),3000)==std::optional<std::int64_t>(-2000));
+CHECK_FALSE(zodiac::vfs::temp_name_age(".zodiac-tmp-notes.txt",0));
 // At the next scan: a leftover made two days ago (by its name) goes, whatever its file time; one made now stays even with an old
 // file time (CopyFileExW gives the temporary file its source's time); one this process holds stays however old; a name of another
 // form stays, even with the prefix. None is listed.
@@ -864,17 +870,24 @@ const auto now_s=zodiac::platform::utc_now_ms()/1000;
 const std::string crashed=zodiac::vfs::make_temp_name(now_s-2*86400,1);
 const std::string copying=zodiac::vfs::make_temp_name(now_s,2);
 const std::string held=zodiac::vfs::make_temp_name(now_s-2*86400,3);
+// Dated two days ahead (a clock set back since, or another machine's): as stale as two days behind.
+const std::string ahead=zodiac::vfs::make_temp_name(now_s+2*86400,4);
+const std::string held_ahead=zodiac::vfs::make_temp_name(now_s+2*86400,5);
 const auto old_time=fs::file_time_type::clock::now()-std::chrono::hours(48);
-for(const std::string& name:{crashed,copying,held,std::string(".zodiac-tmp-notes.txt")}){
+for(const std::string& name:{crashed,copying,held,ahead,held_ahead,std::string(".zodiac-tmp-notes.txt")}){
 put(root/name,"temporary");
 fs::last_write_time(root/name,old_time);
 }
 zodiac::vfs::hold_temp(held);
+zodiac::vfs::hold_temp(held_ahead);
 CHECK(text_of(fixture,"return join(list_files(\"/\"), \"|\");")==".zodiac-tmpx|zodiac-tmp-y");
 zodiac::vfs::release_temp(held);
+zodiac::vfs::release_temp(held_ahead);
 CHECK_FALSE(fs::exists(root/crashed));
+CHECK_FALSE(fs::exists(root/ahead));
 CHECK(fs::exists(root/copying));
 CHECK(fs::exists(root/held));
+CHECK(fs::exists(root/held_ahead));
 CHECK(fs::exists(root/".zodiac-tmp-notes.txt"));
 CHECK_FALSE(holds(fixture,"return file_exists(\""+copying+"\")||file_exists(\".zodiac-tmp-notes.txt\");"));
 }
@@ -960,5 +973,36 @@ CHECK(text_of(fixture,"bool copied=copy_file(\"locked.bin\", \"locked2.bin\"); b
 CHECK(temp_files(root).empty());
 CHECK(zodiac::platform::discard_file(root/"locked.bin").value()==0);
 CHECK_FALSE(fs::exists(root/"locked.bin"));
+}
+
+TEST_CASE("Windows: a read-only temporary file is removed on failure, synced, and a failed reset is only a warning")
+{
+ScriptFixture fixture;
+std::vector<std::string> logged;
+fixture.vfs.set_dev_mode(true);
+fixture.vfs.set_log([&logged](zodiac_log_level,std::string_view line){logged.emplace_back(line);});
+const fs::path root=fixture.root();
+put(root/"ro_src.bin","read-only source");
+REQUIRE(SetFileAttributesW((root/"ro_src.bin").c_str(),FILE_ATTRIBUTE_READONLY));
+put(root/"ro_target.bin","kept");
+REQUIRE(SetFileAttributesW((root/"ro_target.bin").c_str(),FILE_ATTRIBUTE_READONLY));
+// The reset fails, so the temporary file keeps the source's read-only attribute; the rename over the read-only target fails, and
+// the read-only temporary file must still go.
+zodiac::platform::testing::fail_next_copy_reset();
+CHECK(text_of(fixture,"bool copied=copy_file(\"ro_src.bin\", \"ro_target.bin\"); return copied+\",\"+last_file_error();")=="false,cannot write \"ro_target.bin\": access denied");
+CHECK(contents(root/"ro_target.bin")=="kept");
+CHECK(temp_files(root).empty());
+// With sync, a read-only attribute the reset left does not refuse the flush.
+zodiac::platform::testing::fail_next_copy_reset();
+CHECK(holds(fixture,"return copy_file(\"ro_src.bin\", \"synced.bin\", true)&&read_file(\"synced.bin\")==\"read-only source\";"));
+CHECK(temp_files(root).empty());
+// Without sync, the copy is right and succeeds; the failed reset is a dev-mode warning.
+logged.clear();
+zodiac::platform::testing::fail_next_copy_reset();
+CHECK(holds(fixture,"return copy_file(\"ro_src.bin\", \"plain.bin\")&&read_file(\"plain.bin\")==\"read-only source\";"));
+REQUIRE(logged.size()==1);
+CHECK(logged[0].starts_with("warning: \"plain.bin\" was copied, but the time and attributes it took from its source could not be reset: "));
+CHECK(temp_files(root).empty());
+for(const char* name:{"ro_src.bin","ro_target.bin","plain.bin","synced.bin"})zodiac::platform::discard_file(root/name);
 }
 #endif
