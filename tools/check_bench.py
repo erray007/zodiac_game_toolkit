@@ -5,15 +5,16 @@
 
 The results file holds one JSON object per line, {"op": name, "new_ns": n, "addon_ns": n, "ratio": r}, as bench_types writes it: new_ns
 and addon_ns are the median nanoseconds per iteration of Zodiac's types and of the add-ons, ratio the median of the per-round ratios
-new/addon. The expected file holds one operation name per line, as `bench_types --list` prints them (the bench is the one source of the
-operation list), and the results must cover exactly those operations. Blank lines are ignored in both. Prints a table of every operation
-to stdout.
+new/addon. Exactly one line describes the machine instead: {"machine": {"cpu": brand, "logical_cores": n, "os": build}}, printed above
+the table so every log names the CPU it measured. The expected file holds one operation name per line, as `bench_types --list` prints
+them (the bench is the one source of the operation list), and the results must cover exactly those operations. Blank lines are ignored
+in both. Prints the machine and a table of every operation to stdout.
 
 Exit codes: 0 every ratio is at most LIMIT; 1 some ratio is above LIMIT (each such operation is named on stderr); 2 either file is missing
 or unreadable, a line is not such an object (malformed JSON, a missing or non-numeric field, a negative or non-finite number, an empty op
-name), an operation appears twice, the file holds no results, the expected list is empty, or an expected operation is missing or an
-unknown one is present (each named on stderr), the arguments are wrong, or the check itself fails unexpectedly. Only 1 means "too slow":
-the report-only Linux job tolerates exactly that code.
+name), an operation appears twice, the file holds no results, the machine line is missing, repeated or malformed, the expected list is
+empty, or an expected operation is missing or an unknown one is present (each named on stderr), the arguments are wrong, or the check
+itself fails unexpectedly. Only 1 means "too slow": the report-only Linux job tolerates exactly that code.
 """
 
 import argparse
@@ -45,9 +46,25 @@ def _number(record: dict, field: str, number: int) -> float:
     return value
 
 
-def parse(text: str) -> list:
-    """The (op, new_ns, addon_ns, ratio) tuples of text, in order. Raises BenchFormatError."""
+def _machine(record: dict, number: int) -> dict:
+    machine = record.get("machine")
+    if len(record) != 1 or not isinstance(machine, dict):
+        raise BenchFormatError(f"line {number}: the machine line holds anything but one \"machine\" object")
+    cpu = machine.get("cpu")
+    cores = machine.get("logical_cores")
+    system = machine.get("os")
+    if not isinstance(cpu, str) or not cpu or not isinstance(system, str) or not system:
+        raise BenchFormatError(f"line {number}: \"cpu\" and \"os\" must be non-empty texts")
+    if isinstance(cores, bool) or not isinstance(cores, int) or cores < 0:
+        raise BenchFormatError(f"line {number}: \"logical_cores\" must be a whole number of at least 0")
+    return {"cpu": cpu, "logical_cores": cores, "os": system}
+
+
+def read(text: str) -> tuple:
+    """(machine, results) of text: the machine line's fields and the (op, new_ns, addon_ns, ratio) tuples in order. Raises
+    BenchFormatError."""
     results = []
+    machine = None
     seen = set()
     for number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
@@ -58,6 +75,11 @@ def parse(text: str) -> list:
             raise BenchFormatError(f"line {number}: malformed JSON ({error})") from None
         if not isinstance(record, dict):
             raise BenchFormatError(f"line {number}: not a JSON object")
+        if "machine" in record:
+            if machine is not None:
+                raise BenchFormatError(f"line {number}: a second machine line")
+            machine = _machine(record, number)
+            continue
         op = record.get("op")
         if not isinstance(op, str) or not op:
             raise BenchFormatError(f"line {number}: \"op\" is missing or not a name")
@@ -67,7 +89,18 @@ def parse(text: str) -> list:
         results.append((op,) + tuple(_number(record, field, number) for field in FIELDS))
     if not results:
         raise BenchFormatError("no results")
-    return results
+    if machine is None:
+        raise BenchFormatError("no machine line (the CPU, cores and OS bench_types measured on)")
+    return machine, results
+
+
+def parse(text: str) -> list:
+    """The (op, new_ns, addon_ns, ratio) tuples of text, in order. Raises BenchFormatError."""
+    return read(text)[1]
+
+
+def describe(machine: dict) -> str:
+    return f"machine: {machine['cpu']}, {machine['logical_cores']} logical cores, {machine['os']}"
 
 
 def check_complete(results: list, expected_text: str) -> None:
@@ -120,11 +153,12 @@ def _check(argv) -> int:
             print(f"check_bench: cannot read {path}: {error}", file=sys.stderr)
             return 2
     try:
-        results = parse(texts[0])
+        machine, results = read(texts[0])
         check_complete(results, texts[1])
     except BenchFormatError as error:
         print(f"check_bench: {args.results}: {error}", file=sys.stderr)
         return 2
+    print(describe(machine), flush=True)
     print(table(results), flush=True)
     slower = [(op, ratio) for op, _, _, ratio in results if ratio > LIMIT]
     if slower:

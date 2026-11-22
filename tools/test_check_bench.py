@@ -23,15 +23,19 @@ def line(op, ratio, new_ns=10.0, addon_ns=10.0):
     return json.dumps({"op": op, "new_ns": new_ns, "addon_ns": addon_ns, "ratio": ratio})
 
 
+MACHINE = json.dumps({"machine": {"cpu": "AMD EPYC 7763 64-Core Processor", "logical_cores": 4, "os": "Windows 10.0.26100.4652"}})
+
+
 class CheckBenchTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.path = Path(self._tmp.name) / "bench.json"
 
-    def run_main(self, text, expected=None):
-        """Runs check_bench on text; expected is the op list bench_types --list would print (by default the ops in text)."""
-        self.path.write_text(text, encoding="utf-8")
+    def run_main(self, text, expected=None, machine=True):
+        """Runs check_bench on text, with MACHINE appended unless machine is False (so line numbers stay those of text); expected is
+        the op list bench_types --list would print (by default the ops in text)."""
+        self.path.write_text(text + (MACHINE + "\n" if machine else ""), encoding="utf-8")
         if expected is None:
             expected = list(dict.fromkeys(re.findall(r'"op": "([^"]*)"', text)))
         ops = Path(self._tmp.name) / "ops.txt"
@@ -115,16 +119,37 @@ class CheckBenchTests(unittest.TestCase):
         code, _, _ = self.run_main(line("string_find", 1.5) + "\n" + line("string_fnid", 1.5) + "\n", expected=["string_find"])
         self.assertEqual(code, 2)
         # An unexpected error in the check is 2, never Python's default 1, which would read as "too slow".
-        original = check_bench.parse
+        original = check_bench.read
         def broken(text):
             raise RuntimeError("boom")
-        check_bench.parse = broken
+        check_bench.read = broken
         try:
             code, _, err = self.run_main(line("string_find", 0.5) + "\n")
         finally:
-            check_bench.parse = original
+            check_bench.read = original
         self.assertEqual(code, 2)
         self.assertIn("internal error", err)
+
+    def test_the_machine_is_printed_above_the_table(self):
+        code, out, err = self.run_main(line("string_find", 0.5) + "\n")
+        self.assertEqual(code, 0, err)
+        first = out.splitlines()[0]
+        self.assertEqual(first, "machine: AMD EPYC 7763 64-Core Processor, 4 logical cores, Windows 10.0.26100.4652")
+
+    def test_the_machine_line_is_required_once_and_well_formed(self):
+        code, _, err = self.run_main(line("string_find", 0.5) + "\n", machine=False)
+        self.assertEqual(code, 2)
+        self.assertIn("no machine line", err)
+        code, _, err = self.run_main(MACHINE + "\n" + line("string_find", 0.5) + "\n")
+        self.assertEqual(code, 2)
+        self.assertIn("a second machine line", err)
+        for bad in ('{"machine": {"cpu": "", "logical_cores": 4, "os": "x"}}', '{"machine": {"cpu": "x", "logical_cores": true, "os": "x"}}',
+                '{"machine": {"cpu": "x", "logical_cores": -1, "os": "x"}}', '{"machine": {"cpu": "x", "logical_cores": 4}}', '{"machine": "x"}',
+                '{"machine": {"cpu": "x", "logical_cores": 4, "os": "x"}, "op": "string_find"}'):
+            with self.subTest(bad=bad):
+                code, _, err = self.run_main(bad + "\n" + line("string_find", 0.5) + "\n", machine=False)
+                self.assertEqual(code, 2)
+                self.assertIn("line 1", err)
 
     def test_a_missing_file_fails(self):
         out = io.StringIO()

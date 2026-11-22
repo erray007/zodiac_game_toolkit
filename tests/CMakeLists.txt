@@ -16,6 +16,14 @@ endif()
 add_test(NAME test_angelscript_has_no_sample_addons COMMAND "${CMAKE_COMMAND}" "-DNM=${CMAKE_NM}" "${ZODIAC_GAME_ARCHIVES}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check_no_sample_addons.cmake")
 # The speed gate against the sample add-ons (spec 8.4): built with everything, run by CI on release presets, not by ctest.
 add_subdirectory(bench)
+# The test hooks (ZODIAC_TEST_HOOKS, platform/entropy.hpp) are in both cores and in the executables linking them iff the tree enables them:
+# absent from every normal tree (the debug and release presets, the kit), present in a hooks tree so the check is seen to work.
+if(ZODIAC_TEST_HOOKS)
+set(ZODIAC_HOOKS_EXPECTED ON)
+else()
+set(ZODIAC_HOOKS_EXPECTED OFF)
+endif()
+add_test(NAME test_no_test_hooks COMMAND "${CMAKE_COMMAND}" "-DNM=${CMAKE_NM}" "-DHOOKS=${ZODIAC_HOOKS_EXPECTED}" "-DARCHIVES=$<TARGET_FILE:zodiac_core>|$<TARGET_FILE:zodiac_core_release>" "-DBINARIES=$<TARGET_FILE:zodiac>|$<TARGET_FILE:bench_types>" -P "${CMAKE_CURRENT_SOURCE_DIR}/check_no_test_hooks.cmake")
 add_library(test_plugin_header_c STATIC test_plugin_header_c.c)
 set_target_properties(test_plugin_header_c PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 zodiac_target_warnings(test_plugin_header_c)

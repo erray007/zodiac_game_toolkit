@@ -1,0 +1,147 @@
+# Bench diagnosis (Task 5b), never part of the gate: bench_types from a ZODIAC_TEST_HOOKS=ON tree (optimized like windows-release and
+# linux-release, but one that cannot be installed or packaged) run in many processes by tools/bench_diagnose.py, with the table hash seed
+# fixed per process (ZODIAC_TABLE_HASH_SEED) and unfixed, to tell whether a slow mode follows the seed (layout) or the process. The raw runs,
+# runs.jsonl and summary.txt are uploaded as the artifact bench-diagnose-<os>.
+#
+# Trigger it either way (normal pushes only show the two jobs as skipped):
+# - gh workflow run bench-diagnose.yml --ref <branch> [-f seeds=64 -f passes=2 -f unfixed=64 -f rounds=101 -f ops="..." -f os=both]
+# - a pushed commit whose message contains [bench-diagnose] (the defaults below).
+name: bench-diagnose
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Fixed seeds (1..N), each run in every pass"
+        default: "64"
+      passes:
+        description: "Processes per fixed seed"
+        default: "2"
+      unfixed:
+        description: "Processes with a drawn seed"
+        default: "64"
+      rounds:
+        description: "bench_types --rounds"
+        default: "101"
+      ops:
+        description: "Operations, space-separated (empty: the size-10 dictionary operations and the diagnostic ones)"
+        default: ""
+      focus:
+        description: "The operation whose slow mode is diagnosed"
+        default: "dict_iterate_10"
+      os:
+        description: "both, windows or linux"
+        default: "both"
+
+permissions:
+  contents: read
+
+env:
+  SEEDS: ${{ inputs.seeds || '64' }}
+  PASSES: ${{ inputs.passes || '2' }}
+  UNFIXED: ${{ inputs.unfixed || '64' }}
+  ROUNDS: ${{ inputs.rounds || '101' }}
+  OPS: ${{ inputs.ops || '' }}
+  FOCUS: ${{ inputs.focus || 'dict_iterate_10' }}
+
+jobs:
+  windows:
+    if: (github.event_name == 'workflow_dispatch' && inputs.os != 'linux') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[bench-diagnose]'))
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-hooks-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build bench_types with the test hooks
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release -B build/hooks -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --build build/hooks --target bench_types zodiac
+      - name: Show that the hooks tree holds the hook
+        run: .tools/cmake/bin/ctest --test-dir build/hooks -R test_no_test_hooks --output-on-failure
+      - name: Show the CPU
+        shell: pwsh
+        run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
+      - name: Diagnose
+        shell: bash
+        run: |
+          ops=()
+          for op in $OPS; do ops+=(--op "$op"); done
+          python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types.exe --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" "${ops[@]}"
+      - name: Upload the diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-diagnose-windows
+          path: bench-diagnose
+          if-no-files-found: ignore
+
+  linux:
+    if: (github.event_name == 'workflow_dispatch' && inputs.os != 'windows') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[bench-diagnose]'))
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-linux-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-hooks-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Install and select clang 18 with libc++, lld and the LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev lld-18 llvm-18
+          echo "CC=clang-18" >> "$GITHUB_ENV"
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build bench_types with the test hooks
+        run: |
+          .tools/cmake/bin/cmake --preset linux-release -B build/hooks -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --build build/hooks --target bench_types zodiac
+      - name: Show that the hooks tree holds the hook
+        run: .tools/cmake/bin/ctest --test-dir build/hooks -R test_no_test_hooks --output-on-failure
+      - name: Show the CPU
+        run: lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)|MHz|cache'
+      - name: Diagnose
+        run: |
+          ops=()
+          for op in $OPS; do ops+=(--op "$op"); done
+          python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" "${ops[@]}"
+      - name: Upload the diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-diagnose-linux
+          path: bench-diagnose
+          if-no-files-found: ignore

@@ -19,15 +19,20 @@
 //   collection after it (untimed). Taking the operations in turn spreads each one's rounds over the whole run: on a busy
 //   machine the relative speed of two code paths drifts by up to 20 % over a second or so while other programs come and
 //   go, and an operation measured in one stretch would read whatever that second's state was.
-// - Output: once every round is done, one JSON line per operation to stdout (and to --out when given):
+// - Output: first a line naming the machine, {"machine":{"cpu":brand,"logical_cores":n,"os":build}} (also printed to
+//   stderr as the header), then, once every round is done, one JSON line per operation to stdout (and to --out when given):
 //   {"op":name,"new_ns":n,"addon_ns":n,"ratio":r}, new_ns and addon_ns the median nanoseconds per unit of work of each
 //   side, ratio the median of the per-round ratios new/addon. tools/check_bench.py gates the lines (ratio at most 1.05,
-//   and exactly the operations --list prints, the one list of them).
+//   and exactly the operations --list prints, the one list of them) and prints the machine above its table.
 //   Progress goes to stderr every 10 rounds.
-// - Usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--list]. Defaults: 101 rounds
-//   (at least 15 are required, spec 8.4) of 1 ms per side: many short rounds pair the two sides closely in time, and the
-//   whole run takes about 45 s on the release preset. --op (repeatable) measures only the named operations, --detail also
-//   prints each operation's median ratio per pair of engine and context to stderr, --list prints the names.
+// - Usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--layout] [--diagnostic]
+//   [--list]. Defaults: 101 rounds (at least 15 are required, spec 8.4) of 1 ms per side: many short rounds pair the two
+//   sides closely in time, and the whole run takes about 45 s on the release preset. --op (repeatable) measures only the
+//   named operations, --detail also prints each operation's median ratio per pair of engine and context to stderr, --list
+//   prints the names. For diagnosis only (tools/bench_diagnose.py, never the gate): --diagnostic adds the operations
+//   dict_keys_<n> and dict_get_ordered_<n> (to --list and to the names --op takes), and --layout prints, per dictionary
+//   operation and Zodiac engine, a line "bench_types: layout {json}" to stderr with the table's addresses (mod 4096), index
+//   size, each key's home slot and probe length, and the cache lines the lookups of all its keys touch.
 // - Exit codes: 0 measured, 1 bad arguments, 2 a snippet did not build or run, 3 the two sides disagree on a checksum.
 // Not a ctest test (spec 8.4): CI runs it on release presets, and Task 7 reuses it to compare compiler flags.
 #include <angelscript.h>
@@ -55,12 +60,69 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <vector>
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <sys/utsname.h>
 #endif
+#if defined(__x86_64__)
+#include <cpuid.h>
+#endif
+
+namespace zodiac {
+// --layout (declared a friend by Dictionary): where a dictionary's parts sit in memory and how its keys probe, as one JSON object.
+struct DictionaryTestAccess {
+static std::string layout(const Dictionary& d)
+{
+const auto low=[](const void* p){return static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(p)&4095u);};
+std::string out="{\"table_key0\":\""+hex(string_detail::table_key_word(0))+"\",\"live\":"+std::to_string(d.live_);
+out+=",\"dictionary_mod4096\":"+std::to_string(low(&d));
+const std::uint32_t size=d.index_?d.mask_+1:0;
+out+=",\"index_size\":"+std::to_string(size)+",\"index_mod4096\":"+std::to_string(low(d.index_));
+out+=",\"segment0_mod4096\":"+std::to_string(low(d.segments_[0]));
+std::vector<std::uintptr_t> lines;
+std::string keys;
+std::uint32_t probe_total=0,probe_max=0;
+// In slot order (Entry is complete only in dictionary.cpp, so the insertion-order links cannot be followed here).
+for(std::uint32_t position=0;position<size;++position){
+if(!d.index_[position].entry)continue;
+const std::uint32_t index=d.index_[position].entry-1;
+const Dictionary::Entry& item=d.entry(index);
+const std::uint32_t home=d.home(d.index_[position].hash);
+const std::uint32_t probe=(position-home)&d.mask_;
+probe_total+=probe;
+probe_max=std::max(probe_max,probe);
+for(std::uint32_t at=home;;at=(at+1)&d.mask_){
+lines.push_back(reinterpret_cast<std::uintptr_t>(d.index_+at)/64);
+if(at==position)break;
+}
+lines.push_back(reinterpret_cast<std::uintptr_t>(&item)/64);
+if(!keys.empty())keys+=",";
+keys+="{\"entry\":"+std::to_string(index)+",\"home\":"+std::to_string(home)+",\"slot\":"+std::to_string(position)+",\"probe\":"+std::to_string(probe)+",\"slot_line\":"+std::to_string((reinterpret_cast<std::uintptr_t>(d.index_+position)/64)%64)+",\"entry_mod4096\":"+std::to_string(low(&item))+"}";
+}
+std::sort(lines.begin(),lines.end());
+const auto distinct=std::unique(lines.begin(),lines.end())-lines.begin();
+out+=",\"probe_total\":"+std::to_string(probe_total)+",\"probe_max\":"+std::to_string(probe_max)+",\"lines_touched\":"+std::to_string(distinct);
+// Where keys() puts its array in this process: the next script call of the same size is likely to land there too.
+if(ScriptArray* sample=d.keys()){
+if(sample->length()>0)out+=",\"keys_array_mod4096\":"+std::to_string(low(sample->at(0)));
+sample->release();
+}
+out+=",\"keys\":["+keys+"]}";
+return out;
+}
+static std::string hex(std::uint64_t value)
+{
+char digits[17];
+std::snprintf(digits,sizeof digits,"%016llx",static_cast<unsigned long long>(value));
+return digits;
+}
+};
+}
 
 namespace {
 // Shared by both sides: the texts every string operation reads and a deterministic pseudo-random sequence.
@@ -418,9 +480,11 @@ engine->RegisterObjectMethod("random_generator","int random(int,int)",asFUNCTION
 }
 
 // Dictionary snippets for one size: insert into a new dictionary, look up every key in shuffled order, iterate over the keys.
+// The diagnostic pair (--diagnostic, never gated) splits iterate into its two parts: keys() alone, and get of every key in
+// insertion order from the setup's array.
 struct DictionarySnippets {
-std::string insert_name,lookup_name,iterate_name;
-std::string zodiac_insert,addon_insert,zodiac_lookup,addon_lookup,zodiac_iterate,addon_iterate;
+std::string insert_name,lookup_name,iterate_name,keys_name,ordered_name;
+std::string zodiac_insert,addon_insert,zodiac_lookup,addon_lookup,zodiac_iterate,addon_iterate,zodiac_keys,addon_keys,zodiac_ordered,addon_ordered;
 };
 
 DictionarySnippets dictionary_snippets(int size)
@@ -449,6 +513,13 @@ s.addon_lookup=addon_setup+lookup;
 // Every key and its value: keys() in Zodiac, getKeys() in the add-on, then get of each key.
 s.zodiac_iterate=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.keys();for(int i=0,c=k.length();i<c;++i){int64 v;table.get(k[i],v);n+=v;}}return n;}";
 s.addon_iterate=addon_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.getKeys();for(uint i=0,c=k.length();i<c;++i){int64 v;table.get(k[i],v);n+=v;}}return n;}";
+s.keys_name="dict_keys_"+count;
+s.ordered_name="dict_get_ordered_"+count;
+s.zodiac_keys=zodiac_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.keys();n+=k.length();}return n*ITEMS;}";
+s.addon_keys=addon_setup+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r){array<string>@ k=table.getKeys();n+=k.length();}return n*ITEMS;}";
+const std::string ordered="int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){int64 v;if(table.get(keys[i],v))n+=v;}return n;}";
+s.zodiac_ordered=zodiac_setup+ordered;
+s.addon_ordered=addon_setup+ordered;
 return s;
 }
 
@@ -459,16 +530,21 @@ std::string zodiac;
 std::string addon;
 };
 
-std::vector<Job> all_jobs()
+// The gated operations, then with diagnostic the diagnostic-only ones (dict_keys_<n>, dict_get_ordered_<n>).
+std::vector<Job> all_jobs(bool diagnostic)
 {
 std::vector<Job> jobs;
 for(const Operation& operation:kOperations)jobs.push_back({operation.name,operation.items,operation.zodiac,operation.addon});
+std::vector<Job> extra;
 for(const int size:{10,1000,100000}){
 DictionarySnippets s=dictionary_snippets(size);
 jobs.push_back({s.insert_name,size,s.zodiac_insert,s.addon_insert});
 jobs.push_back({s.lookup_name,size,s.zodiac_lookup,s.addon_lookup});
 jobs.push_back({s.iterate_name,size,s.zodiac_iterate,s.addon_iterate});
+extra.push_back({s.keys_name,size,s.zodiac_keys,s.addon_keys});
+extra.push_back({s.ordered_name,size,s.zodiac_ordered,s.addon_ordered});
 }
+if(diagnostic)jobs.insert(jobs.end(),extra.begin(),extra.end());
 return jobs;
 }
 
@@ -535,6 +611,7 @@ context=instance.engine->CreateContext();
 if(!context)fail(2,"cannot create a script context");
 }
 asIScriptModule* module=instance.engine->GetModule(name_.c_str(),asGM_ALWAYS_CREATE);
+instance.module=module;
 if(module->AddScriptSection(name_.c_str(),source.data(),source.size())<0||module->Build()<0)fail(2,name_+" does not build");
 instance.run=module->GetFunctionByDecl("int64 run(int)");
 if(!instance.run)fail(2,name_+" has no int64 run(int)");
@@ -581,11 +658,19 @@ int last_placement() const noexcept
 {
 return last_placement_;
 }
+// The address of the script global name on engine (the object itself for an object variable), or nullptr.
+void* global(int engine,const char* name) const
+{
+asIScriptModule* module=instances_[engine].module;
+const int index=module->GetGlobalVarIndexByName(name);
+return index<0?nullptr:module->GetAddressOfGlobalVar(static_cast<asUINT>(index));
+}
 private:
 struct Instance {
 asIScriptEngine* engine=nullptr;
 asIScriptContext* contexts[kContexts]={};
 int next_context=0;
+asIScriptModule* module=nullptr;
 asIScriptFunction* run=nullptr;
 };
 std::string exception() const
@@ -717,6 +802,96 @@ const auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),value
 return error==std::errc()&&end==text.data()+text.size();
 }
 
+// The machine a run measured, so every log and result file names it (shared CI runners differ in CPU from job to job).
+struct Machine {
+// The CPU's brand string (CPUID leaves 0x80000002-0x80000004 on x86-64), spaces trimmed and runs of them folded; "unknown"
+// where there is none.
+std::string cpu;
+unsigned logical_cores=0;
+// "Windows <major>.<minor>.<build>.<revision>" (RtlGetVersion, which reports the real version, and the UBR registry value),
+// or uname's "<system> <release> <version>".
+std::string os;
+};
+
+std::string folded_spaces(std::string_view text)
+{
+std::string out;
+for(const char c:text){
+if(c==' '&&(out.empty()||out.back()==' '))continue;
+out.push_back(c);
+}
+while(!out.empty()&&out.back()==' ')out.pop_back();
+return out;
+}
+
+std::string cpu_brand()
+{
+#if defined(__x86_64__)
+unsigned words[12];
+unsigned top=0,b=0,c=0,d=0;
+if(!__get_cpuid(0x80000000u,&top,&b,&c,&d)||top<0x80000004u)return "unknown";
+for(unsigned leaf=0;leaf<3;++leaf)__get_cpuid(0x80000002u+leaf,&words[leaf*4],&words[leaf*4+1],&words[leaf*4+2],&words[leaf*4+3]);
+char brand[sizeof words+1]={};
+std::memcpy(brand,words,sizeof words);
+const std::string text=folded_spaces(brand);
+return text.empty()?"unknown":text;
+#else
+return "unknown";
+#endif
+}
+
+std::string os_build()
+{
+#if defined(_WIN32)
+using GetVersion=LONG(WINAPI*)(OSVERSIONINFOW*);
+OSVERSIONINFOW info{};
+info.dwOSVersionInfoSize=sizeof info;
+const HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
+const auto get_version=ntdll?reinterpret_cast<GetVersion>(reinterpret_cast<void*>(GetProcAddress(ntdll,"RtlGetVersion"))):nullptr;
+if(!get_version||get_version(&info)!=0)return "Windows (unknown version)";
+std::string text="Windows "+std::to_string(info.dwMajorVersion)+"."+std::to_string(info.dwMinorVersion)+"."+std::to_string(info.dwBuildNumber);
+DWORD revision=0;
+DWORD size=sizeof revision;
+if(RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",L"UBR",RRF_RT_REG_DWORD,nullptr,&revision,&size)==ERROR_SUCCESS)text+="."+std::to_string(revision);
+return text;
+#else
+utsname name{};
+if(uname(&name)!=0)return "unknown";
+return folded_spaces(std::string(name.sysname)+" "+name.release+" "+name.version);
+#endif
+}
+
+Machine this_machine()
+{
+return Machine{cpu_brand(),std::thread::hardware_concurrency(),os_build()};
+}
+
+// A JSON string literal of text (the brand and uname texts are ASCII, but nothing is assumed).
+std::string json_text(std::string_view text)
+{
+std::string out="\"";
+for(const char c:text){
+const auto byte=static_cast<unsigned char>(c);
+if(c=='"'||c=='\\'){
+out.push_back('\\');
+out.push_back(c);
+}
+else if(byte<0x20||byte>=0x7F){
+char escape[8];
+std::snprintf(escape,sizeof escape,"\\u%04x",byte);
+out.append(escape);
+}
+else out.push_back(c);
+}
+out.push_back('"');
+return out;
+}
+
+std::string machine_line(const Machine& machine)
+{
+return "{\"machine\":{\"cpu\":"+json_text(machine.cpu)+",\"logical_cores\":"+std::to_string(machine.logical_cores)+",\"os\":"+json_text(machine.os)+"}}\n";
+}
+
 // Measurement hygiene, the same for both sides: on Windows a high priority class, so other programs interrupt the
 // interleaved runs less (Linux needs privileges for that), then a short spin so the CPU leaves its idle clock before the
 // first operation. Pinning to one CPU was tried and made runs noisier on a loaded machine, so the scheduler keeps its choice.
@@ -739,7 +914,11 @@ std::vector<std::string> only;
 const char* out_path=nullptr;
 bool list=false;
 bool detail=false;
-const std::vector<Job> jobs=all_jobs();
+bool layout=false;
+// --diagnostic may follow the --op that names a diagnostic operation, so it is found first.
+bool diagnostic=false;
+for(int i=1;i<argc;++i)diagnostic=diagnostic||std::string_view(argv[i])=="--diagnostic";
+const std::vector<Job> jobs=all_jobs(diagnostic);
 for(int i=1;i<argc;++i){
 const std::string_view arg=argv[i];
 const bool has_value=i+1<argc;
@@ -757,7 +936,9 @@ only.push_back(name);
 else if(arg=="--out"&&has_value)out_path=argv[++i];
 else if(arg=="--list")list=true;
 else if(arg=="--detail")detail=true;
-else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--list]");
+else if(arg=="--layout")layout=true;
+else if(arg=="--diagnostic"){}
+else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--layout] [--diagnostic] [--list]");
 }
 if(list){
 for(const Job& job:jobs)std::printf("%s\n",job.name.c_str());
@@ -767,6 +948,13 @@ std::FILE* out=nullptr;
 if(out_path){
 out=std::fopen(out_path,"wb");
 if(!out)fail(1,std::string("cannot write ")+out_path+": "+std::strerror(errno));
+}
+const Machine machine=this_machine();
+std::fprintf(stderr,"bench_types: machine: %s, %u logical cores, %s\n",machine.cpu.c_str(),machine.logical_cores,machine.os.c_str());
+{
+const std::string line=machine_line(machine);
+std::fwrite(line.data(),1,line.size(),stdout);
+if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::string("cannot write ")+out_path);
 }
 quiet_process();
 asPrepareMultithread();
@@ -788,6 +976,16 @@ if(detail){
 for(const Measurement& m:measurements){
 const std::string line=detail_line(m);
 std::fwrite(line.data(),1,line.size(),stderr);
+}
+}
+if(layout){
+for(const Measurement& m:measurements){
+for(int engine=0;engine<kEngines;++engine){
+const auto* table=static_cast<const zodiac::Dictionary*>(m.zodiac.global(engine,"table"));
+if(!table)continue;
+const std::string line="bench_types: layout {\"op\":\""+m.job->name+"\",\"engine\":"+std::to_string(engine)+",\"table\":"+zodiac::DictionaryTestAccess::layout(*table)+"}\n";
+std::fwrite(line.data(),1,line.size(),stderr);
+}
 }
 }
 for(const Measurement& m:measurements){

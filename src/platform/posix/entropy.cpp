@@ -1,7 +1,15 @@
 // fill_entropy on POSIX systems (see platform/entropy.hpp): getrandom from the kernel's pool (retried on EINTR and short
-// reads), falling back to /dev/urandom where the call is missing (ENOSYS) or not permitted.
+// reads), falling back to /dev/urandom where the call is missing (ENOSYS) or not permitted. In ZODIAC_TEST_HOOKS trees only,
+// the table hash seed hook.
 #include <platform/entropy.hpp>
 #include <cerrno>
+#if defined(ZODIAC_TEST_HOOKS)
+#include <charconv>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <system_error>
+#endif
 #include <fcntl.h>
 #include <sys/random.h>
 #include <unistd.h>
@@ -39,4 +47,20 @@ size-=static_cast<std::size_t>(got);
 }
 return true;
 }
+
+#if defined(ZODIAC_TEST_HOOKS)
+// The C library sets up environ before any constructor runs, so getenv is safe here.
+[[gnu::used,gnu::noinline]] bool test_hook_table_hash_seed(std::uint64_t& seed) noexcept
+{
+const char* text=std::getenv("ZODIAC_TABLE_HASH_SEED");
+if(!text||!*text)return false;
+const std::size_t size=std::strlen(text);
+const std::from_chars_result read=std::from_chars(text,text+size,seed);
+if(read.ec!=std::errc{}||read.ptr!=text+size){
+std::fprintf(stderr,"ZODIAC_TABLE_HASH_SEED is not a whole number from 0 to 18446744073709551615\n");
+std::abort();
+}
+return true;
+}
+#endif
 }

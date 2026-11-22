@@ -500,12 +500,8 @@ constinit bool table_keys_drawn=false;
 // program may use, so it runs before every other dynamic initializer (default priority) of the program, which may hash
 // strings already. The secrets are uniform 64-bit words: wyhash's own secret maker only improves the mixing of a fixed public
 // choice, and a random word is that poor with negligible chance (Go's runtime keys its wyhash-style hash the same way).
-[[gnu::constructor(101)]] void draw_table_keys() noexcept
+void splitmix_words(std::uint64_t state,std::uint64_t (&words)[5]) noexcept
 {
-std::uint64_t words[5];
-if(!platform::fill_entropy(words,sizeof words)){
-static const char anchor=0;
-std::uint64_t state=static_cast<std::uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count())^reinterpret_cast<std::uintptr_t>(&anchor);
 for(std::uint64_t& word:words){
 state+=0x9E3779B97F4A7C15u;
 std::uint64_t value=state;
@@ -513,6 +509,20 @@ value=(value^(value>>30))*0xBF58476D1CE4E5B9u;
 value=(value^(value>>27))*0x94D049BB133111EBu;
 word=value^(value>>31);
 }
+}
+// In a tree configured with ZODIAC_TEST_HOOKS=ON only (see platform/entropy.hpp), ZODIAC_TABLE_HASH_SEED=<n> replaces the
+// drawn keys with the splitmix64 stream of n, so benches and tests can repeat one table layout in many processes.
+[[gnu::constructor(101)]] void draw_table_keys() noexcept
+{
+std::uint64_t words[5];
+#if defined(ZODIAC_TEST_HOOKS)
+std::uint64_t fixed=0;
+if(platform::test_hook_table_hash_seed(fixed))splitmix_words(fixed,words);
+else
+#endif
+if(!platform::fill_entropy(words,sizeof words)){
+static const char anchor=0;
+splitmix_words(static_cast<std::uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count())^reinterpret_cast<std::uintptr_t>(&anchor),words);
 }
 table_keys=HashKeys{words[0],words[1],words[2],words[3],words[4]};
 #if !defined(NDEBUG)

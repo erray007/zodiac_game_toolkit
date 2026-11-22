@@ -73,6 +73,11 @@ jobs:
         run: |
           .tools/cmake/bin/cmake --preset windows-release
           .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      # Runners differ in CPU from job to job and some measure differently: the log names this one (bench_types and check_bench.py name
+      # it again from CPUID).
+      - name: Show the CPU
+        shell: pwsh
+        run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
       - name: Benchmark against the sample add-ons
         shell: bash
         run: |
@@ -178,6 +183,13 @@ jobs:
         run: |
           .tools/cmake/bin/cmake --preset linux-release
           .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
+      # The release tree's test of this (test_no_test_hooks) runs in kit-windows on Windows; here the Linux release core and bench are checked.
+      - name: Show that the release build holds no test hook
+        run: |
+          nm=$(sed -n 's/^CMAKE_NM:[A-Z]*=//p' build/linux-release/CMakeCache.txt)
+          .tools/cmake/bin/cmake "-DNM=$nm" -DHOOKS=OFF -DARCHIVES=build/linux-release/src/core/libzodiac_core_release.a -DBINARIES=build/linux-release/tests/bench/bench_types -P tests/check_no_test_hooks.cmake
+      - name: Show the CPU
+        run: lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)|MHz|cache'
       - name: Benchmark against the sample add-ons (speed gate report-only)
         shell: bash
         run: |
@@ -350,6 +362,12 @@ jobs:
           "hello.exe ran and exited with 0. Size: $size bytes."
           # Size gate (spec 8.9): a core-only hello world release is at most 5 MB.
           if ($size -gt 5MB) { throw "hello.exe is $size bytes, more than the 5 MB limit" }
+          # The test hooks (ZODIAC_TEST_HOOKS) never reach a game: its executable holds the core (serialize()'s header) but not the
+          # seed hook's environment variable.
+          $bytes = [IO.File]::ReadAllText($hello, [Text.Encoding]::Latin1)
+          if (-not $bytes.Contains('zodiac-dictionary 1')) { throw "hello.exe does not hold the core's text 'zodiac-dictionary 1', so the scan below proves nothing" }
+          if ($bytes.Contains('ZODIAC_TABLE_HASH_SEED')) { throw "hello.exe holds ZODIAC_TABLE_HASH_SEED, a test hook" }
+          "hello.exe holds no test hook."
       # Two rounds. Round 1: .zs already belongs to another program (a fake ProgID); every option is installed, then uninstall must give .zs back and
       # remove everything else it added. Round 2: the user PATH already holds the kit's bin folder; uninstall must leave that entry, which it did not add.
       - name: Setup wizard, silent install and uninstall

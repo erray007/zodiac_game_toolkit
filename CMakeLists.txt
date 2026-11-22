@@ -10,6 +10,14 @@ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 message(FATAL_ERROR "Zodiac supports clang only (found ${CMAKE_CXX_COMPILER_ID}). Use the provided presets.")
 endif()
 include(CTest)
+# Test hooks (platform/entropy.hpp: a fixed table hash seed from ZODIAC_TABLE_HASH_SEED) for bench diagnosis on CI only. Off by default and
+# in every preset; a tree with them refuses to install or package (cmake/ZodiacPackage.cmake), and test_no_test_hooks proves their absence
+# from every other tree's binaries.
+option(ZODIAC_TEST_HOOKS "Compile test-only hooks into the core (never for a kit or a game)" OFF)
+if(ZODIAC_TEST_HOOKS)
+message(WARNING "ZODIAC_TEST_HOOKS is ON: this tree is for benches and tests only; it cannot be installed or packaged.")
+install(CODE "message(FATAL_ERROR \"This tree is configured with ZODIAC_TEST_HOOKS=ON, which must never be installed.\")")
+endif()
 include(cmake/ZodiacReleaseFlags.cmake)
 include(cmake/Dependencies.cmake)
 include(cmake/ZodiacWarnings.cmake)
