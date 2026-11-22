@@ -85,8 +85,12 @@ static ScriptArray* create(asITypeInfo* type,int length,const void* value) noexc
 static ScriptArray* create_from_list(asITypeInfo* type,void* list) noexcept;
 // An empty array<string> (type must hold Zodiac's string) with room for exactly capacity elements, for a native producer that
 // then appends each element with append_string: no default construction and assignment per element, one block for the slots.
+// cache, when not null, is cache_for(type), which a caller that makes many such arrays keeps: finding it again costs a lookup of
+// the type's user data under the engine's lock (on Windows a semaphore wait and release, two system calls) per array.
 // nullptr after a raised failure.
-static ScriptArray* create_strings(asITypeInfo* type,int capacity) noexcept;
+static ScriptArray* create_strings(asITypeInfo* type,int capacity,ArrayCache* cache=nullptr) noexcept;
+// The per-type data every array of type uses, made once per type; nullptr after a raised failure. It lives as long as the type.
+static ArrayCache* cache_for(asITypeInfo* type) noexcept;
 // Appends a copy of text, copy-constructed in memory from asAllocMem (as the engine allocates value types), into the room
 // create_strings made; false after a raised failure ("out of memory", or past that room).
 bool append_string(const String& text) noexcept;
@@ -141,6 +145,8 @@ ScriptArray(const ScriptArray&)=delete;
 ScriptArray& operator=(const ScriptArray&)=delete;
 private:
 explicit ScriptArray(asITypeInfo* type) noexcept;
+// An array<string> whose cache is already known (create_strings).
+ScriptArray(asITypeInfo* type,ArrayCache* strings) noexcept;
 ~ScriptArray();
 static ScriptArray* allocate(asITypeInfo* type) noexcept;
 void notify_gc() noexcept;

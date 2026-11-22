@@ -40,6 +40,8 @@ asITypeInfo* string_array_type=nullptr;
 int dictionary_type_id=0;
 int value_type_id=0;
 int string_type_id=0;
+// array<string>'s ScriptArray::cache_for, fetched by the first keys(), so later ones skip the lookup under the engine's lock.
+std::atomic<ArrayCache*> string_array_cache{nullptr};
 // array<T> of each tag, looked up when deserialize() first needs it.
 std::atomic<asITypeInfo*> arrays[static_cast<int>(ArrayTag::count)]={};
 
@@ -872,7 +874,14 @@ free_count_=0;
 ScriptArray* Dictionary::keys() const noexcept
 {
 // Each key copy-constructed straight into its slot (no default construction, assignment or engine call per key).
-ScriptArray* result=ScriptArray::create_strings(cache_->string_array_type,static_cast<int>(live_));
+ArrayCache* strings=cache_->string_array_cache.load(std::memory_order_acquire);
+if(!strings){
+// Threads racing here find the same cache.
+strings=ScriptArray::cache_for(cache_->string_array_type);
+if(!strings)return nullptr;
+cache_->string_array_cache.store(strings,std::memory_order_release);
+}
+ScriptArray* result=ScriptArray::create_strings(cache_->string_array_type,static_cast<int>(live_),strings);
 if(!result)return nullptr;
 for(std::uint32_t index=first_;index!=no_entry;index=entry(index).next){
 if(!result->append_string(entry(index).key)){

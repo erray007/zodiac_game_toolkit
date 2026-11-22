@@ -458,6 +458,16 @@ kind_=primitive_kind(value_type_id,element_size_);
 }
 }
 
+ScriptArray::ScriptArray(asITypeInfo* type,ArrayCache* strings) noexcept:kind_(Kind::string),indirect_(true),element_size_(sizeof(void*)),sub_type_id_(type->GetSubTypeId()),type_(type),cache_(strings)
+{
+type_->AddRef();
+}
+
+ArrayCache* ScriptArray::cache_for(asITypeInfo* type) noexcept
+{
+return precache(type);
+}
+
 ScriptArray::~ScriptArray()
 {
 if(kind_==Kind::string){
@@ -519,16 +529,30 @@ array->notify_gc();
 return array;
 }
 
-ScriptArray* ScriptArray::create_strings(asITypeInfo* type,int capacity) noexcept
+ScriptArray* ScriptArray::create_strings(asITypeInfo* type,int capacity,ArrayCache* cache) noexcept
 {
 if(capacity<0){
 raise(count_error);
 return nullptr;
 }
-ScriptArray* array=allocate(type);
+ScriptArray* array;
+if(cache&&cache->strings){
+void* memory=std::malloc(sizeof(ScriptArray));
+if(!memory){
+raise(memory_error);
+return nullptr;
+}
+array=new(memory) ScriptArray(type,cache);
+}else{
+array=allocate(type);
 if(!array)return nullptr;
-if(array->kind_!=Kind::string||!array->set_capacity(static_cast<std::uint32_t>(capacity))){
-if(array->kind_!=Kind::string)raise("create_strings needs array<string>");
+if(array->kind_!=Kind::string){
+raise("create_strings needs array<string>");
+array->release();
+return nullptr;
+}
+}
+if(!array->set_capacity(static_cast<std::uint32_t>(capacity))){
 array->release();
 return nullptr;
 }
