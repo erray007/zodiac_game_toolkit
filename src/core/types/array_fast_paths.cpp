@@ -115,6 +115,15 @@ return reinterpret_cast<const String* const*>(data);
 }
 // String elements compare without a C runtime call per element (string_detail::same_text, see string.hpp).
 using string_detail::same_text;
+// The string search loop on its own 64-byte boundary: inlined into native_find, its placement shifted with unrelated code under
+// full LTO, and a change elsewhere (Task 5b's keys()) made array_find_string 19 % slower on an EPYC 7763 with identical code here.
+[[gnu::noinline,gnu::aligned(64)]] int find_string(const String* const* elements,std::uint32_t start,std::uint32_t count,std::string_view needle) noexcept
+{
+for(std::uint32_t index=start;index<count;++index){
+if(same_text(elements[index]->bytes(),needle))return static_cast<int>(index);
+}
+return -1;
+}
 }
 
 void ScriptArray::native_sort(bool descending) noexcept
@@ -134,14 +143,7 @@ sort_values(first,first+count_,descending);
 
 int ScriptArray::native_find(const void* value,std::uint32_t start) const noexcept
 {
-if(kind_==Kind::string){
-const std::string_view needle=static_cast<const String*>(value)->bytes();
-const String* const* elements=strings(data_);
-for(std::uint32_t index=start;index<count_;++index){
-if(same_text(elements[index]->bytes(),needle))return static_cast<int>(index);
-}
-return -1;
-}
+if(kind_==Kind::string)return find_string(strings(data_),start,count_,static_cast<const String*>(value)->bytes());
 int found=-1;
 with_type(kind_,[&]<class T>(std::type_identity<T>){found=find_value<T>(data_,start,count_,value);});
 return found;
