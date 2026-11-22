@@ -32,6 +32,7 @@
 // native fast paths are in array_fast_paths.cpp.
 #include <core/types/array.hpp>
 #include <core/types/script_guard.hpp>
+#include <core/types/string.hpp>
 #include <core/types/string_binding.hpp>
 #include <algorithm>
 #include <climits>
@@ -459,7 +460,16 @@ kind_=primitive_kind(value_type_id,element_size_);
 
 ScriptArray::~ScriptArray()
 {
-if(has_objects()){
+if(kind_==Kind::string){
+// Zodiac's strings directly: what ReleaseScriptObject does for this value type (its destructor, then the engine's free,
+// which is asFreeMem's), without the engine's generic calls per element.
+for(std::uint32_t index=0;index<count_;++index){
+if(void* pointer=load_pointer(slot(index))){
+static_cast<String*>(pointer)->~String();
+asFreeMem(pointer);
+}
+}
+}else if(has_objects()){
 asIScriptEngine* owner=engine();
 asITypeInfo* element_type=sub_type();
 for(std::uint32_t index=0;index<count_;++index){
@@ -507,6 +517,47 @@ return nullptr;
 }
 array->notify_gc();
 return array;
+}
+
+ScriptArray* ScriptArray::create_strings(asITypeInfo* type,int capacity) noexcept
+{
+if(capacity<0){
+raise(count_error);
+return nullptr;
+}
+ScriptArray* array=allocate(type);
+if(!array)return nullptr;
+if(array->kind_!=Kind::string||!array->set_capacity(static_cast<std::uint32_t>(capacity))){
+if(array->kind_!=Kind::string)raise("create_strings needs array<string>");
+array->release();
+return nullptr;
+}
+array->notify_gc();
+return array;
+}
+
+bool ScriptArray::append_string(const String& text) noexcept
+{
+if(count_>=capacity_){
+raise(memory_error);
+return false;
+}
+void* memory=asAllocMem(sizeof(String));
+if(!memory){
+raise(memory_error);
+return false;
+}
+try{
+new(memory) String(text);
+}
+catch(...){
+asFreeMem(memory);
+raise(memory_error);
+return false;
+}
+store_pointer(slot(count_),memory);
+++count_;
+return true;
 }
 
 ScriptArray* ScriptArray::create(asITypeInfo* type,int length,const void* value) noexcept

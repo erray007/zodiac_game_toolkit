@@ -15,7 +15,8 @@
 //   new key joins at the back. bool move_by(key, int delta) moves key delta places (negative: towards the front) and
 //   returns false, changing nothing, when key is missing, delta is 0 or the move would pass either end; it costs O(|delta|),
 //   so a move by one is O(1). bool move(key, int index) moves key so that it ends at index and returns false, changing
-//   nothing, when key is missing or index is outside [0, length()-1] (true when it is there already). int index_of(key)
+//   nothing, when key is missing or index is outside [0, length()-1]; a move to the index the key already has changes
+//   nothing and returns true. int index_of(key)
 //   (-1 when missing) walks from the key towards both ends at once and stops at the first: min(i, length()-1-i) steps for a
 //   key at i, so the ends of the order are O(1). string key_at(int index) walks from the nearer end, the same
 //   min(index, length()-1-index) steps, and throws "index out of range" outside [0, length()-1]. move costs index_of's walk
@@ -181,7 +182,7 @@ int index_of(const String& key) const noexcept;
 // The key at index, or nullptr when index is outside [0, length()-1].
 const String* key_at(int index) const noexcept;
 // The keys in insertion order; nullptr after a raised failure.
-ScriptArray* keys() const;
+ScriptArray* keys() const noexcept;
 // Replaces the content with copies of other's; false after a raised failure (the content is then unchanged).
 bool assign(const Dictionary& other);
 // Throws std::runtime_error with the contract's message for values it cannot write, and std::bad_alloc.

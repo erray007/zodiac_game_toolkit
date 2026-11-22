@@ -869,19 +869,16 @@ free_count_=0;
 }
 }
 
-ScriptArray* Dictionary::keys() const
+ScriptArray* Dictionary::keys() const noexcept
 {
-ScriptArray* result=ScriptArray::create(cache_->string_array_type,static_cast<int>(live_));
+// Each key copy-constructed straight into its slot (no default construction, assignment or engine call per key).
+ScriptArray* result=ScriptArray::create_strings(cache_->string_array_type,static_cast<int>(live_));
 if(!result)return nullptr;
-try{
-int at=0;
 for(std::uint32_t index=first_;index!=no_entry;index=entry(index).next){
-*static_cast<String*>(result->at(at++))=entry(index).key;
-}
-}
-catch(...){
+if(!result->append_string(entry(index).key)){
 result->release();
-throw;
+return nullptr;
+}
 }
 return result;
 }

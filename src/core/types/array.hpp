@@ -72,6 +72,7 @@
 
 namespace zodiac {
 struct ArrayCache;
+class String;
 
 class ScriptArray {
 public:
@@ -82,6 +83,13 @@ static ScriptArray* create(asITypeInfo* type) noexcept;
 static ScriptArray* create(asITypeInfo* type,int length) noexcept;
 static ScriptArray* create(asITypeInfo* type,int length,const void* value) noexcept;
 static ScriptArray* create_from_list(asITypeInfo* type,void* list) noexcept;
+// An empty array<string> (type must hold Zodiac's string) with room for exactly capacity elements, for a native producer that
+// then appends each element with append_string: no default construction and assignment per element, one block for the slots.
+// nullptr after a raised failure.
+static ScriptArray* create_strings(asITypeInfo* type,int capacity) noexcept;
+// Appends a copy of text, copy-constructed in memory from asAllocMem (as the engine allocates value types), into the room
+// create_strings made; false after a raised failure ("out of memory", or past that room).
+bool append_string(const String& text) noexcept;
 
 void add_ref() const noexcept;
 void release() const noexcept;
