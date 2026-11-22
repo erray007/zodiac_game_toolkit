@@ -61,7 +61,15 @@ def parse_run(results_text: str, stderr_text: str, focus: str) -> dict:
     return {"machine": machine, "ops": ops, "layouts": layouts}
 
 
-def run_once(bench: Path, out_dir: Path, name: str, seed, rounds: int, ops: list, focus: str) -> dict:
+def press_memory(gigabytes: float) -> None:
+    """Touches and frees gigabytes of memory in a child process, as a big link or test suite does just before the gate's first bench run:
+    the freed pages wait on the system's free list, so the next process's fresh pages are zeroed on demand."""
+    if gigabytes > 0:
+        subprocess.run([sys.executable, "-I", "-c", f"b = bytearray(b'\\x01') * {int(gigabytes * (1 << 30))}"], check=True)
+
+
+def run_once(bench: Path, out_dir: Path, name: str, seed, rounds: int, ops: list, focus: str, pressure: float = 0) -> dict:
+    press_memory(pressure)
     env = dict(os.environ)
     env.pop(SEED_VARIABLE, None)
     if seed is not None:
@@ -198,6 +206,7 @@ def main(argv=None) -> int:
     parser.add_argument("--focus", default="dict_iterate_10")
     parser.add_argument("--slow", type=float, default=1.3)
     parser.add_argument("--op", action="append", default=None)
+    parser.add_argument("--pressure-gb", type=float, default=0, help="before each run, touch and free this much memory in a child process")
     parser.add_argument("--all", action="store_true", help="every gated operation (bench_types --list) plus the --op ones, as the CI gate runs them")
     args = parser.parse_args(argv)
     if args.from_dir:
@@ -226,7 +235,7 @@ def main(argv=None) -> int:
     try:
         for index, (kind, seed, number) in enumerate(runs, start=1):
             name = f"seed{seed}-pass{number}" if kind == "seed" else f"unfixed{number}"
-            record = run_once(args.bench, args.out_dir, name, seed, args.rounds, ops, args.focus)
+            record = run_once(args.bench, args.out_dir, name, seed, args.rounds, ops, args.focus, args.pressure_gb)
             record.update({"kind": kind, "seed": seed, "pass": number})
             records.append(record)
             # One line per run, so a cut-short diagnosis still has its data in the log.

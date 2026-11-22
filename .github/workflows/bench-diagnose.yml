@@ -39,6 +39,9 @@ on:
       hooks:
         description: "ON: a ZODIAC_TEST_HOOKS tree; OFF: the plain release tree the gate measures (then seeds must be 0)"
         default: "ON"
+      pressure_gb:
+        description: "Touch and free this many GB in a child process before each run (0: none)"
+        default: "0"
 
 permissions:
   contents: read
@@ -52,6 +55,7 @@ env:
   FOCUS: ${{ inputs.focus || 'dict_iterate_10' }}
   ALL: ${{ inputs.all || 'false' }}
   HOOKS: ${{ inputs.hooks || 'ON' }}
+  PRESSURE_GB: ${{ inputs.pressure_gb || '0' }}
 
 jobs:
   windows:
@@ -94,7 +98,7 @@ jobs:
           ops=()
           for op in $OPS; do ops+=(--op "$op"); done
           if [ "$ALL" = "true" ]; then ops+=(--all); fi
-          python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types.exe --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" "${ops[@]}"
+          python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types.exe --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" --pressure-gb "$PRESSURE_GB" "${ops[@]}"
       - name: Upload the diagnosis
         if: always()
         uses: actions/upload-artifact@v4
@@ -147,7 +151,7 @@ jobs:
           ops=()
           for op in $OPS; do ops+=(--op "$op"); done
           if [ "$ALL" = "true" ]; then ops+=(--all); fi
-          python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" "${ops[@]}"
+          python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" --pressure-gb "$PRESSURE_GB" "${ops[@]}"
       - name: Upload the diagnosis
         if: always()
         uses: actions/upload-artifact@v4
