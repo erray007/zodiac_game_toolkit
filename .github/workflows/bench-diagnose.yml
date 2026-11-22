@@ -3,13 +3,14 @@
 # fixed per process (ZODIAC_TABLE_HASH_SEED) and unfixed, to tell whether a slow mode follows the seed (layout) or the process. The raw runs,
 # runs.jsonl and summary.txt are uploaded as the artifact bench-diagnose-<os>.
 #
-# Trigger it either way (normal pushes only show the two jobs as skipped):
-# - gh workflow run bench-diagnose.yml --ref <branch> [-f seeds=64 -f passes=2 -f unfixed=64 -f rounds=101 -f ops="..." -f os=both]
-# - a pushed commit whose message contains [bench-diagnose] (the defaults below).
+# Trigger it by hand only (pushes never start it):
+#   gh workflow run bench-diagnose.yml --ref <branch> [-f seeds=64 -f passes=2 -f unfixed=64 -f rounds=101 -f ops="..." -f all=true
+#     -f hooks=OFF -f pressure_gb=10 -f os=both]
+# Each job stops after 150 minutes: the largest run it is meant for, 64 processes of every gated operation (about 70 minutes), fits
+# with room to spare; the default 192 size-10 processes take about 15.
 name: bench-diagnose
 
 on:
-  push:
   workflow_dispatch:
     inputs:
       seeds:
@@ -59,8 +60,9 @@ env:
 
 jobs:
   windows:
-    if: (github.event_name == 'workflow_dispatch' && inputs.os != 'linux') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[bench-diagnose]'))
+    if: inputs.os != 'linux'
     runs-on: windows-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -108,8 +110,9 @@ jobs:
           if-no-files-found: ignore
 
   linux:
-    if: (github.event_name == 'workflow_dispatch' && inputs.os != 'windows') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[bench-diagnose]'))
+    if: inputs.os != 'windows'
     runs-on: ubuntu-24.04
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

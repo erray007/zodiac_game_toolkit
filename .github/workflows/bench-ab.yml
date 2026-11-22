@@ -5,8 +5,6 @@
 name: bench-ab
 
 on:
-  # A push only registers the workflow (both jobs are skipped); workflow_dispatch runs it.
-  push:
   workflow_dispatch:
     inputs:
       base:
@@ -28,10 +26,19 @@ on:
 permissions:
   contents: read
 
+# The inputs reach the scripts only through the environment, never spliced into their text.
+env:
+  BASE: ${{ inputs.base }}
+  PAIRS: ${{ inputs.pairs }}
+  ROUNDS: ${{ inputs.rounds }}
+  OPS: ${{ inputs.ops }}
+
 jobs:
   windows:
-    if: github.event_name == 'workflow_dispatch' && inputs.os != 'linux'
+    if: inputs.os != 'linux'
     runs-on: windows-latest
+    # Two release builds (about 25 minutes) and 8 pairs of every gated operation (about 15) fit with a margin.
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -66,7 +73,7 @@ jobs:
       - name: Build A (the baseline)
         shell: pwsh
         run: |
-          git worktree add base-src "${{ inputs.base }}"
+          git worktree add base-src "$env:BASE"
           if ($LASTEXITCODE -ne 0) { throw "git worktree failed" }
           New-Item -ItemType Junction -Path base-src/.tools -Target (Resolve-Path .tools) | Out-Null
           $deps = "$PWD/.deps/windows-release"
@@ -82,8 +89,10 @@ jobs:
       - name: A/B
         run: |
           ops=()
-          for op in ${{ inputs.ops }}; do ops+=(--op "$op"); done
-          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types.exe --b build/windows-release/tests/bench/bench_types.exe --out-dir bench-ab --pairs "${{ inputs.pairs }}" --rounds "${{ inputs.rounds }}" "${ops[@]}"
+          for op in $OPS; do ops+=(--op "$op"); done
+          # Named ops may be diagnostic ones (dict_keys_10, ...); without names every gated op runs, and the diagnostic ones stay out.
+          if [ -n "$OPS" ]; then ops+=(--diagnostic); fi
+          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types.exe --b build/windows-release/tests/bench/bench_types.exe --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
       - name: Upload the A/B
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,8 +102,9 @@ jobs:
           if-no-files-found: ignore
 
   linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.os != 'windows'
+    if: inputs.os != 'windows'
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,7 +141,7 @@ jobs:
           .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
       - name: Build A (the baseline)
         run: |
-          git worktree add base-src "${{ inputs.base }}"
+          git worktree add base-src "$BASE"
           ln -s "$PWD/.tools" base-src/.tools
           deps="$PWD/.deps/linux-release"
           root="$PWD"
@@ -142,8 +152,9 @@ jobs:
       - name: A/B
         run: |
           ops=()
-          for op in ${{ inputs.ops }}; do ops+=(--op "$op"); done
-          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types --b build/linux-release/tests/bench/bench_types --out-dir bench-ab --pairs "${{ inputs.pairs }}" --rounds "${{ inputs.rounds }}" "${ops[@]}"
+          for op in $OPS; do ops+=(--op "$op"); done
+          if [ -n "$OPS" ]; then ops+=(--diagnostic); fi
+          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types --b build/linux-release/tests/bench/bench_types --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
       - name: Upload the A/B
         if: always()
         uses: actions/upload-artifact@v4

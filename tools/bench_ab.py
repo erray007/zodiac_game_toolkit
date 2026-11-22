@@ -21,8 +21,8 @@ from pathlib import Path
 LIMIT = 1.05
 
 
-def run(bench: Path, out: Path, rounds: int, ops: list) -> dict:
-    command = [str(bench), "--detail", "--rounds", str(rounds), "--out", str(out)]
+def run(bench: Path, out: Path, rounds: int, ops: list, diagnostic: bool = False) -> dict:
+    command = [str(bench), "--detail", "--rounds", str(rounds), "--out", str(out)] + (["--diagnostic"] if diagnostic else [])
     for op in ops:
         command += ["--op", op]
     done = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
@@ -67,6 +67,7 @@ def main(argv=None) -> int:
     parser.add_argument("--pairs", type=int, default=8)
     parser.add_argument("--rounds", type=int, default=101)
     parser.add_argument("--op", action="append", default=[])
+    parser.add_argument("--diagnostic", action="store_true", help="pass --diagnostic, so --op may name the diagnostic operations")
     args = parser.parse_args(argv)
     if args.pairs < 1:
         print("bench_ab: --pairs must be at least 1", file=sys.stderr)
@@ -78,7 +79,7 @@ def main(argv=None) -> int:
             order = ("a", "b") if pair % 2 == 0 else ("b", "a")
             for side in order:
                 bench = args.a if side == "a" else args.b
-                result = run(bench, args.out_dir / f"{side}{pair}.json", args.rounds, args.op)
+                result = run(bench, args.out_dir / f"{side}{pair}.json", args.rounds, args.op, args.diagnostic)
                 (a_runs if side == "a" else b_runs).append(result)
             print(f"bench_ab: pair {pair + 1} of {args.pairs} done", file=sys.stderr, flush=True)
     except (RuntimeError, OSError, ValueError, KeyError) as error:
