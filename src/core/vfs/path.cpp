@@ -175,11 +175,23 @@ return result;
 }
 }
 
+bool is_temp_name(std::string_view name) noexcept
+{
+if(name.size()<temp_prefix.size())return false;
+// ASCII case-insensitive, as Windows compares names.
+for(std::size_t i=0;i<temp_prefix.size();++i){
+const char c=name[i];
+if((c>='A'&&c<='Z'?static_cast<char>(c+32):c)!=temp_prefix[i])return false;
+}
+return true;
+}
+
 bool valid_name(std::string_view name) noexcept
 {
 if(name.empty()||name=="."||name=="..")return false;
 const char last=name.back();
 if(last=='.'||last==' ')return false;
+if(is_temp_name(name))return false;
 const byte* p=reinterpret_cast<const byte*>(name.data());
 const byte* const end=p+name.size();
 while(p<end){

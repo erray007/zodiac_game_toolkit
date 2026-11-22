@@ -2,10 +2,15 @@
 #include <core/text.hpp>
 #include <core/vfs/folder_source.hpp>
 #include <core/vfs/host_source.hpp>
+#include <platform/clock.hpp>
+#include <platform/entropy.hpp>
 #include <platform/file.hpp>
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <memory>
+#include <optional>
+#include <span>
 
 namespace zodiac::vfs {
 namespace {
@@ -69,19 +74,124 @@ vfs.report_internal_error(operation,path);
 return std::unexpected(MoveFailure{Failure{FileError::io,{}},false});
 }
 }
-// Whether host files from and to are one file (two mounts of one folder, a host path and a mount, a link to the other; links are
-// followed). A missing to is another file; an identity that cannot be read otherwise is a failure of its side, never a guess, so
-// nothing is renamed over, truncated or removed on an unknown identity.
-std::expected<bool,MoveFailure> same_file(const std::filesystem::path& from,const std::filesystem::path& to)
+// Whether host files from_file and to_file (of the script's paths from and to) are one file (two mounts of one folder, a host
+// path and a mount, a link to the other; links are followed). A missing to is another file; an identity that cannot be read
+// otherwise is a failure of its side with its whole text (`cannot read` from, `cannot write` to), never a guess, so nothing is
+// renamed over, replaced or removed on an unknown identity.
+std::expected<bool,MoveFailure> same_file(std::string_view from,std::string_view to,const std::filesystem::path& from_file,const std::filesystem::path& to_file)
 {
-const auto first=platform::file_identity(from);
-if(!first)return move_failed(Failure{detail::file_error(first.error()),{}},false);
-const auto second=platform::file_identity(to);
+const auto first=platform::file_identity(from_file);
+if(!first){
+const FileError code=detail::file_error(first.error());
+return move_failed(Failure{code,failure_text(FileAction::read,from,Failure{code,{}})},false);
+}
+const auto second=platform::file_identity(to_file);
 if(!second){
 if(platform::error_kind(second.error())==platform::ErrorKind::not_found)return false;
-return move_failed(Failure{detail::file_error(second.error()),{}},true);
+const FileError code=detail::file_error(second.error());
+return move_failed(Failure{code,failure_text(FileAction::write,to,Failure{code,{}})},true);
 }
 return *first==*second;
+}
+// A free temporary name beside path: temp_prefix and 16 random hexadecimal digits (an invalid name to every script, listing and
+// lookup, see valid_name).
+std::filesystem::path temp_beside(const std::filesystem::path& path)
+{
+static std::atomic<std::uint64_t> fallback{0};
+std::uint64_t bits=0;
+if(!platform::fill_entropy(&bits,sizeof bits))bits=fallback.fetch_add(0x9E3779B97F4A7C15u,std::memory_order_relaxed)^static_cast<std::uint64_t>(platform::monotonic_us());
+std::string name(temp_prefix);
+constexpr char digits[]="0123456789abcdef";
+for(int shift=60;shift>=0;shift-=4)name.push_back(digits[(bits>>shift)&0xF]);
+name.append(".tmp");
+return path.parent_path()/std::filesystem::path(name);
+}
+// The file a replacement takes the place of: what a link at target names (so a write through a link changes that file, as a
+// write in place does), or target itself (a dangling link included).
+std::expected<std::filesystem::path,std::error_code> replacement_target(const std::filesystem::path& target)
+{
+if(!platform::is_link(target))return target;
+std::error_code error;
+std::filesystem::path real=std::filesystem::canonical(target,error);
+if(!error)return real;
+if(platform::error_kind(error)==platform::ErrorKind::not_found)return target;
+return std::unexpected(error);
+}
+// What writing the temporary file gave: a system error (EEXIST: the name is taken, another is tried; from: it was from that
+// failed), or a failure of its own (a read of from), and Windows' metadata warning.
+struct TempWrite{
+std::error_code system;
+bool from=false;
+std::optional<MoveFailure> failure;
+std::error_code metadata;
+};
+// Replaces host file target with a new file that write(temp) makes beside it (with FileAccess::create_new or copy_file's
+// create_new), by replace_file: the target is the old file or the complete new one, never a part. The temporary file is removed
+// after any failure. Its permission bits are target's (POSIX). Not synced: the result survives a crash of the game, not
+// necessarily one of the system.
+template<class Write>
+std::expected<void,MoveFailure> replace_host(const std::filesystem::path& target,Write&& write,std::error_code& metadata)
+{
+const auto final=replacement_target(target);
+if(!final)return move_failed(Failure{detail::file_error(final.error()),{}},true);
+for(int attempt=0;;++attempt){
+const std::filesystem::path temp=temp_beside(*final);
+TempWrite done=write(temp);
+const bool taken=done.system&&platform::error_kind(done.system)==platform::ErrorKind::exists;
+if(taken&&attempt<8)continue;
+if(done.failure||done.system){
+// A name another writer holds is not ours to remove.
+if(!taken)platform::remove_file(temp);
+if(done.failure)return std::unexpected(std::move(*done.failure));
+return move_failed(Failure{detail::file_error(done.system),{}},!done.from);
+}
+metadata=done.metadata;
+platform::keep_permissions(*final,temp);
+std::error_code error;
+if(!platform::replace_file(temp,*final,error)){
+platform::remove_file(temp);
+return move_failed(Failure{detail::file_error(error),{}},true);
+}
+return {};
+}
+}
+// Writes bytes into a new file temp.
+TempWrite write_bytes(const std::filesystem::path& temp,std::span<const std::byte> bytes)
+{
+TempWrite done;
+auto file=platform::File::open(temp,platform::FileAccess::create_new);
+if(!file){
+done.system=file.error();
+return done;
+}
+if(auto written=file->write_at(0,bytes);!written)done.system=written.error();
+return done;
+}
+// Copies reader's bytes into a new file temp.
+TempWrite write_reader(const std::filesystem::path& temp,Reader& reader,std::byte* buffer,std::size_t chunk)
+{
+TempWrite done;
+auto file=platform::File::open(temp,platform::FileAccess::create_new);
+if(!file){
+done.system=file.error();
+return done;
+}
+const std::uint64_t size=reader.size();
+for(std::uint64_t at=0;at<size;){
+const auto wanted=static_cast<std::size_t>(std::min<std::uint64_t>(chunk,size-at));
+const std::int64_t got=reader.read_at(at,{buffer,wanted});
+if(got<0){
+done.failure=MoveFailure{Failure{read_error(got),{}},false};
+return done;
+}
+if(got==0)break;
+if(auto written=file->write_at(at,{buffer,static_cast<std::size_t>(got)});!written){
+done.system=written.error();
+return done;
+}
+at+=static_cast<std::uint64_t>(got);
+}
+return done;
 }
 // What a copy through the sources moves per read and write, through one buffer per thread made by its first such copy.
 constexpr std::size_t copy_chunk=262144;
@@ -678,7 +788,7 @@ if(*old_file){
 const auto new_file=target->source->host_file(target->sub,true);
 if(!new_file)return move_failed(end_failure(to,*target,new_file.error()),true);
 if(*new_file){
-const auto same=same_file(**old_file,**new_file);
+const auto same=same_file(from,to,**old_file,**new_file);
 if(!same)return std::unexpected(same.error());
 if(*same)return true;
 new_host=std::move(*new_file);
@@ -723,29 +833,42 @@ const auto target=writing_end(*table,to,*new_path);
 if(!target)return move_failed(target.error(),true);
 const auto old_file=source->source->host_file(source->sub,false);
 if(!old_file)return move_failed(end_failure(from,*source,old_file.error()),false);
-if(*old_file){
 const auto new_file=target->source->host_file(target->sub,true);
 if(!new_file)return move_failed(end_failure(to,*target,new_file.error()),true);
 if(*new_file){
-// platform::copy_file compares the two open files' identities itself before it writes anything.
-const platform::CopyResult copied=platform::copy_file(**old_file,**new_file);
-if(copied.same)return true;
-const bool declined=copied.error&&!copied.from_failed&&platform::error_kind(copied.error)==platform::ErrorKind::access_denied;
-if(!declined){
+// A host file target is replaced by a complete new file: never left half overwritten.
+if(*old_file){
+const auto same=same_file(from,to,**old_file,**new_file);
+if(!same)return std::unexpected(same.error());
+if(*same)return true;
+}
+std::error_code metadata;
+std::expected<void,MoveFailure> replaced;
+if(*old_file){
+// The system's copy makes the temporary file itself (O_EXCL, COPY_FILE_FAIL_IF_EXISTS), so it is never handed an existing file.
+replaced=replace_host(**new_file,[&](const std::filesystem::path& temp){
+const platform::CopyResult copied=platform::copy_file(**old_file,temp,true);
+return TempWrite{copied.error,copied.from_failed,std::nullopt,copied.metadata};
+},metadata);
+}
+else{
+const auto reader=open_read(from);
+if(!reader)return move_failed(reader.error(),false);
+std::byte* const buffer=copy_buffer();
+replaced=replace_host(**new_file,[&](const std::filesystem::path& temp){return write_reader(temp,**reader,buffer,copy_chunk);},metadata);
+}
 target->source->forget(target->sub);
-if(copied.error)return move_failed(Failure{detail::file_error(copied.error),{}},!copied.from_failed);
-if(copied.metadata)warn_copy_metadata(to,copied.metadata);
+if(!replaced)return std::unexpected(replaced.error());
+if(metadata)warn_copy_metadata(to,metadata);
 written(to,*new_path,*target);
 return false;
 }
-// CopyFileExW refuses a hidden or system target that a write in place can change: copied through the sources below.
 }
-}
-}
-// Through the sources: written over in place, then cut to length.
+// A target without host files: a write target's bytes take the entry's place only at commit (Source's contract), so a failure
+// leaves the old entry whole.
 const auto reader=open_read(from);
 if(!reader)return move_failed(reader.error(),false);
-auto writer=open_write(to,WriteMode::append);
+auto writer=open_write(to,WriteMode::truncate);
 if(!writer)return move_failed(writer.error(),true);
 Reader& in=**reader;
 WriteTarget& out=**writer;
@@ -760,9 +883,38 @@ if(got==0)break;
 if(auto put=out.write_at(done,{buffer,static_cast<std::size_t>(got)});!put)return move_failed(Failure{put.error(),{}},true);
 done+=static_cast<std::uint64_t>(got);
 }
-if(out.size()!=done)if(auto cut=out.truncate(done);!cut)return move_failed(Failure{cut.error(),{}},true);
 if(auto committed=out.commit();!committed)return move_failed(Failure{committed.error(),{}},true);
 return false;
+}
+
+std::expected<void,Failure> Vfs::write_file(std::string_view path,std::span<const std::byte> bytes)
+{
+return guarded(*this,"write_file",path,[&]()->std::expected<void,Failure>{
+const auto p=parse_failure(path);
+if(!p)return std::unexpected(p.error());
+if(p->folder)return failed(FileError::is_directory);
+{
+const std::shared_ptr<const Table> table=snapshot();
+const auto target=writing_end(*table,path,*p);
+if(!target)return std::unexpected(target.error());
+const auto file=target->source->host_file(target->sub,true);
+if(!file)return std::unexpected(end_failure(path,*target,file.error()));
+if(*file){
+std::error_code unused;
+const auto replaced=replace_host(**file,[&](const std::filesystem::path& temp){return write_bytes(temp,bytes);},unused);
+target->source->forget(target->sub);
+if(!replaced)return std::unexpected(replaced.error().failure);
+written(path,*p,*target);
+return {};
+}
+}
+// A target without host files takes the bytes at commit (Source's contract).
+auto writer=open_write(path,WriteMode::truncate);
+if(!writer)return std::unexpected(writer.error());
+if(!bytes.empty())if(auto put=(*writer)->write_at(0,bytes);!put)return failed(put.error());
+if(auto committed=(*writer)->commit();!committed)return failed(committed.error());
+return {};
+});
 }
 
 std::expected<void,MoveFailure> Vfs::copy(std::string_view from,std::string_view to)

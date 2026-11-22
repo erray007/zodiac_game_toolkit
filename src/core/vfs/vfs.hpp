@@ -130,7 +130,8 @@ virtual std::expected<bool,MoveError> rename(std::string_view from,std::string_v
 // The host file behind relative, for the Vfs's own renames and copies between sources: with for_write the place a write of
 // relative would create or replace (its folder must exist; a source that makes its root on the first write makes it here),
 // otherwise the existing file. nullopt from a source that is no host folder (the default), or when this one has no such file
-// to hand out; a failure as open_write or open_read would report it.
+// to hand out; a failure as open_write or open_read would report it. A source without host files must make a truncating
+// open_write's bytes replace the entry only at commit (a pack does), so Vfs::copy and Vfs::write_file never leave a part.
 virtual std::expected<std::optional<std::filesystem::path>,FileError> host_file(std::string_view relative,bool for_write);
 // Tells the source that the file relative was made, replaced or removed behind its back (through host_file), so whatever it
 // caches about its folder is dropped. The default does nothing.
@@ -191,12 +192,18 @@ std::expected<void,Failure> remove(std::string_view path);
 // when only a copy can do it (a source without host files, two volumes) and the two are known to be different files; nothing has
 // changed then. A folder on either side is is_directory, named by MoveFailure::to.
 std::expected<bool,MoveFailure> rename(std::string_view from,std::string_view to);
-// Copies the bytes of file from over to (created or replaced). Host files on both sides (folders or host paths) are copied by the
-// system (platform::copy_file), and the source of to forgets the path; anything else goes through open_read and open_write
-// (append mode, written over from offset 0 in 256 KiB pieces, then cut to length, then committed), and so does a system copy
-// refused with access denied (CopyFileExW over a hidden or system file). from and to being one file (by the open files' identity,
-// when both are host files) is a success that changes nothing.
+// Copies the bytes of file from over to (created or replaced), so that to is always either its old file or the complete copy:
+// - to a host file (a folder or a host path): a new temporary file beside it (temp_prefix, never visible to scripts) is written,
+//   by the system's copy (platform::copy_file with create_new) when from is a host file too, else from open_read in 256 KiB
+//   pieces, and then renamed over to (through a link at to, to what it names); the temporary file is removed after any failure,
+//   and the source of to forgets the path. A replaced file keeps its permission bits (POSIX).
+// - to anything else: open_write (truncate) in 256 KiB pieces, then commit, which a source without host files makes the moment
+//   the entry changes (Source::host_file).
+// from and to being one file (by identity, when both are host files) is a success that changes nothing.
 std::expected<void,MoveFailure> copy(std::string_view from,std::string_view to);
+// Replaces file path with bytes as copy does: to a host file through a temporary file and a rename, else through open_write
+// (truncate) and commit. Failures as open_write's.
+std::expected<void,Failure> write_file(std::string_view path,std::span<const std::byte> bytes);
 // rename, else copy then remove(from). A copy that finds one file on both sides removes nothing. A failed remove after the copy
 // is MoveFailure::removing (both files are then there).
 std::expected<void,MoveFailure> move(std::string_view from,std::string_view to);

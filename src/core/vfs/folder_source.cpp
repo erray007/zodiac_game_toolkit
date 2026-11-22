@@ -314,7 +314,14 @@ names->racy=distance<racy_window_ns;
 names->names.reserve(entries.size());
 for(platform::DirectoryEntry& entry:entries){
 if(entry.kind!=platform::NodeKind::file&&entry.kind!=platform::NodeKind::directory)continue;
-if(!valid_name(entry.name))continue;
+if(!valid_name(entry.name)){
+// A temporary file of a write or copy that a crash interrupted: unchanged for stale_temp_ns, so no writer still has it.
+if(!read_only_&&entry.kind==platform::NodeKind::file&&!entry.link&&is_temp_name(entry.name)){
+const fs::path temp=folder/path_from_utf8(entry.name);
+if(const auto node=platform::stat_path(temp);node&&scanned_ns-node->modified_utc_ns>stale_temp_ns)platform::remove_file(temp);
+}
+continue;
+}
 Name& name=names->names.emplace_back();
 name.fold=fold_name(entry.name);
 name.real=std::move(entry.name);

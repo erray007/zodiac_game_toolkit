@@ -37,9 +37,13 @@
 // - bool file_exists(path), bool directory_exists(path): queries; they never touch last_file_error.
 // - string read_file(path): the bytes as they are; throws `cannot read "<path>": <reason>` (or the path rule's own text).
 // - bool write_file(path, data), bool append_file(path, data), bool delete_file(path), bool copy_file(from, to),
-//   bool move_file(from, to): every one overwrites. copy_file is Vfs::copy (the system's copy between host files, else through the
-//   sources) and move_file Vfs::move (a rename where one source or the system can, else a copy, then a delete). One file on both
-//   sides (one entry under two spellings, or one host file under two mounts or a host path) is a success that changes nothing.
+//   bool move_file(from, to): every one overwrites. write_file is Vfs::write_file and copy_file Vfs::copy: the file they replace
+//   is always the old one or the complete new one (a temporary file renamed over it), so a failed save never leaves half a file.
+//   append_file adds to the file in place (a failure may leave part of the added bytes). move_file is Vfs::move (a rename where
+//   one source or the system can, else a copy, then a delete). One file on both sides (one entry under two spellings, or one host
+//   file under two mounts or a host path) is a success that changes nothing.
+// - The file object's "w" stays a write in place (the file is emptied at open): it is a stream that a script writes, seeks in and
+//   reads back while it is open, as C's "w+", and others may read it meanwhile; write_file is the way to replace a file at once.
 // - int64 file_size(path): -1 when it is not a file; date_time file_modified(path): the local civil time (date_time::now()'s clock:
 //   platform::utc_to_local_civil_ms of the entry's UTC milliseconds) of a file or folder; throws like read_file.
 // - bool create_directory(path, bool recursive = true), bool delete_directory(path, bool recursive = false).

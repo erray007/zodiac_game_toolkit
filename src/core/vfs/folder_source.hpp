@@ -58,6 +58,10 @@ std::error_code make_directories(const std::filesystem::path& path);
 class FolderSource final:public Source{
 public:
 static constexpr std::int64_t racy_window_ns=2'000'000'000;
+// A temporary file (temp_prefix) of a write or copy is taken for one a crash left behind, and removed when a writable source
+// scans its folder, once its modification time is this old: a day, far beyond any copy (the time a folder listing shows may lag
+// a file being written, and CopyFileExW may give the new file its source's time while it copies).
+static constexpr std::int64_t stale_temp_ns=86'400'000'000'000;
 // root is an absolute folder; it is not checked here.
 FolderSource(std::filesystem::path root,bool read_only,bool create_root=false);
 std::expected<EntryInfo,FileError> stat(std::string_view relative) override;

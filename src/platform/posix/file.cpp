@@ -71,6 +71,9 @@ break;
 case FileAccess::create_or_open:
 flags|=O_RDWR|O_CREAT;
 break;
+case FileAccess::create_new:
+flags|=O_RDWR|O_CREAT|O_EXCL;
+break;
 }
 int fd;
 do{
@@ -366,7 +369,15 @@ return 0;
 }
 }
 
-CopyResult copy_file(const fs::path& from,const fs::path& to)
+std::error_code keep_permissions(const fs::path& model,const fs::path& path)
+{
+struct stat info;
+if(::stat(model.c_str(),&info)!=0)return errno==ENOENT?std::error_code():errno_code(errno);
+if(::chmod(path.c_str(),info.st_mode&07777)!=0)return errno_code(errno);
+return {};
+}
+
+CopyResult copy_file(const fs::path& from,const fs::path& to,bool create_new)
 {
 CopyResult result;
 const auto fail=[&result](int error){
@@ -382,8 +393,9 @@ if(!S_ISREG(info.st_mode))return fail(S_ISDIR(info.st_mode)?EISDIR:EINVAL);
 result.from_failed=false;
 // Opened without O_TRUNC and compared by the descriptors' identities first, so no path change in between can make the copy empty
 // its own source.
-Descriptor out{open_retry(to,O_WRONLY|O_CREAT|O_CLOEXEC|O_NONBLOCK)};
+Descriptor out{open_retry(to,O_WRONLY|O_CREAT|O_CLOEXEC|O_NONBLOCK|(create_new?O_EXCL:0))};
 if(out.fd<0)return fail(errno);
+if(!create_new){
 struct stat target;
 if(::fstat(out.fd,&target)!=0)return fail(errno);
 if(target.st_dev==info.st_dev&&target.st_ino==info.st_ino){
@@ -396,6 +408,7 @@ do{
 cut=::ftruncate(out.fd,0);
 }while(cut!=0&&errno==EINTR);
 if(cut!=0)return fail(errno);
+}
 if(const int error=copy_bytes(in.fd,out.fd,static_cast<std::uint64_t>(info.st_size),result.from_failed))return fail(error);
 if(const int error=out.close_checked())return fail(error);
 return result;

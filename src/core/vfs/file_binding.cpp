@@ -547,7 +547,9 @@ return String();
 }
 bool write_file(const String& path,const String& data) noexcept
 {
-return store(path.bytes(),data.bytes(),WriteMode::truncate);
+// Through a temporary file and a rename (Vfs::write_file): the file is the old one or the new one, never a part.
+const auto written=vfs_.write_file(path.bytes(),bytes_of(data.bytes()));
+return written?succeeded():failed(FileAction::write,path.bytes(),written.error());
 }
 bool append_file(const String& path,const String& data) noexcept
 {

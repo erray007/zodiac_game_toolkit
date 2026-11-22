@@ -28,9 +28,10 @@
 #include <vector>
 
 namespace zodiac::platform {
-// read and read_write open an existing file; create_truncate creates it or empties it; create_or_open creates it or keeps its bytes.
+// read and read_write open an existing file; create_truncate creates it or empties it; create_or_open creates it or keeps its bytes;
+// create_new creates it and fails with EEXIST when anything is there (O_EXCL, CREATE_NEW: never through a link).
 // Every mode but read opens the file for writing too. Opening a folder fails with EISDIR in every mode.
-enum class FileAccess{read,read_write,create_truncate,create_or_open};
+enum class FileAccess{read,read_write,create_truncate,create_or_open,create_new};
 // Equal for two paths or handles of one file (links and other spellings included), different for different files.
 struct FileIdentity{
 std::uint64_t volume=0;
@@ -124,7 +125,12 @@ std::error_code metadata;
 // Only the bytes are meant to carry over, as with a copy written byte by byte: to gets the current time as its modification time,
 // and Windows' copy of the time, of the read-only, hidden and system attributes and of the Zone.Identifier stream (the mark of the
 // web) is undone; other alternate data streams are copied as CopyFileExW copies them. Nothing is promised about to after a failure.
-// CopyFileExW refuses a hidden or system target with access denied; the caller then copies byte by byte.
-CopyResult copy_file(const std::filesystem::path& from,const std::filesystem::path& to);
+// CopyFileExW refuses a hidden or system target with access denied. With create_new, to is made by the copy itself and must not
+// exist (EEXIST otherwise): O_EXCL, COPY_FILE_FAIL_IF_EXISTS; no identity is compared then, since a file the copy made cannot be
+// from. This is how the Vfs writes the temporary file it then renames over the target.
+CopyResult copy_file(const std::filesystem::path& from,const std::filesystem::path& to,bool create_new=false);
+// POSIX: gives path the permission bits of model (a file a replacement takes the place of), so a replaced file keeps them. Windows:
+// nothing (a new file takes its folder's inherited ACL, as one written in place keeps its own). Success when model is missing.
+std::error_code keep_permissions(const std::filesystem::path& model,const std::filesystem::path& path);
 std::filesystem::path user_data_folder();
 }

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <expected>
@@ -148,6 +149,9 @@ std::map<std::string,std::string,std::less<>> files;
 std::optional<FileError> fail_write;
 std::optional<FileError> fail_commit;
 std::optional<FileError> fail_remove;
+// A write target fails once it has taken this many bytes in all; a reader fails reading at or past this offset.
+std::optional<std::uint64_t> fail_write_after;
+std::optional<std::uint64_t> fail_read_at;
 std::expected<zodiac::vfs::EntryInfo,FileError> stat(std::string_view relative) override
 {
 zodiac::vfs::EntryInfo info;
@@ -166,7 +170,7 @@ std::expected<std::shared_ptr<zodiac::vfs::Reader>,FileError> open_read(std::str
 {
 const auto found=files.find(relative);
 if(found==files.end())return std::unexpected(FileError::not_found);
-return std::make_shared<Reader>(found->second);
+return std::make_shared<Reader>(found->second,fail_read_at);
 }
 std::expected<std::unique_ptr<zodiac::vfs::WriteTarget>,FileError> open_write(std::string_view relative,zodiac::vfs::WriteMode mode) override
 {
@@ -206,9 +210,10 @@ bool read_only() const noexcept override{return false;}
 private:
 class Reader final:public zodiac::vfs::Reader{
 public:
-explicit Reader(std::string bytes):bytes_(std::move(bytes)){}
+Reader(std::string bytes,std::optional<std::uint64_t> fail_at):bytes_(std::move(bytes)),fail_at_(fail_at){}
 std::int64_t read_at(std::uint64_t offset,std::span<std::byte> buffer) override
 {
+if(fail_at_&&offset+buffer.size()>*fail_at_)return -static_cast<std::int64_t>(FileError::damaged);
 if(offset>=bytes_.size())return 0;
 const std::size_t count=std::min<std::size_t>(buffer.size(),bytes_.size()-offset);
 std::memcpy(buffer.data(),bytes_.data()+offset,count);
@@ -217,6 +222,7 @@ return static_cast<std::int64_t>(count);
 std::uint64_t size() const override{return bytes_.size();}
 private:
 std::string bytes_;
+std::optional<std::uint64_t> fail_at_;
 };
 class Writer final:public zodiac::vfs::WriteTarget{
 public:
@@ -231,6 +237,8 @@ return static_cast<std::int64_t>(count);
 std::expected<void,FileError> write_at(std::uint64_t offset,std::span<const std::byte> bytes) override
 {
 if(source_.fail_write)return std::unexpected(*source_.fail_write);
+taken_+=bytes.size();
+if(source_.fail_write_after&&taken_>*source_.fail_write_after)return std::unexpected(FileError::disk_full);
 if(bytes_.size()<offset+bytes.size())bytes_.resize(offset+bytes.size());
 std::memcpy(bytes_.data()+offset,bytes.data(),bytes.size());
 return {};
@@ -251,6 +259,7 @@ private:
 MemorySource& source_;
 std::string name_;
 std::string bytes_;
+std::uint64_t taken_=0;
 };
 };
 std::string utf8(const fs::path& path)
@@ -725,10 +734,14 @@ fs::create_symlink("a.txt",root/"link",link_error);
 const bool linked=!link_error;
 #endif
 if(!linked){
+// On CI the runner can make links, so a failure there is a failure, never a silent skip.
+const bool on_ci=std::getenv("CI")!=nullptr||std::getenv("GITHUB_ACTIONS")!=nullptr;
+REQUIRE_MESSAGE(!on_ci,"the CI runner could not make a symbolic link");
 MESSAGE("skipped: this system cannot make a symbolic link without administrator rights");
 return;
 }
 REQUIRE(fs::is_symlink(root/"link"));
+MESSAGE("link test ran with a real symbolic link");
 CHECK(holds(fixture,"return read_file(\"link\")==\"target bytes\";"));
 // One source: renaming the link over its target would leave a link to itself, so nothing is done.
 CHECK(text_of(fixture,"bool moved=move_file(\"link\", \"a.txt\"); return moved+\",[\"+last_file_error()+\"]\";")=="true,[]");
@@ -756,6 +769,88 @@ CHECK(fs::is_symlink(root/"moved_link"));
 CHECK_FALSE(fs::exists(fs::symlink_status(root/"link")));
 CHECK_FALSE(fs::is_symlink(root/"a.txt"));
 CHECK(contents(root/"a.txt")=="target bytes");
+// A replacing write or copy through a link changes the file it names, as a write in place does, and the link stays.
+CHECK(holds(fixture,"return write_file(\"moved_link\", \"new bytes\")&&read_file(\"a.txt\")==\"new bytes\";"));
+CHECK(fs::is_symlink(root/"moved_link"));
+CHECK(holds(fixture,"return write_file(\"c.txt\", \"copied\")&&copy_file(\"c.txt\", \"moved_link\")&&read_file(\"a.txt\")==\"copied\";"));
+CHECK(fs::is_symlink(root/"moved_link"));
+}
+
+namespace {
+// The temporary files (temp_prefix) in folder, as the system lists them.
+std::vector<std::string> temp_files(const fs::path& folder)
+{
+std::vector<std::string> names;
+std::error_code error;
+for(const auto& entry:fs::directory_iterator(folder,error)){
+const std::string name=utf8(entry.path().filename());
+if(zodiac::vfs::is_temp_name(name))names.push_back(name);
+}
+return names;
+}
+}
+
+TEST_CASE("a failed copy or write_file leaves the target as it was, and no temporary file")
+{
+ScriptFixture fixture;
+const fs::path root=fixture.root();
+auto memory=std::make_shared<MemorySource>();
+REQUIRE(fixture.vfs.mount("mem",memory,true,nullptr));
+const std::string bytes=pattern(5*65536+7);
+put(root/"big.bin",bytes);
+put(root/"target.bin","the old bytes");
+// From a source without host files to a host file: the read fails midway, after the first 256 KiB piece was written.
+memory->files["big.bin"]=bytes;
+memory->fail_read_at=300000;
+CHECK(text_of(fixture,"bool copied=copy_file(\"mem/big.bin\", \"target.bin\"); return copied+\",\"+last_file_error();")=="false,cannot read \"mem/big.bin\": damaged data");
+CHECK(contents(root/"target.bin")=="the old bytes");
+CHECK(temp_files(root).empty());
+CHECK(text_of(fixture,"bool moved=move_file(\"mem/big.bin\", \"target.bin\"); return moved+\",\"+file_exists(\"mem/big.bin\");")=="false,true");
+CHECK(contents(root/"target.bin")=="the old bytes");
+CHECK(temp_files(root).empty());
+memory->fail_read_at.reset();
+CHECK(holds(fixture,"return copy_file(\"mem/big.bin\", \"target.bin\");"));
+CHECK(contents(root/"target.bin")==bytes);
+CHECK(temp_files(root).empty());
+// To a source without host files: the write fails midway, and the entry keeps its old bytes (nothing is stored before commit).
+memory->files["old.bin"]="the old entry";
+memory->fail_write_after=300000;
+CHECK(text_of(fixture,"bool copied=copy_file(\"big.bin\", \"mem/old.bin\"); return copied+\",\"+last_file_error();")=="false,cannot write \"mem/old.bin\": disk full");
+CHECK(memory->files.at("old.bin")=="the old entry");
+CHECK(text_of(fixture,"string big=read_file(\"big.bin\"); bool written=write_file(\"mem/old.bin\", big); return written+\",\"+last_file_error();")=="false,cannot write \"mem/old.bin\": disk full");
+CHECK(memory->files.at("old.bin")=="the old entry");
+memory->fail_write_after.reset();
+// write_file replaces a host file at once, leaves no temporary file, and the listing never shows one.
+CHECK(holds(fixture,"return write_file(\"target.bin\", \"replaced\")&&read_file(\"target.bin\")==\"replaced\"&&join(list_files(\"\"), \"|\")==\"big.bin|target.bin\";"));
+CHECK(contents(root/"target.bin")=="replaced");
+CHECK(temp_files(root).empty());
+CHECK(holds(fixture,"return write_file(\"data:/save.txt\", \"one\")&&write_file(\"data:/save.txt\", \"two\")&&read_file(\"data:/save.txt\")==\"two\";"));
+CHECK(temp_files(fixture.data()).empty());
+// A failed write_file to a missing folder makes nothing.
+CHECK(text_of(fixture,"bool written=write_file(\"no/such/x.txt\", \"x\"); return written+\",\"+last_file_error();")=="false,cannot write \"no/such/x.txt\": file not found");
+#ifndef _WIN32
+// A replaced file keeps its permission bits.
+fs::permissions(root/"target.bin",fs::perms::owner_read|fs::perms::owner_write);
+CHECK(holds(fixture,"return write_file(\"target.bin\", \"private\")&&copy_file(\"big.bin\", \"target.bin\");"));
+CHECK((fs::status(root/"target.bin").permissions()&fs::perms::all)==(fs::perms::owner_read|fs::perms::owner_write));
+#endif
+}
+
+TEST_CASE("temporary names are never visible to scripts, and a crash's leftovers go")
+{
+ScriptFixture fixture;
+const fs::path root=fixture.root();
+CHECK(text_of(fixture,"bool written=write_file(\".zodiac-tmp-mine.tmp\", \"x\"); return written+\",\"+last_file_error();")=="false,\".zodiac-tmp-mine.tmp\" is not a valid file name");
+CHECK(text_of(fixture,"bool written=write_file(\"sub/.ZODIAC-TMP-x\", \"x\"); return written+\",\"+last_file_error();")=="false,\"sub/.ZODIAC-TMP-x\" is not a valid file name");
+CHECK(holds(fixture,"return write_file(\".zodiac-tmpx\", \"not reserved\")&&write_file(\"zodiac-tmp-y\", \"not reserved\");"));
+// A day-old leftover is removed when the folder is next scanned; a fresh one (a write in progress) is kept. Neither is listed.
+put(root/".zodiac-tmp-0123456789abcdef.tmp","left by a crash");
+put(root/".zodiac-tmp-fedcba9876543210.tmp","being written");
+fs::last_write_time(root/".zodiac-tmp-0123456789abcdef.tmp",fs::file_time_type::clock::now()-std::chrono::hours(48));
+CHECK(text_of(fixture,"return join(list_files(\"/\"), \"|\");")==".zodiac-tmpx|zodiac-tmp-y");
+CHECK_FALSE(fs::exists(root/".zodiac-tmp-0123456789abcdef.tmp"));
+CHECK(fs::exists(root/".zodiac-tmp-fedcba9876543210.tmp"));
+CHECK_FALSE(holds(fixture,"return file_exists(\".zodiac-tmp-fedcba9876543210.tmp\");"));
 }
 
 #ifdef _WIN32

@@ -183,6 +183,10 @@ case FileAccess::create_or_open:
 desired|=GENERIC_WRITE;
 disposition=OPEN_ALWAYS;
 break;
+case FileAccess::create_new:
+desired|=GENERIC_WRITE;
+disposition=CREATE_NEW;
+break;
 }
 const HANDLE handle=CreateFileW(name.c_str(),desired,share_all,nullptr,disposition,FILE_ATTRIBUTE_NORMAL,nullptr);
 if(handle!=INVALID_HANDLE_VALUE)return File(reinterpret_cast<std::intptr_t>(handle));
@@ -477,7 +481,12 @@ return error;
 }
 }
 
-CopyResult copy_file(const fs::path& from,const fs::path& to)
+std::error_code keep_permissions(const fs::path&,const fs::path&)
+{
+return {};
+}
+
+CopyResult copy_file(const fs::path& from,const fs::path& to,bool create_new)
 {
 CopyResult result;
 const NativePath source(from);
@@ -507,7 +516,8 @@ result.error=from_identity.error();
 result.from_failed=true;
 return result;
 }
-const OwnedHandle out{CreateFileW(target.c_str(),0,share_all,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr)};
+// A new file needs no comparison: CopyFileExW makes it itself (COPY_FILE_FAIL_IF_EXISTS), so it cannot be from.
+const OwnedHandle out{create_new?INVALID_HANDLE_VALUE:CreateFileW(target.c_str(),0,share_all,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr)};
 if(out.handle!=INVALID_HANDLE_VALUE){
 const auto to_identity=identity_of(out.handle);
 if(!to_identity){
@@ -519,11 +529,11 @@ result.same=true;
 return result;
 }
 }
-else if(const std::error_code error=last_error();error.value()!=ENOENT){
+else if(const std::error_code error=last_error();!create_new&&error.value()!=ENOENT){
 result.error=error;
 return result;
 }
-if(!CopyFileExW(source.c_str(),target.c_str(),nullptr,nullptr,nullptr,0)){
+if(!CopyFileExW(source.c_str(),target.c_str(),nullptr,nullptr,nullptr,create_new?COPY_FILE_FAIL_IF_EXISTS:0)){
 result.error=last_error();
 // CopyFileExW does not say which side failed: from is to blame when it is gone.
 result.from_failed=GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES;

@@ -39,7 +39,13 @@ std::expected<VfsPath,std::string> parse_path(std::string_view path,bool host_pa
 // not ending in '.' or ' ', and a stem (the text before the first '.', trailing spaces ignored) that is no Windows device name,
 // compared ASCII case-insensitively: CON PRN AUX NUL CONIN$ CONOUT$ CLOCK$, COM0-COM9, LPT0-LPT9 and COM¹ COM² COM³ LPT¹ LPT² LPT³.
 // The same on every platform, so a name from player input never opens a device on Windows and never behaves differently on Linux.
+// Names beginning with temp_prefix (ASCII case-insensitively) are reserved for the Vfs's temporary files, so no script, listing or
+// lookup ever sees one.
 bool valid_name(std::string_view name) noexcept;
+// The start of the name of every temporary file the Vfs writes next to a file it replaces (write_file, copies).
+inline constexpr std::string_view temp_prefix=".zodiac-tmp-";
+// True when name begins with temp_prefix, ASCII case-insensitively.
+bool is_temp_name(std::string_view name) noexcept;
 // The case fold of UTF-8 text: unicode::to_upper (Unicode simple uppercase, as NTFS's upcase table) per code point. Bytes that are
 // not well-formed UTF-8 are kept as they are, and nothing is normalized (NFC and NFD spellings stay different).
 std::string fold_name(std::string_view utf8);
