@@ -417,6 +417,10 @@ void testing::fail_next_copy_reset() noexcept
 {
 }
 
+void testing::clear_copy_reset_failure() noexcept
+{
+}
+
 std::error_code sync_directory(const fs::path& path)
 {
 Descriptor folder{open_retry(path,O_RDONLY|O_CLOEXEC|O_DIRECTORY)};

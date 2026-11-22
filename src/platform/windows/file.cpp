@@ -501,6 +501,11 @@ void testing::fail_next_copy_reset() noexcept
 fail_reset.store(true,std::memory_order_relaxed);
 }
 
+void testing::clear_copy_reset_failure() noexcept
+{
+fail_reset.store(false,std::memory_order_relaxed);
+}
+
 std::error_code discard_file(const fs::path& path)
 {
 const NativePath name(path);

@@ -49,12 +49,12 @@
 //   volumes or sources: a rename moves no data. With sync = true a false result may come after the new file has already replaced
 //   the old one (the folder's flush after the rename, or a pack's flush after its commit, failed): a script must not take false
 //   to mean that the old bytes are still there, only that the new ones may not have reached the device.
-// - Temporary files of a crash are removed by name date, a day either way from the clock of the machine that scans: on a folder
-//   shared between machines, one whose clock is more than a day off may see its live temporary files removed by another, and its
-//   write then fails, the target kept (no data is lost).
 //   append_file adds to the file in place (a failure may leave part of the added bytes). move_file is Vfs::move (a rename where
 //   one source or the system can, else a copy, then a delete). One file on both sides (one entry under two spellings, or one host
 //   file under two mounts or a host path) is a success that changes nothing.
+// - Temporary files of a crash are removed by name date, a day either way from the clock of the machine that scans: on a folder
+//   shared between machines, one whose clock is more than a day off may see its live temporary files removed by another, and its
+//   write then fails, the target kept (no data is lost).
 // - The file object's "w" stays a write in place (the file is emptied at open): it is a stream that a script writes, seeks in and
 //   reads back while it is open, as C's "w+", and others may read it meanwhile; write_file is the way to replace a file at once.
 // - int64 file_size(path): -1 when it is not a file; date_time file_modified(path): the local civil time (date_time::now()'s clock:

@@ -988,21 +988,36 @@ put(root/"ro_target.bin","kept");
 REQUIRE(SetFileAttributesW((root/"ro_target.bin").c_str(),FILE_ATTRIBUTE_READONLY));
 // The reset fails, so the temporary file keeps the source's read-only attribute; the rename over the read-only target fails, and
 // the read-only temporary file must still go.
-zodiac::platform::testing::fail_next_copy_reset();
+{
+// Each guard disarms the failure when its block ends, even after a failed REQUIRE.
+const zodiac::platform::testing::FailNextCopyReset failure;
 CHECK(text_of(fixture,"bool copied=copy_file(\"ro_src.bin\", \"ro_target.bin\"); return copied+\",\"+last_file_error();")=="false,cannot write \"ro_target.bin\": access denied");
+}
 CHECK(contents(root/"ro_target.bin")=="kept");
 CHECK(temp_files(root).empty());
 // With sync, a read-only attribute the reset left does not refuse the flush.
-zodiac::platform::testing::fail_next_copy_reset();
+{
+const zodiac::platform::testing::FailNextCopyReset failure;
 CHECK(holds(fixture,"return copy_file(\"ro_src.bin\", \"synced.bin\", true)&&read_file(\"synced.bin\")==\"read-only source\";"));
+}
 CHECK(temp_files(root).empty());
 // Without sync, the copy is right and succeeds; the failed reset is a dev-mode warning.
 logged.clear();
-zodiac::platform::testing::fail_next_copy_reset();
+{
+const zodiac::platform::testing::FailNextCopyReset failure;
 CHECK(holds(fixture,"return copy_file(\"ro_src.bin\", \"plain.bin\")&&read_file(\"plain.bin\")==\"read-only source\";"));
+}
 REQUIRE(logged.size()==1);
 CHECK(logged[0].starts_with("warning: \"plain.bin\" was copied, but the time and attributes it took from its source could not be reset: "));
 CHECK(temp_files(root).empty());
-for(const char* name:{"ro_src.bin","ro_target.bin","plain.bin","synced.bin"})zodiac::platform::discard_file(root/name);
+// A guard whose block ends before any copy leaves nothing armed: the next copy resets as usual, with no warning.
+logged.clear();
+{
+const zodiac::platform::testing::FailNextCopyReset failure;
+}
+CHECK(holds(fixture,"return copy_file(\"ro_src.bin\", \"cleared.bin\")&&read_file(\"cleared.bin\")==\"read-only source\";"));
+CHECK(logged.empty());
+CHECK((GetFileAttributesW((root/"cleared.bin").c_str())&FILE_ATTRIBUTE_READONLY)==0);
+for(const char* name:{"ro_src.bin","ro_target.bin","plain.bin","synced.bin","cleared.bin"})zodiac::platform::discard_file(root/name);
 }
 #endif

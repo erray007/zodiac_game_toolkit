@@ -149,6 +149,22 @@ namespace testing {
 // For tests only: on Windows, the next copy_file leaves the copied time and attributes (a read-only one included) as CopyFileExW
 // set them and reports a metadata failure, as when the system refuses the reset. Nothing elsewhere.
 void fail_next_copy_reset() noexcept;
+// Disarms fail_next_copy_reset when no copy_file took it.
+void clear_copy_reset_failure() noexcept;
+// Arms fail_next_copy_reset for its scope: a test that stops early (a failed REQUIRE) leaves nothing armed for the next one.
+class FailNextCopyReset {
+public:
+FailNextCopyReset() noexcept
+{
+fail_next_copy_reset();
+}
+~FailNextCopyReset()
+{
+clear_copy_reset_failure();
+}
+FailNextCopyReset(const FailNextCopyReset&)=delete;
+FailNextCopyReset& operator=(const FailNextCopyReset&)=delete;
+};
 }
 // Removes a file even when it is read-only (Windows clears FILE_ATTRIBUTE_READONLY first; POSIX needs nothing).
 std::error_code discard_file(const std::filesystem::path& path);
