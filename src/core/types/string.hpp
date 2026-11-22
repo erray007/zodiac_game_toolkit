@@ -530,6 +530,11 @@ std::expected<int,StringError> find_multibyte(std::string_view needle,int start)
 // StringBindingAccess, which checks both preconditions first) are its only callers.
 int find_simple(const char* needle,std::size_t size,int start) const noexcept;
 friend struct StringBindingAccess;
+// The script's `const uint8 &byte_at(int) const` (defined in string_binding.cpp): a member, so the engine calls it through its
+// THISCALL path, as it calls the add-on's opIndex. script_byte_out_of_range raises the exception; not noexcept, so
+// script_byte_at can leave by a musttail call (nothing in either can throw).
+const std::uint8_t& script_byte_at(int index) const;
+const std::uint8_t& script_byte_out_of_range(int index) const;
 std::uint32_t char_to_byte(std::uint32_t index) const;
 std::uint32_t byte_to_char(std::uint32_t offset) const;
 // The meta of a part of this string with length characters (known whenever this string's count is known).

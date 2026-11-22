@@ -317,25 +317,6 @@ const int code=self.known_ascii_code_at(index);
 if(code>=0)return low_codes.codes[code];
 return code_at_any(self,index);
 }
-// byte_at's signature, so byte_at can leave by a guaranteed tail call.
-[[gnu::noinline]] const std::uint8_t& byte_out_of_range(const String& self,int) noexcept
-{
-raise_string_error(StringError::index_out_of_range,self);
-return zero_byte;
-}
-// A frameless leaf in range, and a forced tail call otherwise: without musttail, full LTO sees that byte_out_of_range always
-// returns zero_byte, calls it as a plain call, and on Windows gives the whole function a stack frame (sub/add rsp on the in-range
-// path too, seen in the release disassembly). Not declared noexcept: clang cannot make a musttail call out of a noexcept function
-// (its terminate scope is a cleanup); nothing can throw here, since byte_out_of_range is noexcept. It starts on a 64-byte boundary,
-// as copy_heap and release do (string.hpp), so its placement does not shift with unrelated code under LTO. The release
-// disassembly (CI's probe step prints it) puts the in-range path's compare and both branches in the first 32-byte block; the
-// path is 35 bytes on Windows (the far jae to the cold call takes 6), so its last add and the ret start the second block, and
-// 28 bytes on Linux, all in the first.
-[[gnu::aligned(64)]] const std::uint8_t& byte_at(const String& self,int index)
-{
-if(static_cast<std::uint32_t>(index)<static_cast<std::uint32_t>(self.byte_length()))return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
-[[clang::musttail]] return byte_out_of_range(self,index);
-}
 [[gnu::noinline]] int find_any(const String& self,const String& needle,int start) noexcept
 {
 try{
@@ -348,8 +329,30 @@ return -1;
 }
 }
 
-// String's friend for the script find: checks find_simple's preconditions itself, then calls it.
+[[gnu::noinline]] const std::uint8_t& String::script_byte_out_of_range(int) const
+{
+raise_string_error(StringError::index_out_of_range,*this);
+return zero_byte;
+}
+// The script byte_at: a frameless leaf in range, and a forced tail call otherwise. Without musttail, full LTO sees that the cold
+// path always returns zero_byte, calls it as a plain call and, on Windows, gives the whole function a stack frame (sub/add rsp on
+// the in-range path too, seen in the release disassembly). Neither is noexcept: clang cannot make a musttail call out of a
+// noexcept function (its terminate scope is a cleanup); nothing in them can throw. A member, so AngelScript's asBC_Thiscall1
+// dispatch takes its first test (THISCALL), as for the add-on's opIndex, rather than its last (CDECL_OBJFIRST). It starts on a
+// 64-byte boundary, as copy_heap and release do (string.hpp), so its placement does not shift with unrelated code under LTO;
+// CI's probe step prints its release disassembly.
+[[gnu::aligned(64)]] const std::uint8_t& String::script_byte_at(int index) const
+{
+if(static_cast<std::uint32_t>(index)<size_bytes())return *reinterpret_cast<const std::uint8_t*>(data()+index);
+[[clang::musttail]] return script_byte_out_of_range(index);
+}
+
+// String's friend for the script find (find_simple's preconditions checked first) and the script byte_at's registration.
 struct StringBindingAccess {
+static asSFuncPtr byte_at() noexcept
+{
+return asMETHOD(String,script_byte_at);
+}
 // Text with one byte per character and a valid start goes straight to find_simple, without an exception frame (it
 // never allocates); everything else (multibyte text, which may build its index, or a bad start) takes find_any.
 static int find(const String& self,const String& needle,int start) noexcept
@@ -640,7 +643,7 @@ r.method("int length() const",asMETHOD(String,length),asCALL_THISCALL);
 r.method("int byte_length() const",asMETHOD(String,byte_length),asCALL_THISCALL);
 r.method("bool empty() const",asMETHOD(String,empty),asCALL_THISCALL);
 r.method("const uint &code_at(int) const",asFUNCTION(code_at));
-r.method("const uint8 &byte_at(int) const",asFUNCTION(byte_at));
+r.method("const uint8 &byte_at(int) const",StringBindingAccess::byte_at(),asCALL_THISCALL);
 r.method("int find(const string &in needle, int start = 0) const",asFUNCTION(find));
 r.method("int rfind(const string &in needle, int start = -1) const",asFUNCTION(guarded<&rfind>::call));
 r.method("bool contains(const string &in) const",asFUNCTION(contains));
