@@ -30,7 +30,8 @@
 //   sides closely in time, and the whole run takes about 45 s on the release preset. --op (repeatable) measures only the
 //   named operations, --detail also prints each operation's median ratio per pair of engine and context to stderr, --list
 //   prints the names. For diagnosis only (tools/bench_diagnose.py, never the gate): --diagnostic adds the operations
-//   dict_keys_<n> and dict_get_ordered_<n> (to --list and to the names --op takes), and --layout prints, per dictionary
+//   dict_keys_<n> and dict_get_ordered_<n> (to --list and to the names --op takes) and prints, per operation, the page faults
+//   each side's timed runs took ("bench_types: faults <op> zodiac <n> addon <n> ..."), and --layout prints, per dictionary
 //   operation and Zodiac engine, a line "bench_types: layout {json}" to stderr with the table's addresses (mod 4096), index
 //   size, each key's home slot and probe length, and the cache lines the lookups of all its keys touch.
 // - Exit codes: 0 measured, 1 bad arguments, 2 a snippet did not build or run, 3 the two sides disagree on a checksum.
@@ -66,7 +67,9 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#include <psapi.h>
 #else
+#include <sys/resource.h>
 #include <sys/utsname.h>
 #endif
 #if defined(__x86_64__)
@@ -568,6 +571,26 @@ jobs.push_back({s.index_of_name,size,s.zodiac_index_of,s.addon_index_of});
 extra.push_back({s.keys_name,size,s.zodiac_keys,s.addon_keys});
 extra.push_back({s.ordered_name,size,s.zodiac_ordered,s.addon_ordered});
 }
+// Report-only order operations on 1000 keys (ITEMS=10 calls per rep, so the add-on side's array find, about 0.8 ms per call
+// here, stays affordable): moves by one and index_of of keys spread over the order, and index_of of the middle key (n/2, the
+// walk's worst case).
+const std::string big_zodiac="array<string> probes;dictionary table;\n"
+"void setup(){for(int i=0;i<1000;++i)table.set(\"key\"+i,int64(i));for(int i=0;i<ITEMS;++i)probes.insert_last(\"key\"+((i*397)%1000));}\n";
+const std::string big_addon="array<string> probes;array<string> order;dictionary table;\n"
+"void setup(){for(int i=0;i<1000;++i){table.set(\"key\"+i,int64(i));order.insertLast(\"key\"+i);}for(int i=0;i<ITEMS;++i)probes.insertLast(\"key\"+((i*397)%1000));}\n"
+"bool move_by(const string &in key,int delta){int at=order.find(key);if(at<0||delta==0)return false;int to=at+delta;if(to<0||to>=int(order.length()))return false;"
+"string t=order[at];order[at]=order[to];order[to]=t;return true;}\n";
+const std::string middle_zodiac="dictionary table;\nvoid setup(){for(int i=0;i<1000;++i)table.set(\"key\"+i,int64(i));}\n";
+const std::string middle_addon="array<string> order;dictionary table;\nvoid setup(){for(int i=0;i<1000;++i){table.set(\"key\"+i,int64(i));order.insertLast(\"key\"+i);}}\n";
+extra.push_back({"dict_move_by_1000",10,
+big_zodiac+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){if(table.move_by(probes[i],(i&1)==0?1:-1))++n;}return n;}",
+big_addon+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){if(move_by(probes[i],(i&1)==0?1:-1))++n;}return n;}"});
+extra.push_back({"dict_index_of_1000",10,
+big_zodiac+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=table.index_of(probes[i]);return n;}",
+big_addon+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=order.find(probes[i]);return n;}"});
+extra.push_back({"dict_index_of_middle_1000",10,
+middle_zodiac+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=table.index_of(\"key500\");return n;}",
+middle_addon+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=order.find(\"key500\");return n;}"});
 if(diagnostic)jobs.insert(jobs.end(),extra.begin(),extra.end());
 return jobs;
 }
@@ -621,6 +644,21 @@ return engine;
 //   own address), and the medians span all those placements, the same way on both sides.
 constexpr int kEngines=4;
 constexpr int kContexts=4;
+// --diagnostic: count the page faults of every timed run (read outside the timed span).
+bool g_count_faults=false;
+// The process's page faults so far: PageFaultCount on Windows (soft and hard), minor plus major faults elsewhere.
+std::uint64_t page_faults() noexcept
+{
+#if defined(_WIN32)
+PROCESS_MEMORY_COUNTERS counters{};
+counters.cb=sizeof counters;
+return K32GetProcessMemoryInfo(GetCurrentProcess(),&counters,sizeof counters)?counters.PageFaultCount:0;
+#else
+rusage usage{};
+if(getrusage(RUSAGE_SELF,&usage)!=0)return 0;
+return static_cast<std::uint64_t>(usage.ru_minflt)+static_cast<std::uint64_t>(usage.ru_majflt);
+#endif
+}
 class Side {
 public:
 // Builds job's snippet on kEngines new engines and runs its setup() on each (untimed).
@@ -667,9 +705,11 @@ context_=instance.contexts[instance.next_context];
 instance.next_context=(instance.next_context+1)%kContexts;
 if(context_->Prepare(instance.run)<0)fail(2,name_+": cannot prepare run()");
 context_->SetArgDWord(0,static_cast<asDWORD>(reps));
+const std::uint64_t faults_before=g_count_faults?page_faults():0;
 const auto start=std::chrono::steady_clock::now();
 const int result=context_->Execute();
 const auto stop=std::chrono::steady_clock::now();
+if(g_count_faults)faults+=page_faults()-faults_before;
 if(result!=asEXECUTION_FINISHED)fail(2,name_+": run() failed"+exception());
 ns=std::chrono::duration<double,std::nano>(stop-start).count();
 const std::int64_t checksum=static_cast<std::int64_t>(context_->GetReturnQWord());
@@ -682,6 +722,8 @@ int last_placement() const noexcept
 {
 return last_placement_;
 }
+// With --diagnostic: the page faults the process took during this side's timed runs (calibration included until reset).
+std::uint64_t faults=0;
 // The address of the script global name on engine (the object itself for an object variable), or nullptr.
 void* global(int engine,const char* name) const
 {
@@ -859,6 +901,31 @@ char brand[sizeof words+1]={};
 std::memcpy(brand,words,sizeof words);
 const std::string text=folded_spaces(brand);
 return text.empty()?"unknown":text;
+#elif defined(__linux__)
+// Elsewhere on Linux (aarch64): /proc/cpuinfo's model name when the kernel gives one, otherwise the MIDR fields it lists
+// ("CPU implementer 0x41 part 0xd0c", which names the core).
+std::FILE* file=std::fopen("/proc/cpuinfo","r");
+if(!file)return "unknown";
+std::string model,implementer,part;
+char line[512];
+while(std::fgets(line,sizeof line,file)){
+const std::string_view text(line);
+const std::size_t colon=text.find(':');
+if(colon==std::string_view::npos)continue;
+const auto trimmed=[](std::string_view part){
+const std::size_t first=part.find_first_not_of(" \t\r\n");
+return first==std::string_view::npos?std::string():folded_spaces(part.substr(first,part.find_last_not_of(" \t\r\n")-first+1));
+};
+const std::string key=trimmed(text.substr(0,colon));
+const std::string value=trimmed(text.substr(colon+1));
+if(model.empty()&&(key=="model name"||key=="Model"))model=value;
+else if(implementer.empty()&&key=="CPU implementer")implementer=value;
+else if(part.empty()&&key=="CPU part")part=value;
+}
+std::fclose(file);
+if(!model.empty())return model;
+if(!implementer.empty())return "CPU implementer "+implementer+" part "+part;
+return "unknown";
 #else
 return "unknown";
 #endif
@@ -990,7 +1057,9 @@ for(const Job& job:jobs){
 if(!only.empty()&&std::find(only.begin(),only.end(),job.name)==only.end())continue;
 measurements.emplace_back(job,rounds);
 }
+g_count_faults=diagnostic;
 for(Measurement& m:measurements)calibrate(m,target_ns);
+for(Measurement& m:measurements)m.zodiac.faults=m.addon.faults=0;
 // The rounds go over every operation in turn, so each operation's rounds spread over the whole run (see the contract).
 for(int round=0;round<rounds;++round){
 for(Measurement& m:measurements)measure_round(m,round);
@@ -1000,6 +1069,14 @@ if(detail){
 for(const Measurement& m:measurements){
 const std::string line=detail_line(m);
 std::fwrite(line.data(),1,line.size(),stderr);
+}
+}
+if(diagnostic){
+for(const Measurement& m:measurements){
+const double runs=static_cast<double>(m.ratios.size());
+char line[256];
+std::snprintf(line,sizeof line,"bench_types: faults %s zodiac %llu addon %llu (per timed run %.2f and %.2f, %d reps each)\n",m.job->name.c_str(),static_cast<unsigned long long>(m.zodiac.faults),static_cast<unsigned long long>(m.addon.faults),static_cast<double>(m.zodiac.faults)/runs,static_cast<double>(m.addon.faults)/runs,m.reps);
+std::fputs(line,stderr);
 }
 }
 if(layout){

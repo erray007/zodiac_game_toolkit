@@ -73,6 +73,23 @@ jobs:
         run: |
           .tools/cmake/bin/cmake --preset windows-release
           .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      # Report-only (Task 5b), never failing the job: the first bench process after the release link, where dict_iterate_10's slow mode has
+      # been seen. It splits dict_iterate_10 into keys() (dict_keys_10) and the gets (dict_get_ordered_10) and prints each operation's page
+      # faults and its tables' layout. Then the disassembly of the byte_at leaf, found through the link map, with its address mod 64 and 32.
+      - name: Probe the first bench process (report-only)
+        continue-on-error: true
+        shell: bash
+        run: |
+          exe=build/windows-release/tests/bench/bench_types.exe
+          timeout 60 "$exe" --diagnostic --layout --rounds 31 --op dict_keys_10 --op dict_get_ordered_10 --op dict_iterate_10 --op dict_lookup_10 || echo "::warning::the probe exited with $?"
+          objdump=.tools/llvm-mingw/bin/llvm-objdump
+          base=$("$objdump" -p "$exe" | awk '/^ImageBase/ {print $2}')
+          for name in "(anonymous namespace)::byte_at(zodiac::String const&, int)" "(anonymous namespace)::byte_out_of_range(zodiac::String const&)"; do
+            line=$(grep -m1 -F "$name" "$exe.map") || { echo "$name is not in the map"; continue; }
+            start=$(( 0x$base + 0x$(echo "$line" | awk '{print $1}') ))
+            printf '%s at 0x%x: mod 64 = %d, mod 32 = %d\n' "$name" "$start" $((start % 64)) $((start % 32))
+            "$objdump" -d --start-address=$start --stop-address=$((start + 48)) "$exe" | tail -n +7
+          done
       # Runners differ in CPU from job to job and some measure differently: the log names this one (bench_types and check_bench.py name
       # it again from CPUID).
       - name: Show the CPU
@@ -183,6 +200,18 @@ jobs:
         run: |
           .tools/cmake/bin/cmake --preset linux-release
           .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
+      # As in the windows job.
+      - name: Probe the first bench process (report-only)
+        continue-on-error: true
+        run: |
+          exe=build/linux-release/tests/bench/bench_types
+          timeout 60 "$exe" --diagnostic --layout --rounds 31 --op dict_keys_10 --op dict_get_ordered_10 --op dict_iterate_10 --op dict_lookup_10 || echo "::warning::the probe exited with $?"
+          for name in "(anonymous namespace)::byte_at(zodiac::String const&, int)" "(anonymous namespace)::byte_out_of_range(zodiac::String const&)"; do
+            line=$(grep -m1 -F "$name" "$exe.map") || { echo "$name is not in the map"; continue; }
+            start=$(( 0x$(echo "$line" | awk '{print $1}') ))
+            printf '%s at 0x%x: mod 64 = %d, mod 32 = %d\n' "$name" "$start" $((start % 64)) $((start % 32))
+            llvm-objdump-18 -d --start-address=$start --stop-address=$((start + 48)) "$exe" | tail -n +7
+          done
       # The release tree's test of this (test_no_test_hooks) runs in kit-windows on Windows; here the Linux release core and bench are checked.
       - name: Show that the release build holds no test hook
         run: |
