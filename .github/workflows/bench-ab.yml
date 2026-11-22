@@ -1,0 +1,153 @@
+# Bench A/B (Task 5b), never part of the gate: bench_types built on the release preset from a baseline ref (A) and from the dispatched ref (B), run
+# alternately on one runner by tools/bench_ab.py, so a change is measured against its baseline on the same machine. The table (ab.txt) and the
+# runs are uploaded as bench-ab-<os>. Trigger:
+#   gh workflow run bench-ab.yml --ref <branch> -f base=<sha or ref> [-f pairs=8 -f rounds=101 -f ops="..." -f os=both]
+name: bench-ab
+
+on:
+  # A push only registers the workflow (both jobs are skipped); workflow_dispatch runs it.
+  push:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Baseline ref or sha (A)"
+        required: true
+      pairs:
+        description: "A/B pairs (each run its own process)"
+        default: "8"
+      rounds:
+        description: "bench_types --rounds"
+        default: "101"
+      ops:
+        description: "Operations, space-separated (empty: every gated one)"
+        default: ""
+      os:
+        description: "both, windows or linux"
+        default: "both"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.event_name == 'workflow_dispatch' && inputs.os != 'linux'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build B (this ref)
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release
+          .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      - name: Build A (the baseline)
+        shell: pwsh
+        run: |
+          git worktree add base-src "${{ inputs.base }}"
+          if ($LASTEXITCODE -ne 0) { throw "git worktree failed" }
+          New-Item -ItemType Junction -Path base-src/.tools -Target (Resolve-Path .tools) | Out-Null
+          $deps = "$PWD/.deps/windows-release"
+          Push-Location base-src
+          ../.tools/cmake/bin/cmake --preset windows-release -B ../build/base "-DFETCHCONTENT_BASE_DIR=$PWD/../build/base/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          Pop-Location
+          .tools/cmake/bin/cmake --build build/base --target bench_types
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+      - name: Show the CPU
+        shell: pwsh
+        run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
+      - name: A/B
+        run: |
+          ops=()
+          for op in ${{ inputs.ops }}; do ops+=(--op "$op"); done
+          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types.exe --b build/windows-release/tests/bench/bench_types.exe --out-dir bench-ab --pairs "${{ inputs.pairs }}" --rounds "${{ inputs.rounds }}" "${ops[@]}"
+      - name: Upload the A/B
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-ab-windows
+          path: bench-ab
+          if-no-files-found: ignore
+
+  linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.os != 'windows'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-linux-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Install and select clang 18 with libc++, lld and the LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev lld-18 llvm-18
+          echo "CC=clang-18" >> "$GITHUB_ENV"
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build B (this ref)
+        run: |
+          .tools/cmake/bin/cmake --preset linux-release
+          .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
+      - name: Build A (the baseline)
+        run: |
+          git worktree add base-src "${{ inputs.base }}"
+          ln -s "$PWD/.tools" base-src/.tools
+          deps="$PWD/.deps/linux-release"
+          root="$PWD"
+          (cd base-src && "$root/.tools/cmake/bin/cmake" --preset linux-release -B "$root/build/base" "-DFETCHCONTENT_BASE_DIR=$root/build/base/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src")
+          .tools/cmake/bin/cmake --build build/base --target bench_types
+      - name: Show the CPU
+        run: lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)|MHz|cache'
+      - name: A/B
+        run: |
+          ops=()
+          for op in ${{ inputs.ops }}; do ops+=(--op "$op"); done
+          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types --b build/linux-release/tests/bench/bench_types --out-dir bench-ab --pairs "${{ inputs.pairs }}" --rounds "${{ inputs.rounds }}" "${ops[@]}"
+      - name: Upload the A/B
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-ab-linux
+          path: bench-ab
+          if-no-files-found: ignore
