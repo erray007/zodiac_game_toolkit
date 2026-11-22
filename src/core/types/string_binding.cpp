@@ -322,8 +322,10 @@ return code_at_any(self,index);
 raise_string_error(StringError::index_out_of_range,self);
 return zero_byte;
 }
-// A leaf in range (a tail call otherwise).
-const std::uint8_t& byte_at(const String& self,int index) noexcept
+// A leaf in range (a tail call otherwise). It starts on a 64-byte boundary, as copy_heap and release do (string.hpp): with full
+// LTO its default 16-byte placement shifts with unrelated code, and the whole leaf (bounds check, inline-or-heap select, load)
+// then fits one 32-byte fetch block, which no branch crosses.
+[[gnu::aligned(64)]] const std::uint8_t& byte_at(const String& self,int index) noexcept
 {
 if(static_cast<std::uint32_t>(index)<static_cast<std::uint32_t>(self.byte_length()))return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
 return byte_out_of_range(self);
