@@ -324,11 +324,14 @@ raise_string_error(StringError::index_out_of_range,self);
 return zero_byte;
 }
 // A frameless leaf in range, and a forced tail call otherwise: without musttail, full LTO sees that byte_out_of_range always
-// returns zero_byte, calls it as a plain call and gives the whole function a stack frame (sub/add rsp on Windows, measured in the
-// release disassembly). It starts on a 64-byte boundary, as copy_heap and release do (string.hpp), so its placement does not
-// shift with unrelated code under LTO; the in-range path (bounds check, inline-or-heap select, add, ret) is then under 32 bytes,
-// inside the first 32-byte block.
-[[gnu::aligned(64)]] const std::uint8_t& byte_at(const String& self,int index) noexcept
+// returns zero_byte, calls it as a plain call, and on Windows gives the whole function a stack frame (sub/add rsp on the in-range
+// path too, seen in the release disassembly). Not declared noexcept: clang cannot make a musttail call out of a noexcept function
+// (its terminate scope is a cleanup); nothing can throw here, since byte_out_of_range is noexcept. It starts on a 64-byte boundary,
+// as copy_heap and release do (string.hpp), so its placement does not shift with unrelated code under LTO. The release
+// disassembly (CI's probe step prints it) puts the in-range path's compare and both branches in the first 32-byte block; the
+// path is 35 bytes on Windows (the far jae to the cold call takes 6), so its last add and the ret start the second block, and
+// 28 bytes on Linux, all in the first.
+[[gnu::aligned(64)]] const std::uint8_t& byte_at(const String& self,int index)
 {
 if(static_cast<std::uint32_t>(index)<static_cast<std::uint32_t>(self.byte_length()))return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
 [[clang::musttail]] return byte_out_of_range(self,index);
