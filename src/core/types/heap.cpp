@@ -1,6 +1,7 @@
-// zodiac::heap (see heap.hpp): the private heap of Windows ZODIAC_TEST_HOOKS trees. Nothing in any other build.
+// zodiac::heap (see heap.hpp): the private heap of Windows ZODIAC_TEST_HOOKS trees. Nothing in any other build (a ZODIAC_BENCH_MIMALLOC
+// tree's calls are all inline in heap.hpp).
 #include <core/types/heap.hpp>
-#if defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
+#if defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)&&!defined(ZODIAC_BENCH_MIMALLOC)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>

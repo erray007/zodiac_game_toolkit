@@ -5,8 +5,8 @@
 # - ARCHIVES (the cores, zodiac_core and zodiac_core_release; separated by | so the list survives add_test's command line): llvm-nm lists
 #   the symbols test_hook_table_hash_seed and string_array_steps (any mangling) iff HOOKS. Each archive must also define fill_entropy, the hook's neighbour, so a
 #   listing that read nothing cannot pass. Release archives hold LLVM bitcode (full LTO), which llvm-nm reads.
-# - BINARIES (linked executables, native code): the hook's variable name ZODIAC_TABLE_HASH_SEED, the text it reads the environment with,
-#   is in the file iff HOOKS. Each must also hold "zodiac-dictionary 1" (serialize()'s header, in every core), so a read that found no
+# - BINARIES (linked executables, native code): the hooks' variable names ZODIAC_TABLE_HASH_SEED and ZODIAC_ARRAY_BLOCK_CACHE, the texts
+#   they read the environment with, are in the file iff HOOKS. Each must also hold "zodiac-dictionary 1" (serialize()'s header, in every core), so a read that found no
 #   text cannot pass.
 # It fails naming each archive or executable that breaks the rule.
 foreach(variable NM HOOKS ARCHIVES BINARIES)
@@ -49,20 +49,23 @@ foreach(binary IN LISTS binaries)
 if(NOT EXISTS "${binary}")
 message(FATAL_ERROR "check_no_test_hooks: ${binary} does not exist")
 endif()
-file(STRINGS "${binary}" texts REGEX "ZODIAC_TABLE_HASH_SEED|zodiac-dictionary 1")
+file(STRINGS "${binary}" texts REGEX "ZODIAC_TABLE_HASH_SEED|ZODIAC_ARRAY_BLOCK_CACHE|zodiac-dictionary 1")
 if(NOT texts MATCHES "zodiac-dictionary 1")
 message(FATAL_ERROR "check_no_test_hooks: \"zodiac-dictionary 1\" was not found in ${binary}, so its texts were not read")
 endif()
-if(texts MATCHES "ZODIAC_TABLE_HASH_SEED")
+# The hooks' environment variables: the table hash seed (platform/entropy.hpp) and the array block cache bypass (types/array.cpp).
+foreach(variable ZODIAC_TABLE_HASH_SEED ZODIAC_ARRAY_BLOCK_CACHE)
+if(texts MATCHES "${variable}")
 set(present TRUE)
 else()
 set(present FALSE)
 endif()
 if(HOOKS AND NOT present)
-string(APPEND failures "\n${binary} lacks ZODIAC_TABLE_HASH_SEED in a ZODIAC_TEST_HOOKS tree")
+string(APPEND failures "\n${binary} lacks ${variable} in a ZODIAC_TEST_HOOKS tree")
 elseif(NOT HOOKS AND present)
-string(APPEND failures "\n${binary} holds ZODIAC_TABLE_HASH_SEED, the test hook's environment variable")
+string(APPEND failures "\n${binary} holds ${variable}, a test hook's environment variable")
 endif()
+endforeach()
 endforeach()
 if(failures)
 message(FATAL_ERROR "check_no_test_hooks:${failures}")

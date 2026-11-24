@@ -42,6 +42,11 @@
 //   faults each side's timed runs took ("bench_types: faults <op> zodiac <n> addon <n> ..."); --layout prints, per dictionary
 //   operation and Zodiac engine, a line "bench_types: layout {json}" to stderr with the table's addresses (mod 4096), index
 //   size, each key's home slot and probe length, and the cache lines the lookups of all its keys touch.
+// - The heap study of Task 5c (heap-study.yml, never the gate): --soak SECONDS runs the --op operations in rounds for that long and
+//   prints per-second medians instead of one line per operation's whole run (see soak_lines); --game-loop SECONDS runs a script game's
+//   frame loop instead of any operation and prints its frame-time percentiles (see game_loop); --heap-state prints the heap's state
+//   before the first and after the last timed run (see print_heap_state). Every run prints the heap kind and, on Windows, the image base
+//   to stderr. In a tree of the allocator experiment (ZODIAC_BENCH_ALLOCATOR) the heap is the Segment Heap or mimalloc (core/types/heap.hpp).
 // - Exit codes: 0 measured, 1 bad arguments, 2 a snippet did not build or run, 3 the two sides disagree on a checksum.
 // Not a ctest test (spec 8.4): CI runs it on release presets, and Task 7 reuses it to compare compiler flags.
 #include <angelscript.h>
@@ -83,6 +88,13 @@
 #endif
 #if defined(__x86_64__)
 #include <cpuid.h>
+#include <x86intrin.h>
+#endif
+#if defined(ZODIAC_BENCH_MIMALLOC)
+// The mimalloc arm of the allocator experiment (core/types/heap.hpp): this one translation unit replaces the global operator new and
+// delete with mimalloc's, and main hands the engine mimalloc's malloc and free before any engine exists.
+#include <mimalloc.h>
+#include <mimalloc-new-delete.h>
 #endif
 
 #if defined(ZODIAC_BENCH_PAD)&&ZODIAC_BENCH_PAD>0
@@ -1177,11 +1189,316 @@ const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(300)
 volatile std::uint64_t spin=0;
 while(std::chrono::steady_clock::now()<until)spin=spin+1;
 }
+
+// The heap study of Task 5c (heap-study.yml, never the gate): --heap-state, --soak and --game-loop.
+// A cheap fine clock for the heap scan: TSC cycles on x86-64, steady_clock nanoseconds elsewhere (heap_unit names it).
+std::uint64_t ticks() noexcept
+{
+#if defined(__x86_64__)
+return __rdtsc();
+#else
+return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
+#if defined(__x86_64__)
+constexpr const char* heap_unit="tsc";
+#else
+constexpr const char* heap_unit="ns";
+#endif
+
+// Which heap Zodiac's types allocate from in this process: mimalloc in that arm, else on Windows the process heap's kind read from its
+// header (an NT heap's SegmentSignature at offset 16 is 0xffeeffee, a segment heap's Signature there 0xddeeddee), else the C library's.
+std::string heap_kind()
+{
+#if defined(ZODIAC_BENCH_MIMALLOC)
+return "mimalloc";
+#elif defined(_WIN32)
+std::uint32_t signature=0;
+std::memcpy(&signature,static_cast<const unsigned char*>(GetProcessHeap())+16,sizeof signature);
+if(signature==0xFFEEFFEEu)return "nt";
+if(signature==0xDDEEDDEEu)return "segment";
+char text[32];
+std::snprintf(text,sizeof text,"unknown %08x",signature);
+return text;
+#else
+return "c library";
+#endif
+}
+
+// --heap-state: one stderr line "bench_types: heap {json}" with
+// - "when" (start: after the engines and calibration, before the first timed run; end: after the last), "kind" (heap_kind);
+// - on Windows, the process heap (the C runtime's, so Zodiac's unless mimalloc): "compatibility" (HeapQueryInformation's
+//   HeapCompatibilityInformation: 0 standard, 2 low-fragmentation), and from HeapWalk under HeapLock its regions, committed bytes,
+//   uncommitted ranges, busy and free entries with their bytes, the largest free entry, and "busy_sizes" and "free_sizes": the entry
+//   counts per size up to 1024 bytes (cbData rounded up to 16), nonzero ones only;
+// - "scan": for each request size (16 to 1024 by 16, then 1280 to 8192), the median over 64 pairs of heap::allocate then heap::release of
+//   one block of that size (the pattern of an object made and dropped, as keys() and split() do), in heap_unit ticks; "slow_sizes", the
+//   sizes whose median is above 8 times the median over all sizes. A pair leaves the heap as it found it, so the scan does not move
+//   what it measures.
+void print_heap_state(const char* when)
+{
+std::string out="{\"when\":\"";
+out.append(when).append("\",\"kind\":\"").append(heap_kind()).append("\"");
+#if defined(_WIN32)
+HANDLE heap=GetProcessHeap();
+ULONG compatibility=0;
+if(HeapQueryInformation(heap,HeapCompatibilityInformation,&compatibility,sizeof compatibility,nullptr))out+=",\"compatibility\":"+std::to_string(compatibility);
+std::uint64_t regions=0,committed=0,uncommitted=0,busy=0,busy_bytes=0,free_count=0,free_bytes=0,largest_free=0;
+std::uint32_t busy_sizes[65]={},free_sizes[65]={};
+if(HeapLock(heap)){
+PROCESS_HEAP_ENTRY entry{};
+while(HeapWalk(heap,&entry)){
+if(entry.wFlags&PROCESS_HEAP_REGION){
+++regions;
+committed+=entry.Region.dwCommittedSize;
+}
+else if(entry.wFlags&PROCESS_HEAP_UNCOMMITTED_RANGE)++uncommitted;
+else if(entry.wFlags&PROCESS_HEAP_ENTRY_BUSY){
+++busy;
+busy_bytes+=entry.cbData;
+if(entry.cbData<=1024)++busy_sizes[(entry.cbData+15)/16];
+}
+else{
+++free_count;
+free_bytes+=entry.cbData;
+largest_free=std::max<std::uint64_t>(largest_free,entry.cbData);
+if(entry.cbData<=1024)++free_sizes[(entry.cbData+15)/16];
+}
+}
+HeapUnlock(heap);
+}
+out+=",\"regions\":"+std::to_string(regions)+",\"committed\":"+std::to_string(committed)+",\"uncommitted\":"+std::to_string(uncommitted);
+out+=",\"busy\":"+std::to_string(busy)+",\"busy_bytes\":"+std::to_string(busy_bytes)+",\"free\":"+std::to_string(free_count)+",\"free_bytes\":"+std::to_string(free_bytes)+",\"largest_free\":"+std::to_string(largest_free);
+for(const auto& [name,counts]:{std::pair<const char*,const std::uint32_t*>{"busy_sizes",busy_sizes},{"free_sizes",free_sizes}}){
+out.append(",\"").append(name).append("\":{");
+bool first=true;
+for(int bin=0;bin<=64;++bin){
+if(!counts[bin])continue;
+if(!first)out+=",";
+first=false;
+out+="\""+std::to_string(bin*16)+"\":"+std::to_string(counts[bin]);
+}
+out+="}";
+}
+#endif
+std::vector<std::size_t> sizes;
+for(std::size_t size=16;size<=1024;size+=16)sizes.push_back(size);
+for(const std::size_t size:{1280,1536,2048,3072,4096,8192})sizes.push_back(size);
+std::vector<double> medians;
+medians.reserve(sizes.size());
+// Allocated once, before the scan, so the scan itself takes no block from the heap between its pairs.
+std::vector<double> pairs(64);
+for(const std::size_t size:sizes){
+for(double& pair:pairs){
+const std::uint64_t start=ticks();
+void* block=zodiac::heap::allocate(size);
+// The block escapes into an empty asm, so the pair cannot be folded away.
+asm volatile(""::"r"(block):"memory");
+zodiac::heap::release(block);
+pair=static_cast<double>(ticks()-start);
+}
+// In place (the 33rd of 64), so no copy is allocated either.
+std::nth_element(pairs.begin(),pairs.begin()+32,pairs.end());
+medians.push_back(pairs[32]);
+}
+const double typical=median(medians);
+out.append(",\"scan_unit\":\"").append(heap_unit).append("\",\"scan\":{");
+std::string slow;
+for(std::size_t i=0;i<sizes.size();++i){
+if(i)out+=",";
+out+="\""+std::to_string(sizes[i])+"\":";
+append_number(out,medians[i]);
+if(medians[i]>8*typical){
+if(!slow.empty())slow+=",";
+slow+=std::to_string(sizes[i]);
+}
+}
+out+="},\"slow_sizes\":["+slow+"]}";
+std::fprintf(stderr,"bench_types: heap %s\n",out.c_str());
+}
+
+// --soak SECONDS: the chosen operations (--op) in rounds as usual, but for that long instead of a number of rounds, with each round's start
+// time kept; then per operation and whole second of the soak one line {"soak":op,"second":s,"rounds":n,"new_ns":z,"addon_ns":a,"ratio":r}
+// (the medians of that second's rounds, per unit of work as in the gate's lines). A slow mode that lasts shows as a process whose seconds
+// all stay slow; one that warms away, as seconds that come down.
+std::vector<std::string> soak_lines(const std::deque<Measurement>& measurements,const std::vector<double>& round_seconds)
+{
+std::vector<std::string> lines;
+if(round_seconds.empty())return lines;
+const int seconds=static_cast<int>(round_seconds.back())+1;
+for(const Measurement& m:measurements){
+const double items=m.job->items;
+std::size_t round=0;
+for(int second=0;second<seconds;++second){
+std::vector<double> zodiac,addon,ratios;
+for(;round<round_seconds.size()&&round_seconds[round]<second+1;++round){
+zodiac.push_back(m.zodiac_times[round]/m.zodiac_reps/items);
+addon.push_back(m.addon_times[round]/m.addon_reps/items);
+ratios.push_back(m.ratios[round]);
+}
+if(zodiac.empty())continue;
+std::string line="{\"soak\":\""+m.job->name+"\",\"second\":"+std::to_string(second)+",\"rounds\":"+std::to_string(zodiac.size())+",\"new_ns\":";
+append_number(line,median(zodiac));
+line+=",\"addon_ns\":";
+append_number(line,median(addon));
+line+=",\"ratio\":";
+append_number(line,median(ratios));
+line+="}\n";
+lines.push_back(std::move(line));
+}
+}
+return lines;
+}
+
+// --game-loop SECONDS: a script game's frame loop on one engine of Zodiac's types, as a game registers them, for that long. Every frame
+// moves 64 of 256 entities and logs a line for each (strings built and kept for the frame), counts their kinds in a dictionary made for
+// the frame, parses a command line with split and looks a name up, joins the dictionary's keys(), and replaces one entity (a script class
+// with an array member, so the engine's garbage collector has work, done by its own automatic steps as in a game). The host times each
+// frame (prepare plus execute, as a game's frame call), then prints one line {"game_loop":{...}} with the frame count, the mean and the
+// 50th, 90th, 99th and 99.9th percentile and the largest frame in microseconds, and the 50th and 99th percentile of every whole second.
+constexpr std::string_view kGameLoop=R"(
+class Entity
+{
+string name;
+double x;
+double y;
+int health;
+array<string> tags;
+}
+array<Entity@> world;
+dictionary names;
+void setup()
+{
+for(int i=0;i<256;++i){
+Entity e;
+e.name="entity_"+i;
+e.x=i*1.5;
+e.y=i*0.5;
+e.health=100;
+e.tags.insert_last("npc");
+if(i%3==0)e.tags.insert_last("hostile");
+world.insert_last(e);
+names.set(e.name,int64(i));
+}
+}
+int64 frame(int f)
+{
+int64 n=0;
+array<string> events;
+dictionary counts;
+for(int i=0;i<64;++i){
+Entity@ e=world[(f*7+i)&255];
+e.x+=0.25;
+e.health=(e.health+f)%101;
+events.insert_last(e.name+" moved to "+int(e.x)+","+int(e.y));
+const string kind=e.tags[e.tags.length()-1];
+int64 c=0;
+counts.get(kind,c);
+counts.set(kind,c+1);
+}
+array<string>@ words=("say hello to entity_"+(f&255)+" now").split(" ");
+n+=words.length();
+int64 id=0;
+if(names.get(words[3],id))n+=id;
+array<string>@ kinds=counts.keys();
+string report;
+for(int i=0;i<kinds.length();++i)report+=kinds[i]+";";
+n+=report.length();
+for(int i=0;i<events.length();i+=16)n+=events[i].find("moved");
+Entity fresh;
+fresh.name="entity_"+(f&255);
+fresh.x=world[f&255].x;
+fresh.tags.insert_last("npc");
+if((f&255)%3==0)fresh.tags.insert_last("hostile");
+@world[f&255]=fresh;
+return n;
+}
+)";
+
+double sorted_percentile(const std::vector<float>& sorted,double q)
+{
+const std::size_t at=static_cast<std::size_t>(q*static_cast<double>(sorted.size()-1)+0.5);
+return sorted[std::min(at,sorted.size()-1)];
+}
+
+std::string game_loop(int seconds)
+{
+asIScriptEngine* engine=make_engine(true);
+asIScriptModule* module=engine->GetModule("game",asGM_ALWAYS_CREATE);
+if(module->AddScriptSection("game",kGameLoop.data(),kGameLoop.size())<0||module->Build()<0)fail(2,"the game loop does not build");
+asIScriptFunction* setup=module->GetFunctionByDecl("void setup()");
+asIScriptFunction* frame=module->GetFunctionByDecl("int64 frame(int)");
+asIScriptContext* context=engine->CreateContext();
+if(!setup||!frame||!context)fail(2,"the game loop has no setup() or frame(int), or no context");
+if(context->Prepare(setup)<0||context->Execute()!=asEXECUTION_FINISHED)fail(2,"the game loop's setup() failed");
+std::vector<float> frames;
+// Reserved for 100 000 frames a second (a frame takes tens of microseconds), so growth rarely copies between frames.
+frames.reserve(static_cast<std::size_t>(seconds)*100000);
+std::vector<std::uint32_t> second_ends;
+std::uint64_t checksum=0;
+const auto start=std::chrono::steady_clock::now();
+const auto stop=start+std::chrono::seconds(seconds);
+auto next_second=start+std::chrono::seconds(1);
+for(int f=0;;++f){
+const auto before=std::chrono::steady_clock::now();
+if(before>=stop)break;
+if(before>=next_second){
+second_ends.push_back(static_cast<std::uint32_t>(frames.size()));
+next_second+=std::chrono::seconds(1);
+}
+if(context->Prepare(frame)<0)fail(2,"cannot prepare frame()");
+context->SetArgDWord(0,static_cast<asDWORD>(f));
+if(context->Execute()!=asEXECUTION_FINISHED)fail(2,"frame() failed");
+checksum+=context->GetReturnQWord();
+const auto after=std::chrono::steady_clock::now();
+frames.push_back(std::chrono::duration<float,std::micro>(after-before).count());
+}
+second_ends.push_back(static_cast<std::uint32_t>(frames.size()));
+context->Release();
+engine->ShutDownAndRelease();
+if(frames.empty())fail(2,"the game loop ran no frame");
+std::string out="{\"game_loop\":{\"seconds\":"+std::to_string(seconds)+",\"frames\":"+std::to_string(frames.size())+",\"checksum\":"+std::to_string(checksum);
+double sum=0;
+for(const float value:frames)sum+=value;
+out+=",\"mean_us\":";
+append_number(out,sum/static_cast<double>(frames.size()));
+std::string p50s="[",p99s="[";
+std::uint32_t begin=0;
+for(const std::uint32_t end:second_ends){
+if(end>begin){
+std::vector<float> slice(frames.begin()+begin,frames.begin()+end);
+std::sort(slice.begin(),slice.end());
+if(p50s.size()>1){
+p50s+=",";
+p99s+=",";
+}
+append_number(p50s,sorted_percentile(slice,0.5));
+append_number(p99s,sorted_percentile(slice,0.99));
+}
+begin=end;
+}
+std::sort(frames.begin(),frames.end());
+for(const auto& [name,q]:{std::pair<const char*,double>{"p50_us",0.5},{"p90_us",0.9},{"p99_us",0.99},{"p999_us",0.999}}){
+out.append(",\"").append(name).append("\":");
+append_number(out,sorted_percentile(frames,q));
+}
+out+=",\"max_us\":";
+append_number(out,frames.back());
+out+=",\"second_p50_us\":"+p50s+"],\"second_p99_us\":"+p99s+"]}}\n";
+return out;
+}
 }
 
 int main(int argc,char** argv)
 {
+#if defined(ZODIAC_BENCH_MIMALLOC)
+// Before any engine exists, so every block the engine allocates is mimalloc's and goes back to it.
+if(asSetGlobalMemoryFunctions(mi_malloc,mi_free)<0)fail(2,"cannot hand the engine mimalloc's memory functions");
+#endif
 int rounds=101;
+int soak_seconds=0;
+int game_seconds=0;
+bool heap_state=false;
 int target_ms=1;
 const char* pin_path=nullptr;
 std::vector<std::string> only;
@@ -1232,6 +1549,13 @@ const auto at=std::find_if(jobs.begin(),jobs.end(),[&name](const Job& job){retur
 if(at==jobs.end()||static_cast<std::size_t>(at-jobs.begin())<gated_count)fail(1,"--also needs a diagnostic operation ("+name+" is not one)");
 also.push_back(name);
 }
+else if(arg=="--soak"&&has_value){
+if(!parse_int(argv[++i],soak_seconds)||soak_seconds<1)fail(1,"--soak needs a whole number of seconds of at least 1");
+}
+else if(arg=="--game-loop"&&has_value){
+if(!parse_int(argv[++i],game_seconds)||game_seconds<1)fail(1,"--game-loop needs a whole number of seconds of at least 1");
+}
+else if(arg=="--heap-state")heap_state=true;
 else if(arg=="--prewarm-heap")prewarm=true;
 else if(arg=="--zodiac-only")g_only=OnlySide::zodiac;
 else if(arg=="--reference-only")g_only=OnlySide::reference;
@@ -1241,8 +1565,10 @@ else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
 else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--soak SECONDS] [--game-loop SECONDS] [--heap-state] [--list]");
 }
+if(soak_seconds>0&&(only.empty()||g_only!=OnlySide::both))fail(1,"--soak needs the operations named with --op, and both sides");
+if(game_seconds>0&&(soak_seconds>0||!only.empty()))fail(1,"--game-loop runs alone, without --soak or --op");
 if(g_count_reps>0&&g_calibration!=Calibration::count)fail(1,"--reps needs --calibrate count");
 const std::vector<std::pair<std::string,std::pair<int,int>>> pinned=pin_path?read_pinned(pin_path):std::vector<std::pair<std::string,std::pair<int,int>>>{};
 g_check_rounds=g_calibration==Calibration::count&&g_count_reps>0&&pinned.empty()&&g_only==OnlySide::both;
@@ -1258,6 +1584,11 @@ if(!out)fail(1,std::string("cannot write ")+out_path+": "+std::strerror(errno));
 const Machine machine=this_machine();
 std::fprintf(stderr,"bench_types: machine: %s, %u logical cores, %s\n",machine.cpu.c_str(),machine.logical_cores,machine.os.c_str());
 std::fprintf(stderr,"bench_types: zodiac heap: %s\n",zodiac::heap::private_heap()?"private (ZODIAC_PRIVATE_HEAP=1)":"the C runtime's");
+std::fprintf(stderr,"bench_types: heap kind: %s\n",heap_kind().c_str());
+#if defined(_WIN32)
+// Where Windows loaded this image (ASLR draws a base per image file; the placement study compares copies of one file).
+std::fprintf(stderr,"bench_types: image base %p\n",static_cast<void*>(GetModuleHandleW(nullptr)));
+#endif
 {
 const std::string line=machine_line(machine);
 std::fwrite(line.data(),1,line.size(),stdout);
@@ -1267,6 +1598,17 @@ if(prewarm)prewarm_heap();
 quiet_process();
 asPrepareMultithread();
 const double target_ns=target_ms*1e6;
+if(game_seconds>0){
+if(heap_state)print_heap_state("start");
+const std::string line=game_loop(game_seconds);
+if(heap_state)print_heap_state("end");
+std::fwrite(line.data(),1,line.size(),stdout);
+if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::string("cannot write ")+out_path);
+std::fflush(stdout);
+if(out&&std::fclose(out)!=0)fail(1,std::string("cannot write ")+out_path);
+asUnprepareMultithread();
+return 0;
+}
 {
 // Each measurement's sides shut their engines down when the deque goes out of scope (a deque never moves its elements).
 std::deque<Measurement> measurements;
@@ -1290,10 +1632,30 @@ m.zodiac.faults=m.addon.faults=0;
 m.zodiac.steps=m.addon.steps={};
 #endif
 }
+if(heap_state)print_heap_state("start");
+// --soak: rounds until the time is up, each round's start kept (seconds since the first).
+std::vector<double> round_seconds;
+if(soak_seconds>0){
+const auto start=std::chrono::steady_clock::now();
+for(int round=0;;++round){
+const double at=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+if(at>=soak_seconds)break;
+round_seconds.push_back(at);
+for(Measurement& m:measurements)measure_round(m,round);
+if((round+1)%1000==0)std::fprintf(stderr,"bench_types: soak round %d at %.0f s\n",round+1,at);
+}
+}
 // The rounds go over every operation in turn, so each operation's rounds spread over the whole run (see the contract).
-for(int round=0;round<rounds;++round){
+for(int round=0;soak_seconds==0&&round<rounds;++round){
 for(Measurement& m:measurements)measure_round(m,round);
 if((round+1)%10==0||round+1==rounds)std::fprintf(stderr,"bench_types: round %d of %d\n",round+1,rounds);
+}
+if(heap_state)print_heap_state("end");
+if(soak_seconds>0){
+for(const std::string& line:soak_lines(measurements,round_seconds)){
+std::fwrite(line.data(),1,line.size(),stdout);
+if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::string("cannot write ")+out_path);
+}
 }
 if(detail){
 for(const Measurement& m:measurements){

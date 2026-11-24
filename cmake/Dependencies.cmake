@@ -102,3 +102,21 @@ target_link_libraries(angelscript_sample_addons PUBLIC angelscript)
 target_compile_options(angelscript_sample_addons PRIVATE -w)
 # scriptmath registers float functions by default; Zodiac's maths are double, so the add-on is measured in its double configuration.
 target_compile_definitions(angelscript_sample_addons PRIVATE AS_USE_FLOAT=0)
+# mimalloc (MIT, THIRD_PARTY_LICENSES), only for the allocator experiment (ZODIAC_BENCH_ALLOCATOR=mimalloc, Task 5c): a static library that
+# does not override malloc (MI_OVERRIDE OFF; the C runtime's malloc on MinGW stays the C runtime's), called by name from core/types/heap.hpp,
+# the engine's memory functions and bench_types' operator new and delete. Never fetched otherwise.
+if(ZODIAC_BENCH_ALLOCATOR STREQUAL "mimalloc")
+FetchContent_Declare(mimalloc
+URL https://github.com/microsoft/mimalloc/archive/refs/tags/v3.5.3.tar.gz
+URL_HASH SHA256=3b4a15153a59905995f7070296ed604bb5ccc00cabb8b93446931aff77224d47
+DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MI_INSTALL_TOPLEVEL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(mimalloc)
+target_compile_options(mimalloc-static PRIVATE -w)
+endif()

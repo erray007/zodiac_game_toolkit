@@ -18,6 +18,23 @@ if(ZODIAC_TEST_HOOKS)
 message(WARNING "ZODIAC_TEST_HOOKS is ON: this tree is for benches and tests only; it cannot be installed or packaged.")
 install(CODE "message(FATAL_ERROR \"This tree is configured with ZODIAC_TEST_HOOKS=ON, which must never be installed.\")")
 endif()
+# The allocator experiment of Task 5c (heap-study.yml): which heap Zodiac's types and the engine allocate from in bench_types. Empty (the
+# default, every preset, the kit, every game): the C runtime's heap. "segment": bench_types' manifest asks Windows for the Segment Heap
+# (the executable only). "mimalloc": Zodiac's heap calls (core/types/heap.hpp), the engine's (asSetGlobalMemoryFunctions) and bench_types'
+# global operator new and delete use mimalloc (pinned in cmake/Dependencies.cmake). No shipped build changes allocator without the
+# owner's decision: like the test hooks, such a tree refuses to install or package.
+set(ZODIAC_BENCH_ALLOCATOR "" CACHE STRING "Bench allocator experiment: empty (the C runtime's heap), segment or mimalloc (never for a kit or a game)")
+set_property(CACHE ZODIAC_BENCH_ALLOCATOR PROPERTY STRINGS "" segment mimalloc)
+if(NOT ZODIAC_BENCH_ALLOCATOR STREQUAL "")
+if(NOT ZODIAC_BENCH_ALLOCATOR MATCHES "^(segment|mimalloc)$")
+message(FATAL_ERROR "ZODIAC_BENCH_ALLOCATOR is \"${ZODIAC_BENCH_ALLOCATOR}\"; it takes segment, mimalloc or nothing")
+endif()
+if(ZODIAC_BENCH_ALLOCATOR STREQUAL "segment" AND NOT WIN32)
+message(FATAL_ERROR "ZODIAC_BENCH_ALLOCATOR=segment is a Windows heap; this tree is not Windows")
+endif()
+message(WARNING "ZODIAC_BENCH_ALLOCATOR is ${ZODIAC_BENCH_ALLOCATOR}: this tree is for the allocator experiment only; it cannot be installed or packaged.")
+install(CODE "message(FATAL_ERROR \"This tree is configured with ZODIAC_BENCH_ALLOCATOR=${ZODIAC_BENCH_ALLOCATOR}, which must never be installed.\")")
+endif()
 include(cmake/ZodiacReleaseFlags.cmake)
 include(cmake/Dependencies.cmake)
 include(cmake/ZodiacWarnings.cmake)

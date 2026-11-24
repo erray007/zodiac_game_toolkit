@@ -474,6 +474,24 @@ namespace {
 // bypassed, so use after free and leaks of arrays stay visible to it.
 constexpr bool array_cache_on=!heap::under_address_sanitizer;
 constexpr int array_block_limit=32;
+#if defined(ZODIAC_TEST_HOOKS)
+// Test hooks only (the heap soak of Task 5c, bench-only trees): ZODIAC_ARRAY_BLOCK_CACHE=0 in the environment bypasses the cache, so every
+// array takes the C heap as before Task 5b fix round 2. Read once, at the first array, after main has started (no array exists before),
+// so it never changes while blocks are cached.
+bool array_cache_bypassed() noexcept
+{
+static const bool bypassed=[]{
+const char* value=std::getenv("ZODIAC_ARRAY_BLOCK_CACHE");
+return value&&value[0]=='0'&&value[1]=='\0';
+}();
+return bypassed;
+}
+#else
+constexpr bool array_cache_bypassed() noexcept
+{
+return false;
+}
+#endif
 struct ArrayBlocks {
 void* blocks[array_block_limit];
 int count;
@@ -489,7 +507,7 @@ while(count>0)heap::release(blocks[--count]);
 }
 void* take_array_block() noexcept
 {
-if(array_cache_on&&!array_blocks_closed){
+if(array_cache_on&&!array_cache_bypassed()&&!array_blocks_closed){
 ArrayBlocks& cache=array_blocks;
 if(cache.count>0)return cache.blocks[--cache.count];
 }
@@ -497,7 +515,7 @@ return heap::allocate(sizeof(ScriptArray));
 }
 void give_array_block(void* block) noexcept
 {
-if(array_cache_on&&!array_blocks_closed){
+if(array_cache_on&&!array_cache_bypassed()&&!array_blocks_closed){
 ArrayBlocks& cache=array_blocks;
 if(cache.count<array_block_limit){
 cache.blocks[cache.count++]=block;

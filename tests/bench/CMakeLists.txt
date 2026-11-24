@@ -18,3 +18,17 @@ endif()
 if(DEFINED ZODIAC_BENCH_CORE_PAD AND NOT ZODIAC_BENCH_CORE_PAD STREQUAL "0")
 set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_CORE_PLACEMENT_PAD=${ZODIAC_BENCH_CORE_PAD})
 endif()
+# The placement study (placement-study.yml, Task 5c): -DZODIAC_BENCH_FIXED_BASE=ON links bench_types without ASLR, so every copy of the
+# file loads at its preferred base instead of a base Windows draws per image file. Windows only; never set by a preset.
+option(ZODIAC_BENCH_FIXED_BASE "Link bench_types without ASLR (the placement study only)" OFF)
+if(ZODIAC_BENCH_FIXED_BASE AND WIN32)
+target_link_options(bench_types PRIVATE "-Wl,--disable-dynamicbase")
+endif()
+# The Segment Heap arm of the allocator experiment (top-level ZODIAC_BENCH_ALLOCATOR=segment): bench_types' manifest asks Windows for it,
+# so the process heap and the C runtime's heap on it are segment heaps. The mimalloc arm needs nothing here: the core carries it.
+if(ZODIAC_BENCH_ALLOCATOR STREQUAL "segment")
+enable_language(RC)
+target_sources(bench_types PRIVATE segment_heap.rc)
+set_property(SOURCE segment_heap.rc APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}")
+set_property(SOURCE segment_heap.rc APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/segment_heap.manifest")
+endif()

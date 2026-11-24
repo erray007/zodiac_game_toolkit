@@ -11,7 +11,8 @@
 #   are signed only when the environment variable ZODIAC_SIGN_TOOL holds a sign command (see tools/build_installer.py).
 # Both refuse a Debug build (CMAKE_BUILD_TYPE Debug): the kit ships optimized binaries, so package from the windows-release preset.
 # Both also refuse a tree configured with ZODIAC_TEST_HOOKS=ON, and so does "cmake --install" of it: test hooks (such as the fixed
-# table hash seed, platform/entropy.hpp) must never reach a kit or a game built with one.
+# table hash seed, platform/entropy.hpp) must never reach a kit or a game built with one. The same holds for a tree of the allocator
+# experiment (ZODIAC_BENCH_ALLOCATOR set).
 # Call it after zodiac_kit_stage and every zodiac_add_module call.
 include_guard(GLOBAL)
 function(zodiac_package)
@@ -22,6 +23,16 @@ if(ZODIAC_TEST_HOOKS)
 foreach(target zodiac_zip zodiac_installer)
 add_custom_target(${target}
 COMMAND "${CMAKE_COMMAND}" -E echo "${target}: this tree is configured with ZODIAC_TEST_HOOKS=ON, which no kit may ship. Build ${target} with the windows-release preset."
+COMMAND "${CMAKE_COMMAND}" -E false
+VERBATIM)
+endforeach()
+return()
+endif()
+# The allocator experiment (ZODIAC_BENCH_ALLOCATOR, Task 5c): no kit ships another allocator without the owner's decision.
+if(NOT ZODIAC_BENCH_ALLOCATOR STREQUAL "")
+foreach(target zodiac_zip zodiac_installer)
+add_custom_target(${target}
+COMMAND "${CMAKE_COMMAND}" -E echo "${target}: this tree is configured with ZODIAC_BENCH_ALLOCATOR=${ZODIAC_BENCH_ALLOCATOR}, which no kit may ship. Build ${target} with the windows-release preset."
 COMMAND "${CMAKE_COMMAND}" -E false
 VERBATIM)
 endforeach()

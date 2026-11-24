@@ -24,6 +24,11 @@ target_link_libraries(${name} PRIVATE tomlplusplus::tomlplusplus)
 if(ZODIAC_TEST_HOOKS)
 target_compile_definitions(${name} PUBLIC ZODIAC_TEST_HOOKS=1)
 endif()
+# The mimalloc arm of the allocator experiment (top-level ZODIAC_BENCH_ALLOCATOR): core/types/heap.hpp calls mimalloc.
+if(ZODIAC_BENCH_ALLOCATOR STREQUAL "mimalloc")
+target_compile_definitions(${name} PUBLIC ZODIAC_BENCH_MIMALLOC=1)
+target_link_libraries(${name} PUBLIC mimalloc-static)
+endif()
 # shell32 for SHGetFolderPathW (platform::user_data_folder); it is in every game's captured link line already.
 if(WIN32)
 target_link_libraries(${name} PUBLIC shell32)

@@ -1,0 +1,90 @@
+# Heap study (Task 5c, Part A), report-only and never part of the gate (tools/bench_heap_study.py): per allocator (the C runtime's NT heap,
+# the Segment Heap through bench_types' manifest, mimalloc; ZODIAC_BENCH_ALLOCATOR) on 4 runners each, a plain and a hooks release bench,
+# then per process index a 3-minute soak of allocation-heavy operations (the hooks bench, ScriptArray block cache off), a 60-second script
+# game loop and one gate bench run, each a fresh process logging the heap's state. The tables are in each job's log, the runs in the
+# artifact heap-study-<allocator>-<n>. Trigger:
+#   gh workflow run heap-study.yml --ref <branch> [-f processes=5 -f soak=180 -f game=60]
+name: heap-study
+
+on:
+  # Only to register the new workflow with GitHub (a dispatch needs a workflow it knows); removed right after.
+  push:
+    paths:
+      - .github/workflows/heap-study.yml
+  workflow_dispatch:
+    inputs:
+      processes:
+        description: "process indices per job (each a soak, a game loop and a gate bench process)"
+        default: "5"
+      soak:
+        description: "seconds of each soak"
+        default: "180"
+      game:
+        description: "seconds of each game loop"
+        default: "60"
+
+permissions:
+  contents: read
+
+env:
+  PROCESSES: ${{ inputs.processes || '5' }}
+  SOAK: ${{ inputs.soak || '180' }}
+  GAME: ${{ inputs.game || '60' }}
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        allocator: [nt, segment, mimalloc]
+        job: [1, 2, 3, 4]
+    runs-on: windows-latest
+    # Two release trees (about 15 minutes), then 5 x (180 + 60 + 45) s of processes, with a margin.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      ALLOCATOR: ${{ matrix.allocator }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}-${{ matrix.allocator }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the plain and the hooks bench
+        run: |
+          choice=$ALLOCATOR
+          if [ "$choice" = nt ]; then choice=""; fi
+          .tools/cmake/bin/cmake --preset windows-release -B build/plain "-DZODIAC_BENCH_ALLOCATOR=$choice"
+          .tools/cmake/bin/cmake --build build/plain --target bench_types
+          .tools/cmake/bin/cmake --preset windows-release -B build/hooks "-DZODIAC_BENCH_ALLOCATOR=$choice" -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --build build/hooks --target bench_types
+      - name: Show the CPU
+        shell: pwsh
+        run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
+      - name: Study
+        run: python -I tools/bench_heap_study.py --bench build/plain/tests/bench/bench_types.exe --hooks build/hooks/tests/bench/bench_types.exe --out-dir heap-study --processes "$PROCESSES" --soak "$SOAK" --game "$GAME" --label "$ALLOCATOR"
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heap-study-${{ matrix.allocator }}-${{ matrix.job }}
+          path: heap-study
+          if-no-files-found: ignore

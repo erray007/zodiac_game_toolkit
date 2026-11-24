@@ -9,10 +9,17 @@
 //   as the process heap has), so a bench can tell whether Zodiac's allocations disturb the add-ons' through the shared C runtime
 //   heap. The engine's allocations (asAllocMem, the strings held in arrays) stay on the C runtime heap. The choice is made once,
 //   before the first allocation, and never changes, so no block crosses heaps.
+// - A ZODIAC_BENCH_MIMALLOC tree (the allocator experiment of Task 5c, top-level ZODIAC_BENCH_ALLOCATOR=mimalloc; never a preset, the
+//   kit or a game): every call is mimalloc's (mi_malloc, mi_calloc, mi_realloc, mi_free, the aligned forms; new_block is mi_new, which
+//   throws std::bad_alloc), with or without test hooks, so no block of these crosses into the C runtime's heap. bench_types routes the
+//   engine (asSetGlobalMemoryFunctions) and its global operator new and delete to mimalloc too. private_heap() is false there.
 #pragma once
 #include <cstddef>
 #include <cstdlib>
 #include <new>
+#if defined(ZODIAC_BENCH_MIMALLOC)
+#include <mimalloc.h>
+#endif
 
 namespace zodiac::heap {
 // True under AddressSanitizer: String's block cache and ScriptArray's object cache then step aside, so the sanitizer sees every
@@ -28,7 +35,44 @@ inline constexpr bool under_address_sanitizer=false;
 #else
 inline constexpr bool under_address_sanitizer=false;
 #endif
-#if defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
+#if defined(ZODIAC_BENCH_MIMALLOC)
+inline void* allocate(std::size_t size) noexcept
+{
+return mi_malloc(size);
+}
+inline void* allocate_zeroed(std::size_t count,std::size_t size) noexcept
+{
+return mi_calloc(count,size);
+}
+inline void* reallocate(void* block,std::size_t size) noexcept
+{
+return mi_realloc(block,size);
+}
+inline void release(void* block) noexcept
+{
+mi_free(block);
+}
+inline void* allocate_aligned(std::size_t size,std::size_t alignment) noexcept
+{
+return mi_malloc_aligned(size,alignment);
+}
+inline void release_aligned(void* block,std::size_t alignment) noexcept
+{
+mi_free_aligned(block,alignment);
+}
+inline bool private_heap() noexcept
+{
+return false;
+}
+inline void* new_block(std::size_t size)
+{
+return mi_new(size);
+}
+inline void delete_block(void* block) noexcept
+{
+mi_free(block);
+}
+#elif defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
 void* allocate(std::size_t size) noexcept;
 void* allocate_zeroed(std::size_t count,std::size_t size) noexcept;
 void* reallocate(void* block,std::size_t size) noexcept;
@@ -68,8 +112,9 @@ return false;
 }
 #endif
 // String's blocks and indexes: the global operator new and delete (so a program's own replacement of them, such as the
-// allocation-failure tests', sees every string allocation), or the private heap. new_block throws std::bad_alloc.
-#if defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
+// allocation-failure tests', sees every string allocation), or the private heap. new_block throws std::bad_alloc. (mimalloc's are above.)
+#if defined(ZODIAC_BENCH_MIMALLOC)
+#elif defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
 void* new_block(std::size_t size);
 void delete_block(void* block) noexcept;
 #else

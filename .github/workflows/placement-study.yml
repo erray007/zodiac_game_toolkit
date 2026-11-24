@@ -1,0 +1,102 @@
+# Placement study (Task 5c, Part C), report-only and never part of the gate (tools/bench_placement.py): on each runner the release bench as
+# the gate links it and the same bench linked without ASLR (-DZODIAC_BENCH_FIXED_BASE=ON), each copied several times, every copy run a
+# few times in its own processes, interleaved. Shows whether an operation's ratio and each side's ns follow the copy (the image base
+# Windows draws per file) and whether a fixed base removes that. The tables are in each job's log, the runs in the artifact
+# placement-study-<n>. Trigger:
+#   gh workflow run placement-study.yml --ref <branch> [-f copies=8 -f runs=2 -f rounds=101 -f ops="..."]
+name: placement-study
+
+on:
+  # Only to register the new workflow with GitHub (a dispatch needs a workflow it knows); removed right after.
+  push:
+    paths:
+      - .github/workflows/placement-study.yml
+  workflow_dispatch:
+    inputs:
+      copies:
+        description: "copies of each build"
+        default: "8"
+      runs:
+        description: "processes per copy"
+        default: "2"
+      rounds:
+        description: "bench_types --rounds"
+        default: "101"
+      ops:
+        description: "operations, separated by spaces"
+        default: "string_byte_ascii string_length_ascii string_code_ascii string_index_ascii string_find_ascii math_sqrt dict_lookup_10 dict_iterate_10 array_find_string array_insert_last_string"
+
+permissions:
+  contents: read
+
+env:
+  COPIES: ${{ inputs.copies || '8' }}
+  RUNS: ${{ inputs.runs || '2' }}
+  ROUNDS: ${{ inputs.rounds || '101' }}
+  OPS: ${{ inputs.ops || 'string_byte_ascii string_length_ascii string_code_ascii string_index_ascii string_find_ascii math_sqrt dict_lookup_10 dict_iterate_10 array_find_string array_insert_last_string' }}
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: windows-latest
+    # One release build and one relink (about 10 minutes), then about 40 short bench processes.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the bench with and without ASLR
+        run: |
+          mkdir -p builds/aslr builds/fixed
+          .tools/cmake/bin/cmake --preset windows-release -DZODIAC_BENCH_FIXED_BASE=OFF
+          .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+          cp build/windows-release/tests/bench/bench_types.exe build/windows-release/tests/bench/bench_types.exe.map builds/aslr/
+          .tools/cmake/bin/cmake --preset windows-release -DZODIAC_BENCH_FIXED_BASE=ON > /dev/null
+          .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+          cp build/windows-release/tests/bench/bench_types.exe build/windows-release/tests/bench/bench_types.exe.map builds/fixed/
+          .tools/llvm-mingw/bin/llvm-readobj --file-headers builds/aslr/bench_types.exe | grep -iE "ImageBase|DYNAMIC_BASE|HIGH_ENTROPY" || true
+          echo "--- fixed:"
+          .tools/llvm-mingw/bin/llvm-readobj --file-headers builds/fixed/bench_types.exe | grep -iE "ImageBase|DYNAMIC_BASE|HIGH_ENTROPY" || true
+      - name: Show the CPU
+        shell: pwsh
+        run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
+      - name: Study
+        run: |
+          args=(--variant aslr=builds/aslr/bench_types.exe --variant fixed=builds/fixed/bench_types.exe --copies "$COPIES" --runs "$RUNS" --rounds "$ROUNDS")
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do args+=(--op "$op"); done
+          python -I tools/bench_placement.py "${args[@]}" --bench-arg=--calibrate --bench-arg=time --out-dir placement
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: placement-study-${{ matrix.job }}
+          path: |
+            placement/*.json
+            placement/*.txt
+            placement/runs.jsonl
+          if-no-files-found: ignore
