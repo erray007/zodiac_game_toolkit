@@ -98,7 +98,8 @@ jobs:
         shell: bash
         run: |
           ops=()
-          for op in $OPS; do ops+=(--op "$op"); done
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do ops+=(--op "$op"); done
           if [ "$ALL" = "true" ]; then ops+=(--all); fi
           python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types.exe --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" --pressure-gb "$PRESSURE_GB" "${ops[@]}"
       - name: Upload the diagnosis
@@ -152,7 +153,8 @@ jobs:
       - name: Diagnose
         run: |
           ops=()
-          for op in $OPS; do ops+=(--op "$op"); done
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do ops+=(--op "$op"); done
           if [ "$ALL" = "true" ]; then ops+=(--all); fi
           python -I tools/bench_diagnose.py --bench build/hooks/tests/bench/bench_types --out-dir bench-diagnose --seeds "$SEEDS" --passes "$PASSES" --unfixed "$UNFIXED" --rounds "$ROUNDS" --focus "$FOCUS" --pressure-gb "$PRESSURE_GB" "${ops[@]}"
       - name: Upload the diagnosis

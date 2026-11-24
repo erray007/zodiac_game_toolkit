@@ -214,6 +214,15 @@ for(int i=100;i<150;++i)expected+="k"+std::to_string(i)+",";
 expected+="k0";
 CHECK(value_of(fixture,"dictionary d;for(int i=0;i<100;++i)d.set(\"k\"+i,i);for(int i=0;i<100;i+=2)d.remove(\"k\"+i);for(int i=100;i<150;++i)d.set(\"k\"+i,i);d.set(\"k0\",0);return show(d);")==expected);
 CHECK(value_of(fixture,"dictionary d;for(int i=0;i<40;++i)d.set(\"k\"+i,i);d.clear();d.set(\"x\",1);d.set(\"y\",2);d.remove(\"x\");d.set(\"x\",3);return show(d)+\"|\"+d.length();")=="y,x|2");
+// Long keys (heap text, over String's 23 inline bytes) and Turkish ones come back whole and in order; an empty dictionary,
+// a cleared one and one emptied by removes give an empty array.
+const std::string long_key(300,'k');
+CHECK(value_of(fixture,"dictionary d;string a=\""+long_key+"\";string b=a+\"\xC5\x9F\";d.set(a,1);d.set(\"short\",2);d.set(b,3);d.set(\"\xC4\xB1\xC5\x9F\xC4\xB1k\",4);"
+"array<string>@ k=d.keys();return k.length()+\",\"+(k[0]==a)+\",\"+k[1]+\",\"+(k[2]==b)+\",\"+k[2].byte_length()+\",\"+k[3];")
+=="4,true,short,true,302,\xC4\xB1\xC5\x9F\xC4\xB1k");
+CHECK(value_of(fixture,"dictionary d;array<string>@ k=d.keys();dictionary e;e.set(\"x\",1);e.clear();array<string>@ c=e.keys();"
+"dictionary f;f.set(\"y\",1);f.remove(\"y\");array<string>@ r=f.keys();k.insert_last(\"z\");return k.length()+\",\"+c.length()+\",\"+r.length()+\",\"+k[0];")
+=="1,0,0,z");
 // keys() is a copy.
 CHECK(value_of(fixture,"dictionary d;d.set(\"a\",1);array<string>@ k=d.keys();d.set(\"b\",2);k.insert_last(\"z\");return show(d)+\"|\"+k.length();")=="a,b|2");
 }

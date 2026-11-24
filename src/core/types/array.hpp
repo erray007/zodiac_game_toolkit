@@ -73,6 +73,28 @@
 namespace zodiac {
 struct ArrayCache;
 class String;
+#if defined(ZODIAC_TEST_HOOKS)
+namespace testing {
+// Test hook (ZODIAC_TEST_HOOKS trees only): time stamp counter cycles spent in each step of making and freeing array<string>
+// arrays through create_strings (dictionary keys()), summed over every such array of the calling process. Not synchronized:
+// benches read it from the one thread that runs the scripts.
+struct StringArraySteps {
+std::uint64_t arrays;
+std::uint64_t array_malloc;
+std::uint64_t type_add_ref;
+std::uint64_t slots_alloc;
+std::uint64_t strings;
+std::uint64_t string_alloc;
+std::uint64_t string_copy;
+std::uint64_t string_destroy;
+std::uint64_t string_free;
+std::uint64_t slots_free;
+std::uint64_t type_release;
+std::uint64_t array_free;
+};
+StringArraySteps& string_array_steps() noexcept;
+}
+#endif
 
 class ScriptArray {
 public:
@@ -178,6 +200,10 @@ mutable bool gc_flag_=false;
 Kind kind_=Kind::int32;
 // Object elements (not handles) are stored as pointers to objects the array owns.
 bool indirect_=false;
+#if defined(ZODIAC_TEST_HOOKS)
+// Made by create_strings: its release is timed into testing::string_array_steps().
+bool timed_=false;
+#endif
 std::uint32_t element_size_=0;
 std::uint32_t count_=0;
 std::uint32_t capacity_=0;

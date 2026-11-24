@@ -34,6 +34,12 @@
 #include <core/types/script_guard.hpp>
 #include <core/types/string.hpp>
 #include <core/types/string_binding.hpp>
+#if defined(ZODIAC_TEST_HOOKS)
+#include <chrono>
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+#endif
 #include <algorithm>
 #include <climits>
 #include <cstdio>
@@ -458,6 +464,38 @@ kind_=primitive_kind(value_type_id,element_size_);
 }
 }
 
+#if defined(ZODIAC_TEST_HOOKS)
+testing::StringArraySteps& testing::string_array_steps() noexcept
+{
+static StringArraySteps steps{};
+return steps;
+}
+namespace {
+std::uint64_t step_clock() noexcept
+{
+#if defined(__x86_64__)
+return __rdtsc();
+#else
+return static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+#endif
+}
+// Adds the cycles since mark to field and moves mark on.
+void step(std::uint64_t& mark,std::uint64_t testing::StringArraySteps::*field) noexcept
+{
+const std::uint64_t now=step_clock();
+testing::string_array_steps().*field+=now-mark;
+mark=now;
+}
+}
+#define ZODIAC_STEP_MARK std::uint64_t step_mark=step_clock()
+#define ZODIAC_STEP(field) step(step_mark,&testing::StringArraySteps::field)
+#define ZODIAC_STEP_IF(condition,field) do{if(condition)ZODIAC_STEP(field);}while(0)
+#else
+#define ZODIAC_STEP_MARK do{}while(0)
+#define ZODIAC_STEP(field) do{}while(0)
+#define ZODIAC_STEP_IF(condition,field) do{}while(0)
+#endif
+
 ScriptArray::ScriptArray(asITypeInfo* type,ArrayCache* strings) noexcept:kind_(Kind::string),indirect_(true),element_size_(sizeof(void*)),sub_type_id_(type->GetSubTypeId()),type_(type),cache_(strings)
 {
 type_->AddRef();
@@ -470,13 +508,19 @@ return precache(type);
 
 ScriptArray::~ScriptArray()
 {
+#if defined(ZODIAC_TEST_HOOKS)
+const bool timed=timed_;
+#endif
+ZODIAC_STEP_MARK;
 if(kind_==Kind::string){
 // Zodiac's strings directly: what ReleaseScriptObject does for this value type (its destructor, then the engine's free,
 // which is asFreeMem's), without the engine's generic calls per element.
 for(std::uint32_t index=0;index<count_;++index){
 if(void* pointer=load_pointer(slot(index))){
 static_cast<String*>(pointer)->~String();
+ZODIAC_STEP_IF(timed,string_destroy);
 asFreeMem(pointer);
+ZODIAC_STEP_IF(timed,string_free);
 }
 }
 }else if(has_objects()){
@@ -487,7 +531,9 @@ if(void* pointer=load_pointer(slot(index)))owner->ReleaseScriptObject(pointer,el
 }
 }
 std::free(data_);
+ZODIAC_STEP_IF(timed,slots_free);
 type_->Release();
+ZODIAC_STEP_IF(timed,type_release);
 }
 
 ScriptArray* ScriptArray::allocate(asITypeInfo* type) noexcept
@@ -536,13 +582,16 @@ raise(count_error);
 return nullptr;
 }
 ScriptArray* array;
+ZODIAC_STEP_MARK;
 if(cache&&cache->strings){
 void* memory=std::malloc(sizeof(ScriptArray));
 if(!memory){
 raise(memory_error);
 return nullptr;
 }
+ZODIAC_STEP(array_malloc);
 array=new(memory) ScriptArray(type,cache);
+ZODIAC_STEP(type_add_ref);
 }else{
 array=allocate(type);
 if(!array)return nullptr;
@@ -556,6 +605,11 @@ if(!array->set_capacity(static_cast<std::uint32_t>(capacity))){
 array->release();
 return nullptr;
 }
+ZODIAC_STEP(slots_alloc);
+#if defined(ZODIAC_TEST_HOOKS)
+array->timed_=true;
+++testing::string_array_steps().arrays;
+#endif
 array->notify_gc();
 return array;
 }
@@ -566,13 +620,19 @@ if(count_>=capacity_){
 raise(memory_error);
 return false;
 }
+ZODIAC_STEP_MARK;
 void* memory=asAllocMem(sizeof(String));
 if(!memory){
 raise(memory_error);
 return false;
 }
+ZODIAC_STEP(string_alloc);
 try{
 new(memory) String(text);
+ZODIAC_STEP(string_copy);
+#if defined(ZODIAC_TEST_HOOKS)
+++testing::string_array_steps().strings;
+#endif
 }
 catch(...){
 asFreeMem(memory);
@@ -656,8 +716,13 @@ void ScriptArray::release() const noexcept
 gc_flag_=false;
 if(asAtomicDec(ref_count_)==0){
 ScriptArray* self=const_cast<ScriptArray*>(this);
+#if defined(ZODIAC_TEST_HOOKS)
+const bool timed=timed_;
+#endif
 self->~ScriptArray();
+ZODIAC_STEP_MARK;
 std::free(self);
+ZODIAC_STEP_IF(timed,array_free);
 }
 }
 

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       base:
-        description: "Baseline ref or sha (A)"
+        description: "Baseline ref or sha (A); 'same' runs B's own binary as A (an A/A noise bound; the head's sha gives A/A', a second build)"
         required: true
       pairs:
         description: "A/B pairs (each run its own process)"
@@ -73,6 +73,7 @@ jobs:
       - name: Build A (the baseline)
         shell: pwsh
         run: |
+          if ($env:BASE -eq 'same') { "A/A: A is B's own binary, nothing to build."; exit 0 }
           git worktree add base-src "$env:BASE"
           if ($LASTEXITCODE -ne 0) { throw "git worktree failed" }
           New-Item -ItemType Junction -Path base-src/.tools -Target (Resolve-Path .tools) | Out-Null
@@ -89,10 +90,13 @@ jobs:
       - name: A/B
         run: |
           ops=()
-          for op in $OPS; do ops+=(--op "$op"); done
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do ops+=(--op "$op"); done
           # Named ops may be diagnostic ones (dict_keys_10, ...); without names every gated op runs, and the diagnostic ones stay out.
-          if [ -n "$OPS" ]; then ops+=(--diagnostic); fi
-          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types.exe --b build/windows-release/tests/bench/bench_types.exe --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
+          if [ "${#names[@]}" -gt 0 ]; then ops+=(--diagnostic); fi
+          a=build/base/tests/bench/bench_types.exe
+          if [ "$BASE" = same ]; then a=build/windows-release/tests/bench/bench_types.exe; fi
+          python -I tools/bench_ab.py --a "$a" --b build/windows-release/tests/bench/bench_types.exe --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
       - name: Upload the A/B
         if: always()
         uses: actions/upload-artifact@v4
@@ -141,6 +145,7 @@ jobs:
           .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
       - name: Build A (the baseline)
         run: |
+          if [ "$BASE" = same ]; then echo "A/A: A is B's own binary, nothing to build."; exit 0; fi
           git worktree add base-src "$BASE"
           ln -s "$PWD/.tools" base-src/.tools
           deps="$PWD/.deps/linux-release"
@@ -152,9 +157,12 @@ jobs:
       - name: A/B
         run: |
           ops=()
-          for op in $OPS; do ops+=(--op "$op"); done
-          if [ -n "$OPS" ]; then ops+=(--diagnostic); fi
-          python -I tools/bench_ab.py --a build/base/tests/bench/bench_types --b build/linux-release/tests/bench/bench_types --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do ops+=(--op "$op"); done
+          if [ "${#names[@]}" -gt 0 ]; then ops+=(--diagnostic); fi
+          a=build/base/tests/bench/bench_types
+          if [ "$BASE" = same ]; then a=build/linux-release/tests/bench/bench_types; fi
+          python -I tools/bench_ab.py --a "$a" --b build/linux-release/tests/bench/bench_types --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
       - name: Upload the A/B
         if: always()
         uses: actions/upload-artifact@v4

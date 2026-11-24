@@ -29,7 +29,9 @@
 //   [--list]. Defaults: 101 rounds (at least 15 are required, spec 8.4) of 1 ms per side: many short rounds pair the two
 //   sides closely in time, and the whole run takes about 45 s on the release preset. --op (repeatable) measures only the
 //   named operations, --detail also prints each operation's median ratio per pair of engine and context to stderr, --list
-//   prints the names. For diagnosis only (tools/bench_diagnose.py, never the gate): --diagnostic adds the operations
+//   prints the names. --also NAME (repeatable) adds one diagnostic operation to a run of every gated one; --prewarm-heap holds
+//   blocks of the sizes keys() allocates before anything runs. For diagnosis only (tools/bench_diagnose.py, never the gate):
+//   --diagnostic adds the operations
 //   dict_keys_<n> and dict_get_ordered_<n> and report-only order operations on 1000 keys (to --list and to the names --op
 //   takes) and implies --faults; --faults alone (the gate passes it, it changes no output line) prints, per operation, the page
 //   faults each side's timed runs took ("bench_types: faults <op> zodiac <n> addon <n> ..."); --layout prints, per dictionary
@@ -707,10 +709,16 @@ instance.next_context=(instance.next_context+1)%kContexts;
 if(context_->Prepare(instance.run)<0)fail(2,name_+": cannot prepare run()");
 context_->SetArgDWord(0,static_cast<asDWORD>(reps));
 const std::uint64_t faults_before=g_count_faults?page_faults():0;
+#if defined(ZODIAC_TEST_HOOKS)
+const zodiac::testing::StringArraySteps steps_before=zodiac::testing::string_array_steps();
+#endif
 const auto start=std::chrono::steady_clock::now();
 const int result=context_->Execute();
 const auto stop=std::chrono::steady_clock::now();
 if(g_count_faults)faults+=page_faults()-faults_before;
+#if defined(ZODIAC_TEST_HOOKS)
+add_steps(steps_before);
+#endif
 if(result!=asEXECUTION_FINISHED)fail(2,name_+": run() failed"+exception());
 ns=std::chrono::duration<double,std::nano>(stop-start).count();
 const std::int64_t checksum=static_cast<std::int64_t>(context_->GetReturnQWord());
@@ -725,6 +733,18 @@ return last_placement_;
 }
 // With --diagnostic: the page faults the process took during this side's timed runs (calibration included until reset).
 std::uint64_t faults=0;
+#if defined(ZODIAC_TEST_HOOKS)
+// In a hooks tree: the cycles of keys()'s steps (zodiac::testing::string_array_steps) during this side's timed runs.
+zodiac::testing::StringArraySteps steps{};
+void add_steps(const zodiac::testing::StringArraySteps& before) noexcept
+{
+const zodiac::testing::StringArraySteps& now=zodiac::testing::string_array_steps();
+for(const auto field:step_fields)steps.*field+=now.*field-before.*field;
+}
+using StepField=std::uint64_t zodiac::testing::StringArraySteps::*;
+static constexpr StepField step_fields[]={&zodiac::testing::StringArraySteps::arrays,&zodiac::testing::StringArraySteps::array_malloc,&zodiac::testing::StringArraySteps::type_add_ref,&zodiac::testing::StringArraySteps::slots_alloc,&zodiac::testing::StringArraySteps::strings,&zodiac::testing::StringArraySteps::string_alloc,&zodiac::testing::StringArraySteps::string_copy,&zodiac::testing::StringArraySteps::string_destroy,&zodiac::testing::StringArraySteps::string_free,&zodiac::testing::StringArraySteps::slots_free,&zodiac::testing::StringArraySteps::type_release,&zodiac::testing::StringArraySteps::array_free};
+static constexpr const char* step_names[]={"arrays","array_malloc","type_add_ref","slots_alloc","strings","string_alloc","string_copy","string_destroy","string_free","slots_free","type_release","array_free"};
+#endif
 // The address of the script global name on engine (the object itself for an object variable), or nullptr.
 void* global(int engine,const char* name) const
 {
@@ -984,6 +1004,20 @@ std::string machine_line(const Machine& machine)
 return "{\"machine\":{\"cpu\":"+json_text(machine.cpu)+",\"logical_cores\":"+std::to_string(machine.logical_cores)+",\"os\":"+json_text(machine.os)+"}}\n";
 }
 
+// --prewarm-heap (the heap contrast arm of the slow-mode diagnosis): allocates and holds 64 blocks of each size keys() takes
+// from the C heap (the ScriptArray object, the 10-slot block, a String), so the Windows heap serves those sizes from its
+// low-fragmentation heap from the start (it switches a size on after enough blocks of it are live at once).
+void prewarm_heap()
+{
+static std::vector<void*> held;
+for(const std::size_t size:{sizeof(zodiac::ScriptArray),std::size_t{10*sizeof(void*)},sizeof(zodiac::String)}){
+for(int i=0;i<64;++i){
+if(void* block=std::malloc(size))held.push_back(block);
+}
+}
+std::fprintf(stderr,"bench_types: prewarm-heap holds %zu blocks of %zu, %zu and %zu bytes\n",held.size(),sizeof(zodiac::ScriptArray),std::size_t{10*sizeof(void*)},sizeof(zodiac::String));
+}
+
 // Measurement hygiene, the same for both sides: on Windows a high priority class, so other programs interrupt the
 // interleaved runs less (Linux needs privileges for that), then a short spin so the CPU leaves its idle clock before the
 // first operation. Pinning to one CPU was tried and made runs noisier on a loaded machine, so the scheduler keeps its choice.
@@ -1010,8 +1044,16 @@ bool layout=false;
 bool faults=false;
 // --diagnostic may follow the --op that names a diagnostic operation, so it is found first.
 bool diagnostic=false;
-for(int i=1;i<argc;++i)diagnostic=diagnostic||std::string_view(argv[i])=="--diagnostic";
-const std::vector<Job> jobs=all_jobs(diagnostic);
+bool any_also=false;
+for(int i=1;i<argc;++i){
+diagnostic=diagnostic||std::string_view(argv[i])=="--diagnostic";
+any_also=any_also||std::string_view(argv[i])=="--also";
+}
+// The gated operations come first in the list; --also adds diagnostic ones to a run of all of them.
+const std::size_t gated_count=all_jobs(false).size();
+const std::vector<Job> jobs=all_jobs(diagnostic||any_also);
+std::vector<std::string> also;
+bool prewarm=false;
 for(int i=1;i<argc;++i){
 const std::string_view arg=argv[i];
 const bool has_value=i+1<argc;
@@ -1026,13 +1068,20 @@ const std::string name=argv[++i];
 if(std::none_of(jobs.begin(),jobs.end(),[&name](const Job& job){return job.name==name;}))fail(1,"unknown operation "+name+" (--list prints them)");
 only.push_back(name);
 }
+else if(arg=="--also"&&has_value){
+const std::string name=argv[++i];
+const auto at=std::find_if(jobs.begin(),jobs.end(),[&name](const Job& job){return job.name==name;});
+if(at==jobs.end()||static_cast<std::size_t>(at-jobs.begin())<gated_count)fail(1,"--also needs a diagnostic operation ("+name+" is not one)");
+also.push_back(name);
+}
+else if(arg=="--prewarm-heap")prewarm=true;
 else if(arg=="--out"&&has_value)out_path=argv[++i];
 else if(arg=="--list")list=true;
 else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
 else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--layout] [--faults] [--diagnostic] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--diagnostic] [--list]");
 }
 if(list){
 for(const Job& job:jobs)std::printf("%s\n",job.name.c_str());
@@ -1050,19 +1099,28 @@ const std::string line=machine_line(machine);
 std::fwrite(line.data(),1,line.size(),stdout);
 if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::string("cannot write ")+out_path);
 }
+if(prewarm)prewarm_heap();
 quiet_process();
 asPrepareMultithread();
 const double target_ns=target_ms*1e6;
 {
 // Each measurement's sides shut their engines down when the deque goes out of scope (a deque never moves its elements).
 std::deque<Measurement> measurements;
-for(const Job& job:jobs){
-if(!only.empty()&&std::find(only.begin(),only.end(),job.name)==only.end())continue;
+for(std::size_t index=0;index<jobs.size();++index){
+const Job& job=jobs[index];
+if(!only.empty()){
+if(std::find(only.begin(),only.end(),job.name)==only.end())continue;
+}else if(index>=gated_count&&!diagnostic&&std::find(also.begin(),also.end(),job.name)==also.end())continue;
 measurements.emplace_back(job,rounds);
 }
 g_count_faults=diagnostic||faults;
 for(Measurement& m:measurements)calibrate(m,target_ns);
-for(Measurement& m:measurements)m.zodiac.faults=m.addon.faults=0;
+for(Measurement& m:measurements){
+m.zodiac.faults=m.addon.faults=0;
+#if defined(ZODIAC_TEST_HOOKS)
+m.zodiac.steps=m.addon.steps={};
+#endif
+}
 // The rounds go over every operation in turn, so each operation's rounds spread over the whole run (see the contract).
 for(int round=0;round<rounds;++round){
 for(Measurement& m:measurements)measure_round(m,round);
@@ -1078,8 +1136,27 @@ if(g_count_faults){
 for(const Measurement& m:measurements){
 const double runs=static_cast<double>(m.ratios.size());
 char line[256];
-std::snprintf(line,sizeof line,"bench_types: faults %s zodiac %llu addon %llu (per timed run %.2f and %.2f, %d reps each)\n",m.job->name.c_str(),static_cast<unsigned long long>(m.zodiac.faults),static_cast<unsigned long long>(m.addon.faults),static_cast<double>(m.zodiac.faults)/runs,static_cast<double>(m.addon.faults)/runs,m.reps);
-std::fputs(line,stderr);
+std::snprintf(line,sizeof line,"bench_types: faults %s zodiac %llu addon %llu (per timed run %.2f and %.2f, %d reps each)",m.job->name.c_str(),static_cast<unsigned long long>(m.zodiac.faults),static_cast<unsigned long long>(m.addon.faults),static_cast<double>(m.zodiac.faults)/runs,static_cast<double>(m.addon.faults)/runs,m.reps);
+std::string text=line;
+#if defined(ZODIAC_TEST_HOOKS)
+// keys()'s steps: TSC cycles per array (per string for the per-string steps), over the Zodiac side's timed runs.
+const zodiac::testing::StringArraySteps& steps=m.zodiac.steps;
+if(steps.arrays){
+text+=" steps per array:";
+for(std::size_t i=0;i<std::size(Side::step_fields);++i){
+const std::uint64_t value=steps.*Side::step_fields[i];
+if(i==0||i==4){
+text+=" "+std::string(Side::step_names[i])+" "+std::to_string(value);
+continue;
+}
+char cell[64];
+std::snprintf(cell,sizeof cell," %s %.1f",Side::step_names[i],static_cast<double>(value)/static_cast<double>(steps.arrays));
+text+=cell;
+}
+}
+#endif
+text+="\n";
+std::fputs(text.c_str(),stderr);
 }
 }
 if(layout){
@@ -1101,5 +1178,7 @@ std::fflush(stdout);
 }
 if(out&&std::fclose(out)!=0)fail(1,std::string("cannot write ")+out_path);
 asUnprepareMultithread();
+// The whole process's page faults (image page-in included), to compare a fresh binary's first run with later ones.
+if(g_count_faults)std::fprintf(stderr,"bench_types: process faults %llu\n",static_cast<unsigned long long>(page_faults()));
 return 0;
 }

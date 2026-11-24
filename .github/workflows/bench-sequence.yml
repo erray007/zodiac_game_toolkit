@@ -1,0 +1,73 @@
+# Bench sequence experiment (Task 5b fix round 2), report-only and never part of the gate: on each of 8 Windows runners, the gate's exact
+# bench_types invocation run several times in a row right after the release link, then a hooks build (keys()'s per-step cycles), a heap prewarm
+# arm, a fresh copy and a copy in a folder excluded from Windows Defender (tools/bench_sequence.py). Each job's table is in its log and its runs
+# in the artifact bench-sequence-<n>. Trigger by hand only:
+#   gh workflow run bench-sequence.yml --ref <branch> [-f k=6 -f rounds=101]
+name: bench-sequence
+
+on:
+  workflow_dispatch:
+    inputs:
+      k:
+        description: "Gate-exact runs in a row right after the link"
+        default: "6"
+      rounds:
+        description: "bench_types --rounds"
+        default: "101"
+
+permissions:
+  contents: read
+
+env:
+  K: ${{ inputs.k }}
+  ROUNDS: ${{ inputs.rounds }}
+
+jobs:
+  sequence:
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: windows-latest
+    # Two release builds (about 25 minutes) and 16 full bench runs (about 15) fit with a margin.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      # The hooks build first, so the plain bench is the last thing linked, as in the gate job.
+      - name: Build the hooks bench
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release -B build/hooks -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --build build/hooks --target bench_types
+      - name: Build the plain bench on the release preset
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release
+          .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      - name: Sequence
+        run: python -I tools/bench_sequence.py --plain build/windows-release/tests/bench/bench_types.exe --hooks build/hooks/tests/bench/bench_types.exe --out-dir bench-sequence --k "$env:K" --rounds "$env:ROUNDS"
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-sequence-${{ matrix.job }}
+          path: bench-sequence
+          if-no-files-found: ignore
