@@ -6,10 +6,6 @@
 name: bench-reference
 
 on:
-  # Registers the workflow (GitHub dispatches a workflow off the default branch only once a push has); only a push of this file starts it.
-  push:
-    paths:
-      - .github/workflows/bench-reference.yml
   workflow_dispatch:
     inputs:
       rounds:
