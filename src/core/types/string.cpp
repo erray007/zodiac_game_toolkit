@@ -590,7 +590,7 @@ block_cache_closed=true;
 for(FreeBlock* head:heads){
 while(head){
 FreeBlock* next=head->next;
-heap::release(static_cast<void*>(head));
+heap::delete_block(static_cast<void*>(head));
 head=next;
 }
 }
@@ -618,7 +618,7 @@ block=head;
 }
 }
 }
-if(!block)block=heap::allocate_or_throw(bytes);
+if(!block)block=heap::new_block(bytes);
 auto* header=::new(block) HeapHeader{nullptr};
 return reinterpret_cast<char*>(header+1);
 }
@@ -640,7 +640,7 @@ cache.heads[k]=::new(block) FreeBlock{cache.heads[k]};
 return;
 }
 }
-heap::release(block);
+heap::delete_block(block);
 }
 
 // Number parsing. Clinger's fast path is exact when the significand fits in 53 bits and the power of ten is exact.
@@ -1119,7 +1119,7 @@ rep_.meta=n==0?meta_ascii:meta;
 void String::release() noexcept
 {
 HeapHeader* header=header_of(rep_.storage.heap.ptr);
-if(header->index!=nullptr)heap::release(header->index);
+if(header->index!=nullptr)heap::delete_block(header->index);
 free_block(rep_.storage.heap.ptr,rep_.storage.heap.capacity);
 }
 
@@ -1127,7 +1127,7 @@ void String::free_index() noexcept
 {
 HeapHeader* header=header_of(rep_.storage.heap.ptr);
 if(header->index!=nullptr){
-heap::release(header->index);
+heap::delete_block(header->index);
 header->index=nullptr;
 }
 }
@@ -1298,9 +1298,9 @@ const std::uint32_t length=(entries-1)*step+count_chars(last,end,ascii);
 const std::uint32_t needed=(length-1)/step+1;
 if(needed>block[1]){
 const std::uint32_t capacity=std::max(needed,block[1]*2);
-auto* grown=static_cast<std::uint32_t*>(heap::allocate_or_throw(sizeof(std::uint32_t)*(std::size_t{capacity}+2)));
+auto* grown=static_cast<std::uint32_t*>(heap::new_block(sizeof(std::uint32_t)*(std::size_t{capacity}+2)));
 std::memcpy(grown,block,sizeof(std::uint32_t)*(std::size_t{entries}+2));
-heap::release(block);
+heap::delete_block(block);
 grown[1]=capacity;
 header->index=block=grown;
 }
@@ -1427,7 +1427,7 @@ HeapHeader* header=header_of(ptr);
 std::uint32_t* block=__atomic_load_n(&header->index,__ATOMIC_ACQUIRE);
 if(block!=nullptr)return block+2;
 const std::uint32_t needed=((load_meta()&meta_length)-1)/step+1;
-auto* built=static_cast<std::uint32_t*>(heap::allocate_or_throw(sizeof(std::uint32_t)*(std::size_t{needed}+2)));
+auto* built=static_cast<std::uint32_t*>(heap::new_block(sizeof(std::uint32_t)*(std::size_t{needed}+2)));
 built[0]=needed;
 built[1]=needed;
 built[2]=0;
@@ -1440,7 +1440,7 @@ built[2+k]=static_cast<std::uint32_t>(p-begin);
 }
 std::uint32_t* expected=nullptr;
 if(__atomic_compare_exchange_n(&header->index,&expected,built,false,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE))return built+2;
-heap::release(built);
+heap::delete_block(built);
 return expected+2;
 }
 

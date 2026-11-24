@@ -2,8 +2,8 @@
 // dictionary's objects, segments and indexes), in one place.
 // Contract:
 // - Every build except a Windows ZODIAC_TEST_HOOKS tree: inline calls of the C runtime and the global operator new, exactly as the
-//   call sites made before (malloc, realloc, calloc, free; operator new and delete, aligned or not; the throwing forms throw
-//   std::bad_alloc).
+//   call sites made before (malloc, realloc, calloc, free; operator new and delete, aligned or not; new_block and the aligned
+//   throwing form throw std::bad_alloc).
 // - A Windows ZODIAC_TEST_HOOKS tree (bench diagnosis only, never a release preset or the kit): when the environment variable
 //   ZODIAC_PRIVATE_HEAP is "1" at startup, they use a private heap of their own (HeapCreate, with the low-fragmentation heap on,
 //   as the process heap has), so a bench can tell whether Zodiac's allocations disturb the add-ons' through the shared C runtime
@@ -54,12 +54,21 @@ inline bool private_heap() noexcept
 return false;
 }
 #endif
-// The throwing forms (operator new's contract).
-inline void* allocate_or_throw(std::size_t size)
+// String's blocks and indexes: the global operator new and delete (so a program's own replacement of them, such as the
+// allocation-failure tests', sees every string allocation), or the private heap. new_block throws std::bad_alloc.
+#if defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
+void* new_block(std::size_t size);
+void delete_block(void* block) noexcept;
+#else
+inline void* new_block(std::size_t size)
 {
-if(void* block=allocate(size?size:1))return block;
-throw std::bad_alloc();
+return ::operator new(size);
 }
+inline void delete_block(void* block) noexcept
+{
+::operator delete(block);
+}
+#endif
 inline void* allocate_aligned_or_throw(std::size_t size,std::size_t alignment)
 {
 if(void* block=allocate_aligned(size?size:1,alignment))return block;

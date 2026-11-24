@@ -77,6 +77,22 @@ std::memcpy(&raw,static_cast<char*>(block)-sizeof(void*),sizeof raw);
 HeapFree(heap_handle,0,raw);
 }
 
+void* new_block(std::size_t size)
+{
+if(!heap_handle)return ::operator new(size);
+if(void* block=HeapAlloc(heap_handle,0,size?size:1))return block;
+throw std::bad_alloc();
+}
+
+void delete_block(void* block) noexcept
+{
+if(!heap_handle){
+::operator delete(block);
+return;
+}
+if(block)HeapFree(heap_handle,0,block);
+}
+
 bool private_heap() noexcept
 {
 return heap_handle!=nullptr;
