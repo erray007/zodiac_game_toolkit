@@ -1,0 +1,104 @@
+# Runner probe (Task 5b fix round 4), report-only: whether the CI runners expose hardware performance counters (perf stat on Linux,
+# wpr -pmcsources on Windows), and llvm-mca's model (znver4, the EPYC 9V74's Zen 4) of the byte_at leaf against the add-on's StringCharAt in
+# the release bench. Trigger: gh workflow run runner-probe.yml --ref <branch>
+name: runner-probe
+
+on:
+  # Registers the workflow (GitHub dispatches a workflow off the default branch only once a push has); only a push of this file starts it.
+  push:
+    paths:
+      - .github/workflows/runner-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Hardware counters
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name | Format-List
+          wpr -pmcsources
+          "wpr exit code: $LASTEXITCODE"
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the bench on the release preset
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release
+          .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      - name: llvm-mca on the two leaves
+        continue-on-error: true
+        run: python -I tools/leaf_mca.py --exe build/windows-release/tests/bench/bench_types.exe --objdump .tools/llvm-mingw/bin/llvm-objdump --mca "C:/Program Files/LLVM/bin/llvm-mca.exe" --image-base
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-linux-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Install and select clang 18 with libc++, lld and the LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev lld-18 llvm-18
+          echo "CC=clang-18" >> "$GITHUB_ENV"
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Hardware counters
+        continue-on-error: true
+        run: |
+          lscpu | grep -E '^Model name'
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-generic || true
+          cat /proc/sys/kernel/perf_event_paranoid || true
+          perf stat -e cycles,instructions true || sudo perf stat -e cycles,instructions true || echo "perf stat failed"
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the bench on the release preset
+        run: |
+          .tools/cmake/bin/cmake --preset linux-release
+          .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
+      - name: llvm-mca on the two leaves
+        continue-on-error: true
+        run: python -I tools/leaf_mca.py --exe build/linux-release/tests/bench/bench_types --objdump llvm-objdump-18 --mca llvm-mca-18

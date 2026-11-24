@@ -2,7 +2,7 @@
 # bench_types invocation run several times in a row right after the release link, then a hooks build (keys()'s per-step cycles), a heap prewarm
 # arm, a fresh copy and a copy in a folder excluded from Windows Defender (tools/bench_sequence.py). Each job's table is in its log and its runs
 # in the artifact bench-sequence-<n>. Trigger by hand only:
-#   gh workflow run bench-sequence.yml --ref <branch> [-f k=6 -f rounds=101]
+#   gh workflow run bench-sequence.yml --ref <branch> [-f k=6 -f rounds=101 -f calibrate=time|count -f window_ms=1 -f reps=N]
 name: bench-sequence
 
 on:
@@ -14,6 +14,15 @@ on:
       rounds:
         description: "bench_types --rounds"
         default: "101"
+      calibrate:
+        description: "bench_types --calibrate: time (equal-time windows, the gate's) or count (equal reps)"
+        default: "time"
+      window_ms:
+        description: "bench_types --window-ms (time mode)"
+        default: "1"
+      reps:
+        description: "bench_types --reps (count mode; empty: the slower side's time-calibrated reps)"
+        default: ""
 
 permissions:
   contents: read
@@ -21,6 +30,9 @@ permissions:
 env:
   K: ${{ inputs.k || '6' }}
   ROUNDS: ${{ inputs.rounds || '101' }}
+  CALIBRATE: ${{ inputs.calibrate || 'time' }}
+  WINDOW_MS: ${{ inputs.window_ms || '1' }}
+  REPS: ${{ inputs.reps || '' }}
 
 jobs:
   sequence:
@@ -63,7 +75,11 @@ jobs:
           .tools/cmake/bin/cmake --preset windows-release
           .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
       - name: Sequence
-        run: python -I tools/bench_sequence.py --plain build/windows-release/tests/bench/bench_types.exe --hooks build/hooks/tests/bench/bench_types.exe --out-dir bench-sequence --k "$env:K" --rounds "$env:ROUNDS"
+        shell: bash
+        run: |
+          args=(--bench-arg=--calibrate "--bench-arg=$CALIBRATE" --bench-arg=--window-ms "--bench-arg=$WINDOW_MS")
+          if [ -n "$REPS" ]; then args+=(--bench-arg=--reps "--bench-arg=$REPS"); fi
+          python -I tools/bench_sequence.py --plain build/windows-release/tests/bench/bench_types.exe --hooks build/hooks/tests/bench/bench_types.exe --out-dir bench-sequence --k "$K" --rounds "$ROUNDS" "${args[@]}"
       - name: Upload the runs
         if: always()
         uses: actions/upload-artifact@v4

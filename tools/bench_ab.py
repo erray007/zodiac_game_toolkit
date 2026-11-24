@@ -21,8 +21,8 @@ from pathlib import Path
 LIMIT = 1.05
 
 
-def run(bench: Path, out: Path, rounds: int, ops: list, diagnostic: bool = False) -> dict:
-    command = [str(bench), "--detail", "--rounds", str(rounds), "--out", str(out)] + (["--diagnostic"] if diagnostic else [])
+def run(bench: Path, out: Path, rounds: int, ops: list, diagnostic: bool = False, extra: tuple = ()) -> dict:
+    command = [str(bench), "--detail", "--rounds", str(rounds), "--out", str(out)] + (["--diagnostic"] if diagnostic else []) + list(extra)
     for op in ops:
         command += ["--op", op]
     done = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
@@ -43,9 +43,11 @@ def run(bench: Path, out: Path, rounds: int, ops: list, diagnostic: bool = False
 
 
 def table(a_runs: list, b_runs: list) -> str:
-    ops = list(a_runs[0]["ops"])
+    # Operations both builds have (a baseline may predate some), in B's order.
+    ops = [op for op in b_runs[0]["ops"] if all(op in r["ops"] for r in a_runs + b_runs)]
     width = max(len(op) for op in ops)
-    lines = [f"machine: {a_runs[0]['machine']['cpu']}, {a_runs[0]['machine']['logical_cores']} logical cores, {a_runs[0]['machine']['os']}"]
+    machine = b_runs[0]["machine"] or a_runs[0]["machine"]
+    lines = [f"machine: {machine['cpu']}, {machine['logical_cores']} logical cores, {machine['os']}" if machine else "machine: not recorded"]
     lines.append(f"{'op':<{width}}  {'ratio A':>8}  {'ratio B':>8}  {'B/A ns':>7}  {'A>1.05':>6}  {'B>1.05':>6}")
     changes = []
     for op in ops:
@@ -68,6 +70,7 @@ def main(argv=None) -> int:
     parser.add_argument("--rounds", type=int, default=101)
     parser.add_argument("--op", action="append", default=[])
     parser.add_argument("--diagnostic", action="store_true", help="pass --diagnostic, so --op may name the diagnostic operations")
+    parser.add_argument("--bench-arg", action="append", default=[], help="an argument passed to every bench run (e.g. --calibrate, count); repeatable")
     args = parser.parse_args(argv)
     if args.pairs < 1:
         print("bench_ab: --pairs must be at least 1", file=sys.stderr)
@@ -79,7 +82,7 @@ def main(argv=None) -> int:
             order = ("a", "b") if pair % 2 == 0 else ("b", "a")
             for side in order:
                 bench = args.a if side == "a" else args.b
-                result = run(bench, args.out_dir / f"{side}{pair}.json", args.rounds, args.op, args.diagnostic)
+                result = run(bench, args.out_dir / f"{side}{pair}.json", args.rounds, args.op, args.diagnostic, args.bench_arg)
                 (a_runs if side == "a" else b_runs).append(result)
             print(f"bench_ab: pair {pair + 1} of {args.pairs} done", file=sys.stderr, flush=True)
     except (RuntimeError, OSError, ValueError, KeyError) as error:

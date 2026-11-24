@@ -25,8 +25,11 @@ from pathlib import Path
 SLOW = 1.3
 
 
+BENCH_ARGS = []
+
+
 def run(exe: Path, out: Path, rounds: int, extra: list) -> dict:
-    command = [str(exe), "--detail", "--faults", "--layout", "--rounds", str(rounds), "--out", str(out)] + extra
+    command = [str(exe), "--detail", "--faults", "--layout", "--rounds", str(rounds), "--out", str(out)] + extra + BENCH_ARGS
     done = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     out.with_suffix(".stderr.txt").write_text(done.stderr, encoding="utf-8")
     if done.returncode != 0:
@@ -60,7 +63,9 @@ def main(argv=None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--k", type=int, default=6)
     parser.add_argument("--rounds", type=int, default=101)
+    parser.add_argument("--bench-arg", action="append", default=[], help="an argument passed to every bench run (e.g. --calibrate, count); repeatable")
     args = parser.parse_args(argv)
+    BENCH_ARGS[:] = args.bench_arg
     args.out_dir.mkdir(parents=True, exist_ok=True)
     plan = [(f"plain{i}", args.plain, []) for i in range(1, args.k + 1)]
     if args.hooks:

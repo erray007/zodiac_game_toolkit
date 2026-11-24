@@ -13,3 +13,8 @@ target_link_options(bench_types PRIVATE "-Wl,-Map=$<TARGET_FILE:bench_types>.map
 if(DEFINED ZODIAC_BENCH_PAD AND NOT ZODIAC_BENCH_PAD STREQUAL "0")
 target_compile_definitions(bench_types PRIVATE ZODIAC_BENCH_PAD=${ZODIAC_BENCH_PAD})
 endif()
+# A second pad, inside the release core right after the byte_at leaf (string_binding.cpp), so that pairs of pads move code against other
+# code instead of all of it by one shift. It changes the core of this tree only; no preset sets it.
+if(DEFINED ZODIAC_BENCH_CORE_PAD AND NOT ZODIAC_BENCH_CORE_PAD STREQUAL "0")
+set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_CORE_PLACEMENT_PAD=${ZODIAC_BENCH_CORE_PAD})
+endif()

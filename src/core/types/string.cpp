@@ -557,18 +557,7 @@ std::uint32_t* index;
 // (at most block_classes*block_cache_depth blocks, about 70 KB); blocks freed after that go straight to the allocator.
 // Under AddressSanitizer the cache is bypassed (blocks go straight to the allocator, size classes kept), so use after free and
 // leaks of string blocks stay visible to it.
-#if defined(__SANITIZE_ADDRESS__)
-#define ZODIAC_UNDER_ASAN 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define ZODIAC_UNDER_ASAN 1
-#endif
-#endif
-#if defined(ZODIAC_UNDER_ASAN)
-constexpr bool block_cache_on=false;
-#else
-constexpr bool block_cache_on=true;
-#endif
+constexpr bool block_cache_on=!heap::under_address_sanitizer;
 constexpr std::size_t block_class_step=16;
 constexpr std::size_t block_cache_limit=256;
 constexpr std::size_t block_classes=block_cache_limit/block_class_step;

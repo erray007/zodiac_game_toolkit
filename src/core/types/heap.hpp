@@ -15,6 +15,19 @@
 #include <new>
 
 namespace zodiac::heap {
+// True under AddressSanitizer: String's block cache and ScriptArray's object cache then step aside, so the sanitizer sees every
+// allocation and free (the one switch both caches test).
+#if defined(__SANITIZE_ADDRESS__)
+inline constexpr bool under_address_sanitizer=true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+inline constexpr bool under_address_sanitizer=true;
+#else
+inline constexpr bool under_address_sanitizer=false;
+#endif
+#else
+inline constexpr bool under_address_sanitizer=false;
+#endif
 #if defined(ZODIAC_TEST_HOOKS)&&defined(_WIN32)
 void* allocate(std::size_t size) noexcept;
 void* allocate_zeroed(std::size_t count,std::size_t size) noexcept;

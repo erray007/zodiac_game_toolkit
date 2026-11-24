@@ -347,6 +347,18 @@ if(static_cast<std::uint32_t>(index)<size_bytes())return *reinterpret_cast<const
 [[clang::musttail]] return script_byte_out_of_range(index);
 }
 
+#if defined(ZODIAC_CORE_PLACEMENT_PAD)&&ZODIAC_CORE_PLACEMENT_PAD>0
+// Bench placement studies only (bench-reference.yml sets ZODIAC_CORE_PLACEMENT_PAD through tests/bench's ZODIAC_BENCH_CORE_PAD; no preset
+// does): an unused function of that many nop bytes right after the byte_at leaf, so a no-op relink moves the code behind the leaf
+// against the leaf itself, not all of it together.
+#define ZODIAC_PAD_TEXT(x) #x
+#define ZODIAC_PAD_STRING(x) ZODIAC_PAD_TEXT(x)
+[[gnu::used,gnu::noinline]] void zodiac_core_placement_pad()
+{
+asm volatile(".fill " ZODIAC_PAD_STRING(ZODIAC_CORE_PLACEMENT_PAD) ",1,0x90");
+}
+#endif
+
 // String's friend for the script find (find_simple's preconditions checked first) and the script byte_at's registration.
 struct StringBindingAccess {
 static asSFuncPtr byte_at() noexcept

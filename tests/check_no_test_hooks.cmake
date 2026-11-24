@@ -28,9 +28,14 @@ endif()
 if(NOT symbols MATCHES "[0-9a-fA-F-]+ +T +[^\r\n]*fill_entropy")
 message(FATAL_ERROR "check_no_test_hooks: ${NM} listed no definition of fill_entropy in ${archive}, so its symbols were not read")
 endif()
-# Every hooks-only symbol: the seed hook (platform/entropy.hpp) and keys()'s step sums (types/array.hpp). The private heap of
-# types/heap.hpp is Windows-only and needs no symbol check: outside a Windows hooks tree its functions are inline wrappers.
-foreach(hook test_hook_table_hash_seed string_array_steps)
+# Every hooks-only symbol: the seed hook (platform/entropy.hpp), keys()'s step sums (types/array.hpp) and, in Windows trees (PRIVATE_HEAP
+# ON), zodiac::heap::private_heap of the private heap (types/heap.cpp; elsewhere it is an inline wrapper that no core file calls, and
+# heap.cpp is empty).
+set(hooks test_hook_table_hash_seed string_array_steps)
+if(PRIVATE_HEAP)
+list(APPEND hooks "4heap12private_heap")
+endif()
+foreach(hook IN LISTS hooks)
 string(REGEX MATCHALL "[^\r\n]*${hook}[^\r\n]*" found "${symbols}")
 if(HOOKS AND NOT found)
 string(APPEND failures "\n${archive} lacks the hook symbol ${hook} in a ZODIAC_TEST_HOOKS tree")

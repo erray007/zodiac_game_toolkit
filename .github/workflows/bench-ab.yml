@@ -22,6 +22,15 @@ on:
       os:
         description: "both, windows or linux"
         default: "both"
+      calibrate:
+        description: "bench_types --calibrate: time (equal-time windows, the gate's) or count (equal reps)"
+        default: "time"
+      window_ms:
+        description: "bench_types --window-ms (time mode)"
+        default: "1"
+      reps:
+        description: "bench_types --reps (count mode; empty: the slower side's time-calibrated reps)"
+        default: ""
 
 permissions:
   contents: read
@@ -32,6 +41,9 @@ env:
   PAIRS: ${{ inputs.pairs }}
   ROUNDS: ${{ inputs.rounds }}
   OPS: ${{ inputs.ops }}
+  CALIBRATE: ${{ inputs.calibrate }}
+  WINDOW_MS: ${{ inputs.window_ms }}
+  REPS: ${{ inputs.reps }}
 
 jobs:
   windows:
@@ -96,6 +108,12 @@ jobs:
           if [ "${#names[@]}" -gt 0 ]; then ops+=(--diagnostic); fi
           a=build/base/tests/bench/bench_types.exe
           if [ "$BASE" = same ]; then a=build/windows-release/tests/bench/bench_types.exe; fi
+          # The calibration options go to both builds only when they differ from the defaults: a baseline older than Task 5b fix round 4
+          # knows none of them (it then calibrates the old way, both sides together).
+          if [ "$CALIBRATE" != time ] || [ "$WINDOW_MS" != 1 ] || [ -n "$REPS" ]; then
+            ops+=(--bench-arg=--calibrate "--bench-arg=$CALIBRATE" --bench-arg=--window-ms "--bench-arg=$WINDOW_MS")
+            if [ -n "$REPS" ]; then ops+=(--bench-arg=--reps "--bench-arg=$REPS"); fi
+          fi
           python -I tools/bench_ab.py --a "$a" --b build/windows-release/tests/bench/bench_types.exe --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
       - name: Upload the A/B
         if: always()
@@ -162,6 +180,10 @@ jobs:
           if [ "${#names[@]}" -gt 0 ]; then ops+=(--diagnostic); fi
           a=build/base/tests/bench/bench_types
           if [ "$BASE" = same ]; then a=build/linux-release/tests/bench/bench_types; fi
+          if [ "$CALIBRATE" != time ] || [ "$WINDOW_MS" != 1 ] || [ -n "$REPS" ]; then
+            ops+=(--bench-arg=--calibrate "--bench-arg=$CALIBRATE" --bench-arg=--window-ms "--bench-arg=$WINDOW_MS")
+            if [ -n "$REPS" ]; then ops+=(--bench-arg=--reps "--bench-arg=$REPS"); fi
+          fi
           python -I tools/bench_ab.py --a "$a" --b build/linux-release/tests/bench/bench_types --out-dir bench-ab --pairs "$PAIRS" --rounds "$ROUNDS" "${ops[@]}"
       - name: Upload the A/B
         if: always()

@@ -452,18 +452,25 @@ if(i%2==0)CHECK(static_cast<const zodiac::String*>(made[i]->at(1))->byte_length(
 // Freed here, so they fill this thread's cache (and the rest go to the allocator).
 for(zodiac::ScriptArray* array:made)array->release();
 // A thread that fills its own cache and ends: its blocks are freed with it, and arrays it freed earlier are reused meanwhile.
+// A failed REQUIRE cannot leave a worker thread (it throws), so the thread counts failures and the test requires none after it.
+int failed=0;
 std::thread filler([&]{
 std::vector<zodiac::ScriptArray*> mine;
 for(int round=0;round<3;++round){
 for(int i=0;i<count;++i)mine.push_back(zodiac::ScriptArray::create(ints,1));
 for(zodiac::ScriptArray* array:mine){
-if(array)array->release();
+if(!array){
+++failed;
+continue;
+}
+array->release();
 }
 mine.clear();
 }
 asThreadCleanup();
 });
 filler.join();
+REQUIRE(failed==0);
 // This thread's cache still hands out usable arrays.
 for(int i=0;i<count;++i){
 zodiac::ScriptArray* array=zodiac::ScriptArray::create_strings(strings,1,cache);

@@ -472,17 +472,7 @@ namespace {
 // malloc of this one size, against 80 in others, which doubled dict_iterate_10; the other sizes keys() allocates stayed fast.
 // Any thread may free any array: a block goes to the cache of the thread that frees it. Under AddressSanitizer the cache is
 // bypassed, so use after free and leaks of arrays stay visible to it.
-#if defined(__SANITIZE_ADDRESS__)
-constexpr bool array_cache_on=false;
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-constexpr bool array_cache_on=false;
-#else
-constexpr bool array_cache_on=true;
-#endif
-#else
-constexpr bool array_cache_on=true;
-#endif
+constexpr bool array_cache_on=!heap::under_address_sanitizer;
 constexpr int array_block_limit=32;
 struct ArrayBlocks {
 void* blocks[array_block_limit];

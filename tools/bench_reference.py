@@ -24,13 +24,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-MODES = {"reference": ["--reference-only"], "zodiac": ["--zodiac-only"], "mixed": []}
+# Mixed first in each group, so with --pin the alone runs after it time exactly its reps.
+MODES = {"mixed": [], "reference": ["--reference-only"], "zodiac": ["--zodiac-only"]}
 # Functions whose addresses show what a no-op relink moved (from the bench's link map, bench_types.map).
 MAPPED = ("StringCharAt", "zodiac::String::script_byte_at(int) const", "asCContext::ExecuteNext()", "CScriptArray::Find", "zodiac::ScriptArray::native_find")
 
 
-def run(exe: Path, out: Path, rounds: int, ops: list, mode: str, env_extra: dict) -> dict:
-    command = [str(exe), "--rounds", str(rounds), "--out", str(out)] + MODES[mode]
+BENCH_ARGS = []
+
+
+def run(exe: Path, out: Path, rounds: int, ops: list, mode: str, env_extra: dict, pin: Path = None) -> dict:
+    command = [str(exe), "--rounds", str(rounds), "--out", str(out)] + MODES[mode] + BENCH_ARGS + (["--pin-reps", str(pin)] if pin else [])
     for op in ops:
         command += ["--op", op]
     env = dict(os.environ)
@@ -84,7 +88,10 @@ def main(argv=None) -> int:
     parser.add_argument("--within", type=int, default=8)
     parser.add_argument("--each", type=int, default=3)
     parser.add_argument("--op", action="append", required=True)
+    parser.add_argument("--pin", action="store_true", help="run every alone mode with the reps of the mixed run just before it (--pin-reps)")
+    parser.add_argument("--bench-arg", action="append", default=[], help="an argument passed to every bench run (e.g. --calibrate, count); repeatable")
     args = parser.parse_args(argv)
+    BENCH_ARGS[:] = args.bench_arg
     variants = []
     for item in args.variant:
         label, _, path = item.partition("=")
@@ -100,7 +107,9 @@ def main(argv=None) -> int:
     records = []
     def one(phase, label, exe, mode, index, env_extra=None):
         name = f"{phase}-{label}-{mode}-{index}"
-        result = run(exe, args.out_dir / f"{name}.json", args.rounds, args.op, "mixed" if mode == "private" else mode, env_extra or {})
+        # With --pin, an alone run times exactly the reps of the mixed run of its group (written just before it).
+        pin = args.out_dir / f"{phase}-{label}-mixed-{index}.json" if args.pin and mode in ("reference", "zodiac") else None
+        result = run(exe, args.out_dir / f"{name}.json", args.rounds, args.op, "mixed" if mode == "private" else mode, env_extra or {}, pin)
         record = {"phase": phase, "variant": label, "mode": mode, "index": index, **result}
         records.append(record)
         print(f"bench_reference: {name} {json.dumps(result['ops'])}", file=sys.stderr, flush=True)
@@ -116,8 +125,8 @@ def main(argv=None) -> int:
                     one("b", label, exe, mode, index)
         if args.hooks:
             for index in range(4):
-                one("c", "hooks", args.hooks, "private", index, {"ZODIAC_PRIVATE_HEAP": "1"})
                 one("c", "hooks", args.hooks, "mixed", index)
+                one("c", "hooks", args.hooks, "private", index, {"ZODIAC_PRIVATE_HEAP": "1"})
                 one("c", "hooks", args.hooks, "reference", index)
     except (RuntimeError, OSError, ValueError, KeyError) as error:
         print(f"bench_reference: {error}", file=sys.stderr)

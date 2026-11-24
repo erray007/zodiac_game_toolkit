@@ -1,8 +1,9 @@
 # Bench placement and interference experiment (Task 5b fix round 3), report-only and never part of the gate (tools/bench_reference.py). On
-# each runner: the release bench built 6 times, differing only by a no-op relink (ZODIAC_BENCH_PAD: 0, 16, 32, 48, 80 and 112 unused nop
-# bytes), each run --reference-only (the add-on side alone), --zodiac-only and mixed; on Windows also a hooks build whose Zodiac side can use a
-# private heap (ZODIAC_PRIVATE_HEAP=1). The tables are in each job's log and the runs in the artifact bench-reference-<os>-<n>. Trigger:
-#   gh workflow run bench-reference.yml --ref <branch> [-f rounds=101]
+# each runner: the release bench built 6 times, differing only by no-op relinks (PADS below: unused nop functions in the bench and in the core),
+# each run mixed, then --reference-only (the add-on side alone) and --zodiac-only, alone runs pinned to the mixed run's reps unless pin=false;
+# on Windows also a hooks build whose Zodiac side can use a private heap (ZODIAC_PRIVATE_HEAP=1). The tables are in each job's log and the runs
+# in the artifact bench-reference-<os>-<n>. Trigger:
+#   gh workflow run bench-reference.yml --ref <branch> [-f rounds=101 -f calibrate=time|count -f window_ms=1 -f reps=N -f pin=true]
 name: bench-reference
 
 on:
@@ -11,14 +12,32 @@ on:
       rounds:
         description: "bench_types --rounds"
         default: "101"
+      calibrate:
+        description: "bench_types --calibrate: time (equal-time windows, the gate's) or count (equal reps)"
+        default: "time"
+      window_ms:
+        description: "bench_types --window-ms (time mode)"
+        default: "1"
+      reps:
+        description: "bench_types --reps (count mode; empty: the slower side's time-calibrated reps)"
+        default: ""
+      pin:
+        description: "true: each alone run times the reps of the mixed run just before it (--pin-reps)"
+        default: "true"
 
 permissions:
   contents: read
 
 env:
   ROUNDS: ${{ inputs.rounds || '101' }}
+  CALIBRATE: ${{ inputs.calibrate || 'time' }}
+  WINDOW_MS: ${{ inputs.window_ms || '1' }}
+  REPS: ${{ inputs.reps || '' }}
+  PIN: ${{ inputs.pin || 'true' }}
   OPS: string_byte_ascii string_length_ascii dict_iterate_10 array_find_string math_sqrt string_find_ascii array_sort_int
-  PADS: 0 16 32 48 80 112
+  # bench pad, core pad (bytes): the bench pad moves everything after it together, the core pad (right after the byte_at leaf) moves the
+  # code behind the leaf against the leaf, so the pairs sample layouts that differ relative to each other, not only by one shift.
+  PADS: "0_0 16_0 0_16 48_32 80_8 112_48"
 
 jobs:
   windows:
@@ -62,7 +81,7 @@ jobs:
         run: |
           mkdir -p variants
           for pad in $PADS; do
-            .tools/cmake/bin/cmake --preset windows-release "-DZODIAC_BENCH_PAD=$pad" > /dev/null
+            .tools/cmake/bin/cmake --preset windows-release "-DZODIAC_BENCH_PAD=${pad%_*}" "-DZODIAC_BENCH_CORE_PAD=${pad#*_}" > /dev/null
             .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
             mkdir -p "variants/v$pad"
             cp build/windows-release/tests/bench/bench_types.exe build/windows-release/tests/bench/bench_types.exe.map "variants/v$pad/"
@@ -76,6 +95,9 @@ jobs:
           for pad in $PADS; do args+=(--variant "v$pad=variants/v$pad/bench_types.exe"); done
           read -r -a names <<< "$OPS"
           for op in "${names[@]}"; do args+=(--op "$op"); done
+          args+=(--bench-arg=--calibrate "--bench-arg=$CALIBRATE" --bench-arg=--window-ms "--bench-arg=$WINDOW_MS")
+          if [ -n "$REPS" ]; then args+=(--bench-arg=--reps "--bench-arg=$REPS"); fi
+          if [ "$PIN" = true ]; then args+=(--pin); fi
           python -I tools/bench_reference.py "${args[@]}" --hooks build/hooks/tests/bench/bench_types.exe --out-dir bench-reference --rounds "$ROUNDS"
       - name: Upload the runs
         if: always()
@@ -120,7 +142,7 @@ jobs:
         run: |
           mkdir -p variants
           for pad in $PADS; do
-            .tools/cmake/bin/cmake --preset linux-release "-DZODIAC_BENCH_PAD=$pad" > /dev/null
+            .tools/cmake/bin/cmake --preset linux-release "-DZODIAC_BENCH_PAD=${pad%_*}" "-DZODIAC_BENCH_CORE_PAD=${pad#*_}" > /dev/null
             .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
             mkdir -p "variants/v$pad"
             cp build/linux-release/tests/bench/bench_types build/linux-release/tests/bench/bench_types.map "variants/v$pad/"
@@ -133,6 +155,9 @@ jobs:
           for pad in $PADS; do args+=(--variant "v$pad=variants/v$pad/bench_types"); done
           read -r -a names <<< "$OPS"
           for op in "${names[@]}"; do args+=(--op "$op"); done
+          args+=(--bench-arg=--calibrate "--bench-arg=$CALIBRATE" --bench-arg=--window-ms "--bench-arg=$WINDOW_MS")
+          if [ -n "$REPS" ]; then args+=(--bench-arg=--reps "--bench-arg=$REPS"); fi
+          if [ "$PIN" = true ]; then args+=(--pin); fi
           python -I tools/bench_reference.py "${args[@]}" --out-dir bench-reference --rounds "$ROUNDS"
       - name: Upload the runs
         if: always()
