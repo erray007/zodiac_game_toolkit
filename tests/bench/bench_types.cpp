@@ -13,20 +13,25 @@
 //   reps times and returns a checksum, and may define void setup(), run once before timing. Both sides must return the same
 //   checksum; a difference is a bench bug and fails the run (exit code 3).
 // - Every operation has its own engines on both sides (kEngines per side, see Side), so no operation's objects affect
-//   another's and no single engine placement decides a side. Per operation, reps is calibrated so that one run of both
-//   sides together takes at least twice the target time. Then come the rounds: each round runs every operation once, both
+//   another's and no single engine placement decides a side. Per operation, both sides' checksums are first compared on
+//   every engine (one rep each), then reps are calibrated: with --calibrate time (the default, and the gate's) each side
+//   gets its own reps, so that one run of that side takes at least the window (--window-ms, 1 ms) and both sides are timed
+//   over equally long windows; with --calibrate count both run the same reps (--reps N, or else time calibration's reps of
+//   the slower side), and the checksums are also compared every round when --reps fixes them. --pin-reps FILE takes each
+//   operation's reps from an earlier results file instead. Then come the rounds: each round runs every operation once, both
 //   sides back to back (the side that runs first alternates with the round), each run timed alone, with a full garbage
 //   collection after it (untimed). Taking the operations in turn spreads each one's rounds over the whole run: on a busy
 //   machine the relative speed of two code paths drifts by up to 20 % over a second or so while other programs come and
 //   go, and an operation measured in one stretch would read whatever that second's state was.
 // - Output: first a line naming the machine, {"machine":{"cpu":brand,"logical_cores":n,"os":build}} (also printed to
 //   stderr as the header), then, once every round is done, one JSON line per operation to stdout (and to --out when given):
-//   {"op":name,"new_ns":n,"addon_ns":n,"ratio":r}, new_ns and addon_ns the median nanoseconds per unit of work of each
-//   side, ratio the median of the per-round ratios new/addon. tools/check_bench.py gates the lines (ratio at most 1.05,
+//   {"op":name,"new_ns":n,"addon_ns":n,"ratio":r,"calibrate":"time"|"count","window_ms":w,"zodiac_reps":n,"addon_reps":n},
+//   new_ns and addon_ns the median nanoseconds per unit of work of each side, ratio the median of the per-round ratios
+//   new/addon of nanoseconds per rep; stderr also gets the mode and each operation's reps. tools/check_bench.py gates the lines (ratio at most 1.05,
 //   and exactly the operations --list prints, the one list of them) and prints the machine above its table.
 //   Progress goes to stderr every 10 rounds.
-// - Usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--out PATH] [--detail] [--layout] [--diagnostic]
-//   [--list]. Defaults: 101 rounds (at least 15 are required, spec 8.4) of 1 ms per side: many short rounds pair the two
+// - Usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]...
+//   [--out PATH] [--detail] [--layout] [--diagnostic] [--list] (--target-ms is --window-ms's old name). Defaults: 101 rounds (at least 15 are required, spec 8.4) of 1 ms per side: many short rounds pair the two
 //   sides closely in time, and the whole run takes about 45 s on the release preset. --op (repeatable) measures only the
 //   named operations, --detail also prints each operation's median ratio per pair of engine and context to stderr, --list
 //   prints the names. --also NAME (repeatable) adds one diagnostic operation to a run of every gated one; --prewarm-heap holds
@@ -813,15 +818,17 @@ placements.reserve(static_cast<std::size_t>(rounds));
 const Job* job;
 Side zodiac;
 Side addon;
-int reps=1;
+// Each side's reps per run (equal in --calibrate count).
+int zodiac_reps=1;
+int addon_reps=1;
 std::vector<double> zodiac_times,addon_times,ratios;
 // The placements of each round's two runs, as zodiac*kEngines*kContexts+addon (for --detail).
 std::vector<int> placements;
 };
 
-void check(const Measurement& m,std::int64_t zodiac_sum,std::int64_t addon_sum)
+void check(const Measurement& m,std::int64_t zodiac_sum,std::int64_t addon_sum,int reps)
 {
-if(zodiac_sum!=addon_sum)fail(3,m.job->name+": Zodiac's checksum "+std::to_string(zodiac_sum)+" differs from the add-on's "+std::to_string(addon_sum)+" at reps "+std::to_string(m.reps));
+if(zodiac_sum!=addon_sum)fail(3,m.job->name+": Zodiac's checksum "+std::to_string(zodiac_sum)+" differs from the add-on's "+std::to_string(addon_sum)+" at reps "+std::to_string(reps));
 }
 
 // --zodiac-only and --reference-only (the placement experiment of Task 5b fix round 3): only that side runs, with the same
@@ -830,54 +837,96 @@ if(zodiac_sum!=addon_sum)fail(3,m.job->name+": Zodiac's checksum "+std::to_strin
 enum class OnlySide {both,zodiac,reference};
 OnlySide g_only=OnlySide::both;
 
-// Grows reps until one run of both sides takes at least twice the target (each run doubles as a warm-up); with one side
-// only, until that side's run does.
-void calibrate(Measurement& m,double target_ns)
+// How reps are chosen (Task 5b fix round 4):
+// - time (the default, and the gate's): each side gets its own reps, grown until one run of that side alone takes at least
+//   the window (--window-ms), so both sides' timed windows are equally long, however different their speeds. A side whose
+//   run is a hundred times shorter would otherwise be measured over a window its fixed costs and cache re-warm dominate.
+// - count: both sides run the same reps per round: --reps N, or else what time calibration gives the slower side (the
+//   smaller of the two), so the faster side's window is the shorter one and nothing runs longer than in time mode.
+// - --pin-reps FILE: each operation's reps are read from a results file of an earlier run (its zodiac_reps and addon_reps),
+//   so runs in different modes (alone and mixed) time exactly the same work.
+enum class Calibration {time,count};
+Calibration g_calibration=Calibration::time;
+int g_count_reps=0;
+// Set by main: --calibrate count with --reps and no --pin-reps.
+bool g_check_rounds=false;
+constexpr int max_reps=1<<24;
+
+// Grows reps until one run of side takes at least target_ns (each run doubles as a warm-up). reps stays in [1, max_reps],
+// so neither the time nor the int count can overflow.
+void calibrate_side(Side& side,int& reps,double target_ns)
 {
 for(;;){
-double zodiac_ns=0,addon_ns=0;
-if(g_only!=OnlySide::both){
-if(g_only==OnlySide::zodiac)m.zodiac.run(m.reps,zodiac_ns);
-else m.addon.run(m.reps,addon_ns);
-}else{
-const std::int64_t zodiac_sum=m.zodiac.run(m.reps,zodiac_ns);
-const std::int64_t addon_sum=m.addon.run(m.reps,addon_ns);
-check(m,zodiac_sum,addon_sum);
-}
-const double total=zodiac_ns+addon_ns;
-if(total>=2*target_ns||m.reps>=(1<<24))return;
-const double scale=total>0?2*target_ns/total*1.1:16;
-m.reps=static_cast<int>(std::min<double>(1<<24,std::max<double>(m.reps*2.0,m.reps*scale)));
+double ns=0;
+side.run(reps,ns);
+if(ns>=target_ns||reps>=max_reps)return;
+const double scale=ns>0?target_ns/ns*1.1:16;
+reps=static_cast<int>(std::min<double>(max_reps,std::max<double>(reps*2.0,reps*scale)));
 }
 }
 
-// One round of m: both sides back to back, the side that runs first alternating with the round.
+// Before any timing (both sides): one run of reps 1 on every engine of each side, the two sides' checksums compared engine by
+// engine (their histories are then the same), since with per-side reps the rounds' checksums no longer pair up.
+void verify(Measurement& m)
+{
+for(int engine=0;engine<kEngines;++engine){
+double ns=0;
+const std::int64_t zodiac_sum=m.zodiac.run(1,ns);
+const std::int64_t addon_sum=m.addon.run(1,ns);
+check(m,zodiac_sum,addon_sum,1);
+}
+}
+
+void calibrate(Measurement& m,double target_ns,const std::vector<std::pair<std::string,std::pair<int,int>>>& pinned)
+{
+for(const auto& [name,reps]:pinned){
+if(name!=m.job->name)continue;
+m.zodiac_reps=reps.first;
+m.addon_reps=reps.second;
+return;
+}
+if(g_calibration==Calibration::count&&g_count_reps>0){
+m.zodiac_reps=m.addon_reps=g_count_reps;
+return;
+}
+if(g_only!=OnlySide::reference)calibrate_side(m.zodiac,m.zodiac_reps,target_ns);
+if(g_only!=OnlySide::zodiac)calibrate_side(m.addon,m.addon_reps,target_ns);
+if(g_calibration==Calibration::count){
+const int reps=g_only==OnlySide::zodiac?m.zodiac_reps:g_only==OnlySide::reference?m.addon_reps:std::min(m.zodiac_reps,m.addon_reps);
+m.zodiac_reps=m.addon_reps=reps;
+}
+}
+
+// One round of m: both sides back to back, the side that runs first alternating with the round. The round's ratio compares
+// nanoseconds per rep, so it holds for unequal reps.
 void measure_round(Measurement& m,int round)
 {
 double zodiac_ns=0,addon_ns=0;
 if(g_only!=OnlySide::both){
 if(g_only==OnlySide::zodiac){
-m.zodiac.run(m.reps,zodiac_ns);
+m.zodiac.run(m.zodiac_reps,zodiac_ns);
 m.zodiac_times.push_back(zodiac_ns);
 }else{
-m.addon.run(m.reps,addon_ns);
+m.addon.run(m.addon_reps,addon_ns);
 m.addon_times.push_back(addon_ns);
 }
 return;
 }
 std::int64_t zodiac_sum,addon_sum;
 if(round%2==0){
-zodiac_sum=m.zodiac.run(m.reps,zodiac_ns);
-addon_sum=m.addon.run(m.reps,addon_ns);
+zodiac_sum=m.zodiac.run(m.zodiac_reps,zodiac_ns);
+addon_sum=m.addon.run(m.addon_reps,addon_ns);
 }
 else{
-addon_sum=m.addon.run(m.reps,addon_ns);
-zodiac_sum=m.zodiac.run(m.reps,zodiac_ns);
+addon_sum=m.addon.run(m.addon_reps,addon_ns);
+zodiac_sum=m.zodiac.run(m.zodiac_reps,zodiac_ns);
 }
-check(m,zodiac_sum,addon_sum);
+// Only fixed equal reps (--calibrate count --reps N) keep both sides' histories equal (no calibration ran between), and so
+// their checksums; otherwise verify() has compared them before any timing.
+if(g_check_rounds)check(m,zodiac_sum,addon_sum,m.zodiac_reps);
 m.zodiac_times.push_back(zodiac_ns);
 m.addon_times.push_back(addon_ns);
-m.ratios.push_back(zodiac_ns/addon_ns);
+m.ratios.push_back((zodiac_ns/m.zodiac_reps)/(addon_ns/m.addon_reps));
 m.placements.push_back(m.zodiac.last_placement()*kEngines*kContexts+m.addon.last_placement());
 }
 
@@ -910,31 +959,75 @@ const std::size_t at=static_cast<std::size_t>(q*static_cast<double>(values.size(
 return values[std::min(at,values.size()-1)];
 }
 
-std::string result_line(const Measurement& m)
+// The calibration fields every result line ends with: the mode, the window it aimed at (time) and each side's reps.
+std::string calibration_fields(const Measurement& m,double window_ms)
 {
-const double units=static_cast<double>(m.reps)*m.job->items;
+std::string fields=",\"calibrate\":\"";
+fields.append(g_calibration==Calibration::time?"time":"count").append("\",\"window_ms\":");
+append_number(fields,window_ms);
+fields.append(",\"zodiac_reps\":").append(std::to_string(m.zodiac_reps)).append(",\"addon_reps\":").append(std::to_string(m.addon_reps));
+return fields;
+}
+
+std::string result_line(const Measurement& m,double window_ms)
+{
+const double zodiac_units=static_cast<double>(m.zodiac_reps)*m.job->items;
+const double addon_units=static_cast<double>(m.addon_reps)*m.job->items;
 if(g_only!=OnlySide::both){
-const std::vector<double>& times=g_only==OnlySide::zodiac?m.zodiac_times:m.addon_times;
+const bool zodiac=g_only==OnlySide::zodiac;
+const std::vector<double>& times=zodiac?m.zodiac_times:m.addon_times;
+const double units=zodiac?zodiac_units:addon_units;
 std::string line="{\"op\":\"";
-line.append(m.job->name).append("\",\"side\":\"").append(g_only==OnlySide::zodiac?"zodiac":"reference").append("\",\"ns\":");
+line.append(m.job->name).append("\",\"side\":\"").append(zodiac?"zodiac":"reference").append("\",\"ns\":");
 append_number(line,median(times)/units);
 line.append(",\"p10\":");
 append_number(line,percentile(times,0.1)/units);
 line.append(",\"p90\":");
 append_number(line,percentile(times,0.9)/units);
-line.append("}\n");
+line.append(calibration_fields(m,window_ms)).append("}\n");
 return line;
 }
 std::string line="{\"op\":\"";
 line.append(m.job->name).append("\",\"new_ns\":");
-append_number(line,median(m.zodiac_times)/units);
+append_number(line,median(m.zodiac_times)/zodiac_units);
 line.append(",\"addon_ns\":");
-append_number(line,median(m.addon_times)/units);
+append_number(line,median(m.addon_times)/addon_units);
 line.append(",\"ratio\":");
 char digits[32];
 line.append(digits,std::to_chars(digits,digits+sizeof digits,median(m.ratios),std::chars_format::fixed,4).ptr);
-line.append("}\n");
+line.append(calibration_fields(m,window_ms)).append("}\n");
 return line;
+}
+
+// --pin-reps: each operation's zodiac_reps and addon_reps from a results file (the lines result_line writes).
+std::vector<std::pair<std::string,std::pair<int,int>>> read_pinned(const char* path)
+{
+std::vector<std::pair<std::string,std::pair<int,int>>> pinned;
+std::FILE* file=std::fopen(path,"rb");
+if(!file)fail(1,std::string("cannot read ")+path);
+std::string text;
+char buffer[4096];
+for(std::size_t got;(got=std::fread(buffer,1,sizeof buffer,file))>0;)text.append(buffer,got);
+std::fclose(file);
+const auto field=[](std::string_view line,std::string_view key,int& value){
+const std::size_t at=line.find(key);
+if(at==std::string_view::npos)return false;
+const char* first=line.data()+at+key.size();
+return std::from_chars(first,line.data()+line.size(),value).ec==std::errc{}&&value>=1&&value<=max_reps;
+};
+std::size_t start=0;
+while(start<text.size()){
+const std::size_t end=std::min(text.find('\n',start),text.size());
+const std::string_view line(text.data()+start,end-start);
+start=end+1;
+const std::size_t op=line.find("{\"op\":\"");
+if(op==std::string_view::npos)continue;
+const std::size_t name_end=line.find('"',op+7);
+int zodiac=0,addon=0;
+if(name_end==std::string_view::npos||!field(line,"\"zodiac_reps\":",zodiac)||!field(line,"\"addon_reps\":",addon))fail(1,std::string(path)+" has a result line without zodiac_reps and addon_reps");
+pinned.emplace_back(std::string(line.substr(op+7,name_end-op-7)),std::make_pair(zodiac,addon));
+}
+return pinned;
 }
 
 bool parse_int(std::string_view text,int& value)
@@ -1090,6 +1183,7 @@ int main(int argc,char** argv)
 {
 int rounds=101;
 int target_ms=1;
+const char* pin_path=nullptr;
 std::vector<std::string> only;
 const char* out_path=nullptr;
 bool list=false;
@@ -1114,9 +1208,19 @@ const bool has_value=i+1<argc;
 if(arg=="--rounds"&&has_value){
 if(!parse_int(argv[++i],rounds)||rounds<15)fail(1,"--rounds needs a whole number of at least 15 (spec 8.4)");
 }
-else if(arg=="--target-ms"&&has_value){
-if(!parse_int(argv[++i],target_ms)||target_ms<1)fail(1,"--target-ms needs a whole number of at least 1");
+else if((arg=="--window-ms"||arg=="--target-ms")&&has_value){
+if(!parse_int(argv[++i],target_ms)||target_ms<1)fail(1,"--window-ms needs a whole number of at least 1");
 }
+else if(arg=="--calibrate"&&has_value){
+const std::string_view mode=argv[++i];
+if(mode=="time")g_calibration=Calibration::time;
+else if(mode=="count")g_calibration=Calibration::count;
+else fail(1,"--calibrate takes time or count");
+}
+else if(arg=="--reps"&&has_value){
+if(!parse_int(argv[++i],g_count_reps)||g_count_reps<1||g_count_reps>max_reps)fail(1,"--reps needs a whole number from 1 to "+std::to_string(max_reps));
+}
+else if(arg=="--pin-reps"&&has_value)pin_path=argv[++i];
 else if(arg=="--op"&&has_value){
 const std::string name=argv[++i];
 if(std::none_of(jobs.begin(),jobs.end(),[&name](const Job& job){return job.name==name;}))fail(1,"unknown operation "+name+" (--list prints them)");
@@ -1137,8 +1241,11 @@ else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
 else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--list]");
 }
+if(g_count_reps>0&&g_calibration!=Calibration::count)fail(1,"--reps needs --calibrate count");
+const std::vector<std::pair<std::string,std::pair<int,int>>> pinned=pin_path?read_pinned(pin_path):std::vector<std::pair<std::string,std::pair<int,int>>>{};
+g_check_rounds=g_calibration==Calibration::count&&g_count_reps>0&&pinned.empty()&&g_only==OnlySide::both;
 if(list){
 for(const Job& job:jobs)std::printf("%s\n",job.name.c_str());
 return 0;
@@ -1171,7 +1278,12 @@ if(std::find(only.begin(),only.end(),job.name)==only.end())continue;
 measurements.emplace_back(job,rounds);
 }
 g_count_faults=diagnostic||faults;
-for(Measurement& m:measurements)calibrate(m,target_ns);
+if(g_only==OnlySide::both){
+for(Measurement& m:measurements)verify(m);
+}
+for(Measurement& m:measurements)calibrate(m,target_ns,pinned);
+std::fprintf(stderr,"bench_types: calibrate %s, window %d ms%s%s\n",g_calibration==Calibration::time?"time":"count",target_ms,g_count_reps>0?(", reps "+std::to_string(g_count_reps)).c_str():"",pinned.empty()?"":", reps pinned from the --pin-reps file");
+for(const Measurement& m:measurements)std::fprintf(stderr,"bench_types: reps %s zodiac %d addon %d\n",m.job->name.c_str(),m.zodiac_reps,m.addon_reps);
 for(Measurement& m:measurements){
 m.zodiac.faults=m.addon.faults=0;
 #if defined(ZODIAC_TEST_HOOKS)
@@ -1193,7 +1305,7 @@ if(g_count_faults){
 for(const Measurement& m:measurements){
 const double runs=static_cast<double>(std::max<std::size_t>(1,std::max(m.zodiac_times.size(),m.addon_times.size())));
 char line[256];
-std::snprintf(line,sizeof line,"bench_types: faults %s zodiac %llu addon %llu (per timed run %.2f and %.2f, %d reps each)",m.job->name.c_str(),static_cast<unsigned long long>(m.zodiac.faults),static_cast<unsigned long long>(m.addon.faults),static_cast<double>(m.zodiac.faults)/runs,static_cast<double>(m.addon.faults)/runs,m.reps);
+std::snprintf(line,sizeof line,"bench_types: faults %s zodiac %llu addon %llu (per timed run %.2f and %.2f, %d and %d reps)",m.job->name.c_str(),static_cast<unsigned long long>(m.zodiac.faults),static_cast<unsigned long long>(m.addon.faults),static_cast<double>(m.zodiac.faults)/runs,static_cast<double>(m.addon.faults)/runs,m.zodiac_reps,m.addon_reps);
 std::string text=line;
 #if defined(ZODIAC_TEST_HOOKS)
 // keys()'s steps: TSC cycles per array (per string for the per-string steps), over the Zodiac side's timed runs.
@@ -1227,7 +1339,7 @@ std::fwrite(line.data(),1,line.size(),stderr);
 }
 }
 for(const Measurement& m:measurements){
-const std::string line=result_line(m);
+const std::string line=result_line(m,target_ms);
 std::fwrite(line.data(),1,line.size(),stdout);
 if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::string("cannot write ")+out_path);
 }
