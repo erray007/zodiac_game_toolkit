@@ -1,0 +1,6 @@
+{
+  "comment": "Regression gate limits (tools/check_bench.py --baseline): head's Zodiac ns over main's, per operation, median of 3 paired processes on one runner. Owner decision 2026-11-24 (Task 5b fix round 5): default 1.04; an operation that same-source rebuilds (A/A') move further gets the next of 1.08, 1.12, 1.15 above its largest measured |A/A' deviation| plus 2 %. Provisional until the A/A' data is in.",
+  "default": 1.04,
+  "geomean": 1.01,
+  "ops": {}
+}

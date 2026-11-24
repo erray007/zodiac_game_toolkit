@@ -19,8 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_bench
 
 
-def line(op, ratio, new_ns=10.0, addon_ns=10.0):
-    return json.dumps({"op": op, "new_ns": new_ns, "addon_ns": addon_ns, "ratio": ratio})
+def line(op, ratio, new_ns=10.0, addon_ns=10.0, calibrate="time"):
+    record = {"op": op, "new_ns": new_ns, "addon_ns": addon_ns, "ratio": ratio}
+    if calibrate is not None:
+        record.update({"calibrate": calibrate, "window_ms": 1.0, "zodiac_reps": 100, "addon_reps": 100})
+    return json.dumps(record)
 
 
 MACHINE = json.dumps({"machine": {"cpu": "AMD EPYC 7763 64-Core Processor", "logical_cores": 4, "os": "Windows 10.0.26100.4652"}})
@@ -233,6 +236,64 @@ class CheckBenchTests(unittest.TestCase):
         code, _, err = self.run_files(heads, ["a", "b", "c"], mains[:2])
         self.assertEqual(code, 2)
         self.assertIn("they are paired in order", err)
+        # Each operation's limit is printed.
+        code, out, _ = self.run_files(heads, ["a", "b", "c"], mains)
+        self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.04")
+
+    def test_a_baseline_calibrated_otherwise_is_report_only(self):
+        slow = [line("a", 0.5, new_ns=13.0) + "\n"] * 3
+        # main's bench predates the calibrate field: report-only, loudly, and the slowdown does not fail the gate.
+        old = [line("a", 0.5, new_ns=10.0, calibrate=None) + "\n"] * 3
+        code, out, err = self.run_files(slow, ["a"], old)
+        self.assertEqual(code, 0, err)
+        self.assertIn("REGRESSION GATE REPORT-ONLY: main's bench records no calibration", out)
+        self.assertIn("REGRESSION GATE REPORT-ONLY", err)
+        self.assertIn("(report-only) slower than main", err)
+        # main measured in count mode, head in time mode: report-only too.
+        counted = [line("a", 0.5, new_ns=10.0, calibrate="count") + "\n"] * 3
+        code, out, _ = self.run_files(slow, ["a"], counted)
+        self.assertEqual(code, 0)
+        self.assertIn("main's bench calibrated ['count'], head time", out)
+        # The same mode on both sides gates.
+        same = [line("a", 0.5, new_ns=10.0) + "\n"] * 3
+        code, _, err = self.run_files(slow, ["a"], same)
+        self.assertEqual(code, 1)
+        self.assertNotIn("REPORT-ONLY", err)
+
+    def test_a_zero_baseline_names_the_op(self):
+        heads = [line("a", 0.5) + "\n" + line("b", 0.5) + "\n"] * 3
+        zero = [line("a", 0.5, new_ns=0.0) + "\n" + line("b", 0.5) + "\n"] * 3
+        code, _, err = self.run_files(heads, ["a", "b"], zero)
+        self.assertEqual(code, 2)
+        self.assertIn("gives a a time of 0 ns", err)
+        self.assertNotIn("internal error", err)
+
+    def test_per_op_limits_come_from_the_limits_file(self):
+        limits = Path(self._tmp.name) / "limits.json"
+        limits.write_text(json.dumps({"default": 1.04, "geomean": 1.10, "ops": {"a": {"limit": 1.12, "spread": 0.09, "runs": [1]}}}), encoding="utf-8")
+        heads = [line("a", 0.5, new_ns=11.0) + "\n" + line("b", 0.5, new_ns=10.5) + "\n"] * 3
+        mains = [line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5, new_ns=10.0) + "\n"] * 3
+        paths = []
+        for name, texts in (("h", heads), ("m", mains)):
+            for index, text in enumerate(texts):
+                path = Path(self._tmp.name) / f"{name}{index}.json"
+                path.write_text(text + (MACHINE + "\n" if name == "h" else ""), encoding="utf-8")
+                paths.append(str(path))
+        ops = Path(self._tmp.name) / "ops.txt"
+        ops.write_text("a\nb\n", encoding="utf-8")
+        err = io.StringIO()
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = check_bench.main(paths[:3] + ["--expected", str(ops), "--baseline"] + paths[3:] + ["--limits", str(limits)])
+        # a (1.10) is within its own 1.12; b (1.05) is above the default 1.04.
+        self.assertEqual(code, 1)
+        self.assertIn("b: head/main 1.050 (limit 1.04)", err.getvalue())
+        self.assertNotIn("a: head/main", err.getvalue())
+        bad = Path(self._tmp.name) / "bad.json"
+        bad.write_text(json.dumps({"default": 0.9, "geomean": 1.01, "ops": {}}), encoding="utf-8")
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = check_bench.main(paths[:3] + ["--expected", str(ops), "--baseline"] + paths[3:] + ["--limits", str(bad)])
+        self.assertEqual(code, 2)
 
     def test_a_missing_file_fails(self):
         out = io.StringIO()

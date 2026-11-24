@@ -113,7 +113,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: bench-main
-          key: bench-main-windows-${{ steps.main.outputs.sha }}
+          # Main's build takes this tree's toolchain (bootstrap.py, tools/toolchain.json) and dependency sources (patched by this tree's
+          # cmake/Dependencies.cmake, ZodiacApplyPatch.cmake and patches): a change to any of them rebuilds main's bench.
+          key: bench-main-windows-${{ steps.main.outputs.sha }}-${{ hashFiles('bootstrap.py', 'tools/toolchain.json', 'cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
       # Main's sources in a worktree, built like this tree (the dependency sources this job already fetched), only when no earlier job
       # cached it for this main commit.
       - name: Build main's bench
@@ -143,11 +145,12 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: bench-main
-          key: bench-main-windows-${{ steps.main.outputs.sha }}
+          key: bench-main-windows-${{ steps.main.outputs.sha }}-${{ hashFiles('bootstrap.py', 'tools/toolchain.json', 'cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
       - name: Benchmark against the sample add-ons and against main
         shell: bash
         env:
           SAME: ${{ steps.main.outputs.same }}
+          MAIN_SHA: ${{ steps.main.outputs.sha }}
         run: |
           bench=build/windows-release/tests/bench/bench_types.exe
           main=bench-main/bench_types.exe
@@ -168,12 +171,21 @@ jobs:
             run_main 1; run_head 1; run_head 2; run_main 2; run_main 3; run_head 3
             baseline=(--baseline main-1.json main-2.json main-3.json)
           else
-            echo "::warning::main's bench could not be built, so this run is not compared with main"
+            echo "::warning::REGRESSION GATE SKIPPED: main's bench could not be built (see the step Build main's bench), so this run is not compared with main"
+            echo "### Regression gate skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "main's bench ($MAIN_SHA) could not be built, so this run was not compared with main; only the add-on gate ran." >> "$GITHUB_STEP_SUMMARY"
             run_head 1; run_head 2; run_head 3
             baseline=()
           fi
           echo "The bench processes took $(( $(date +%s) - start )) s."
-          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt "${baseline[@]}"
+          status=0
+          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt "${baseline[@]}" | tee check-bench.txt || status=${PIPESTATUS[0]}
+          # A report-only comparison with main (main calibrated otherwise) is named in the job summary too.
+          if grep -q "REGRESSION GATE REPORT-ONLY" check-bench.txt; then
+            echo "### Regression gate report-only" >> "$GITHUB_STEP_SUMMARY"
+            grep "REGRESSION GATE REPORT-ONLY" check-bench.txt | head -1 >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
       - name: Upload the benchmark results on failure
         if: failure()
         uses: actions/upload-artifact@v4

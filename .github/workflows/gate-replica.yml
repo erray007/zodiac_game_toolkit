@@ -1,6 +1,7 @@
-# Gate replica (Task 5b fix round 4), report-only: the Windows gate's add-on part exactly as ci.yml runs it (3 bench processes with
-# --calibrate time, gated on the median ratio per operation by tools/check_bench.py) on 8 runners at once, to see each CPU model's results
-# without re-running the whole CI. Trigger: gh workflow run gate-replica.yml --ref <branch>
+# Gate replica (Task 5b fix rounds 4 and 5), report-only: the Windows gate as ci.yml runs it (3 bench processes with --calibrate time,
+# gated on the median ratio per operation, and the regression gate in alternating processes, tools/check_bench.py) on 8 runners at once, with
+# a second build of the same commit standing in for main (an A/A' run of the regression gate). Trigger:
+#   gh workflow run gate-replica.yml --ref <branch>
 name: gate-replica
 
 on:
@@ -46,13 +47,31 @@ jobs:
         run: |
           .tools/cmake/bin/cmake --preset windows-release
           .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      # A second build of the same commit in a worktree stands in for main: the regression gate then compares two builds of the same
+      # sources (A/A'), so any failure of it is a false one, and its per-op head/main values are A/A' samples for the limits file.
+      - name: Build the same commit again
+        shell: pwsh
+        run: |
+          git worktree add again-src HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git worktree failed" }
+          New-Item -ItemType Junction -Path again-src/.tools -Target (Resolve-Path .tools) | Out-Null
+          $deps = "$PWD/.deps/windows-release"
+          Push-Location again-src
+          ../.tools/cmake/bin/cmake --preset windows-release -B ../build/again "-DFETCHCONTENT_BASE_DIR=$PWD/../build/again/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          Pop-Location
+          .tools/cmake/bin/cmake --build build/again --target bench_types
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
       - name: Gate replica
         run: |
           bench=build/windows-release/tests/bench/bench_types.exe
+          again=build/again/tests/bench/bench_types.exe
           "$bench" --list > bench-ops.txt
-          for n in 1 2 3; do "$bench" --detail --faults --layout --calibrate time --out "bench-$n.json" 2> "bench-$n-stderr.txt"; done
+          run() { "$1" --detail --faults --layout --calibrate time --out "$2.json" 2> "$2-stderr.txt"; }
+          # The gate's order: main, head, head, main, main, head.
+          run "$again" main-1; run "$bench" bench-1; run "$bench" bench-2; run "$again" main-2; run "$again" main-3; run "$bench" bench-3
           status=0
-          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt || status=$?
+          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt --baseline main-1.json main-2.json main-3.json || status=$?
           echo "check_bench exit code $status (report-only)"
       - name: Upload the runs
         if: always()
@@ -61,5 +80,6 @@ jobs:
           name: gate-replica-${{ matrix.job }}
           path: |
             bench*.json
+            main-*.json
             bench*-stderr.txt
           if-no-files-found: ignore

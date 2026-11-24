@@ -16,13 +16,13 @@ The add-on gate: per operation, the median over the files of their ratios is at 
 runs 3) are needed because one process's code and heap placement moves a ratio by several percent (Task 5b fix rounds 3 and 4).
 
 The regression gate (--baseline, one file per process of main's bench on the same machine, paired with the results files in order, as the
-gate runs them in alternation): per operation both have, the median over the pairs of head's new_ns over main's is at most
-REGRESSION_LIMIT, and the geometric mean of those medians is at most REGRESSION_GEOMEAN. Operations main does not have are listed, not
-compared. The limits come from same-source rebuilds on one machine (Task 5b fix rounds 2 to 4): A/A' runs move single operations by up to
-9 % (45339050531: 0.986 to 1.060; 45353776618: string_split 0.909), and no-op relinks move Zodiac's own string_byte_ascii by 7 to 15 % across
-builds on an EPYC 7763 (bench-reference 45353765232), while the geometric mean of all operations stays within 1 % (0.9974, 0.9975, 1.0065).
-So a per-operation limit tighter than 1.10 would fail rebuilds that change nothing (1.07 failed string_byte_ascii at 1.088 and 1.097 against
-main in CI 45353693645 and 45353764588), and the 1.01 geometric mean catches a slowdown spread over many operations.
+gate runs them in alternation): per operation both have, the median over the pairs of head's new_ns over main's is at most that operation's
+limit, and the geometric mean of those medians is at most the geometric-mean limit, both from --limits (tools/bench_regression_limits.json:
+a default, a few placement-sensitive operations with their own limit and the A/A' data behind it, and the geometric mean; the file says how
+they were derived). Each operation's limit is printed. Operations main does not have are listed, not compared; a baseline time of 0 fails
+with the operation named (exit 2). The comparison is report-only, with a REGRESSION GATE REPORT-ONLY warning on stdout and stderr, when
+main's results were calibrated otherwise than head's (no "calibrate" field: a bench older than per-side calibration), since head/main then
+measures the calibration, not the code; it gates by itself once main's bench records the same mode.
 
 Exit codes: 0 both gates pass; 1 some gated ratio is above LIMIT or the regression gate fails (each such operation is named on stderr); 2 a
 file is missing or unreadable, a line is not such an object (malformed JSON, a missing or non-numeric field, a negative or non-finite
@@ -40,9 +40,6 @@ import traceback
 from pathlib import Path
 
 LIMIT = 1.05
-# Zodiac against main on the same machine (paired processes): see the module docstring for how these were chosen.
-REGRESSION_LIMIT = 1.10
-REGRESSION_GEOMEAN = 1.01
 FIELDS = ("new_ns", "addon_ns", "ratio")
 
 
@@ -193,6 +190,45 @@ def baseline_ns(text: str) -> dict:
     return ns
 
 
+def calibration_mode(text: str):
+    """The "calibrate" field of a results text's operation lines ("time", "count"), None when they have none (a bench older than
+    Task 5b fix round 4, which calibrated both sides together), or "mixed" when its lines disagree."""
+    modes = set()
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw, parse_constant=_reject_constant)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and "op" in record:
+            modes.add(record.get("calibrate"))
+    if modes == {None} or not modes:
+        return None
+    return modes.pop() if len(modes) == 1 else "mixed"
+
+
+DEFAULT_LIMITS = Path(__file__).resolve().parent / "bench_regression_limits.json"
+
+
+def read_limits(path: Path) -> dict:
+    """{"default": d, "geomean": g, "ops": {op: limit}} from the limits file; raises BenchFormatError."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise BenchFormatError(f"cannot read the regression limits {path}: {error}") from None
+    def limit(value, where):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 1:
+            raise BenchFormatError(f"{path}: {where} must be a number of at least 1")
+        return float(value)
+    if not isinstance(data, dict) or not isinstance(data.get("ops", {}), dict):
+        raise BenchFormatError(f"{path}: not an object with \"default\", \"geomean\" and \"ops\"")
+    ops = {}
+    for op, entry in data.get("ops", {}).items():
+        ops[op] = limit(entry.get("limit") if isinstance(entry, dict) else None, f"ops.{op}.limit")
+    return {"default": limit(data.get("default"), "default"), "geomean": limit(data.get("geomean"), "geomean"), "ops": ops}
+
+
 def median(values: list) -> float:
     ordered = sorted(values)
     middle = len(ordered) // 2
@@ -218,23 +254,27 @@ def gate_table(runs: list) -> tuple:
     return "\n".join(lines), gated
 
 
-def regression_table(runs: list, baselines: list) -> tuple:
-    """Zodiac against the baseline (main): per op the median over the run pairs of head's new_ns over main's, and their geometric
-    mean. Returns (text, [(op, change)], geomean, ops that main does not have)."""
+def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
+    """Zodiac against the baseline (main): per op the median over the run pairs of head's new_ns over main's, against that op's
+    limit, and their geometric mean. Returns (text, [(op, change, limit)], geomean, ops that main does not have). Raises
+    BenchFormatError naming an op whose baseline time is zero (no ratio can be taken)."""
     heads = [{op: new_ns for op, new_ns, _, _ in results} for results in runs]
     ops = [op for op, *_ in runs[0]]
     compared = [op for op in ops if all(op in base for base in baselines)]
     new = [op for op in ops if op not in compared]
     width = max(len("op"), max(len(op) for op in ops))
-    lines = [f"{'op':<{width}}  {'main ns':>12}  {'head ns':>12}  {'head/main':>9}"]
+    lines = [f"{'op':<{width}}  {'main ns':>12}  {'head ns':>12}  {'head/main':>9}  {'limit':>6}"]
     changes = []
     for op in compared:
-        change = median([head[op] / base[op] for head, base in zip(heads, baselines) if base[op] > 0])
-        changes.append((op, change))
-        mark = "  FAIL" if change > REGRESSION_LIMIT else ""
-        lines.append(f"{op:<{width}}  {median([b[op] for b in baselines]):>12.2f}  {median([h[op] for h in heads]):>12.2f}  {change:>9.3f}{mark}")
-    geomean = math.exp(sum(math.log(c) for _, c in changes) / len(changes)) if changes else 1.0
-    lines.append(f"geometric mean head/main: {geomean:.4f} over {len(changes)} operations ({len(runs)} pairs)")
+        if any(base[op] <= 0 for base in baselines):
+            raise BenchFormatError(f"the baseline gives {op} a time of 0 ns, so head cannot be compared with it")
+        change = median([head[op] / base[op] for head, base in zip(heads, baselines)])
+        limit = limits["ops"].get(op, limits["default"])
+        changes.append((op, change, limit))
+        mark = "  FAIL" if change > limit else ""
+        lines.append(f"{op:<{width}}  {median([b[op] for b in baselines]):>12.2f}  {median([h[op] for h in heads]):>12.2f}  {change:>9.3f}  {limit:>6.2f}{mark}")
+    geomean = math.exp(sum(math.log(c) for _, c, _ in changes) / len(changes)) if changes else 1.0
+    lines.append(f"geometric mean head/main: {geomean:.4f} over {len(changes)} operations ({len(runs)} pairs), limit {limits['geomean']}")
     if new:
         lines.append("not in main, not compared: " + ", ".join(new))
     return "\n".join(lines), changes, geomean, new
@@ -245,6 +285,7 @@ def _check(argv) -> int:
     parser.add_argument("results", type=Path, nargs="+", help="bench_types' JSON lines, one file per process (the gate runs 3)")
     parser.add_argument("--expected", type=Path, required=True, help="the operation names, one per line (bench_types --list)")
     parser.add_argument("--baseline", type=Path, nargs="+", help="main's bench results, one file per process, paired with the results in order")
+    parser.add_argument("--limits", type=Path, default=DEFAULT_LIMITS, help="the regression gate's per-operation limits (tools/bench_regression_limits.json)")
     args = parser.parse_args(argv)
     paths = list(args.results) + [args.expected] + list(args.baseline or [])
     texts = {}
@@ -296,18 +337,34 @@ def _check(argv) -> int:
     else:
         print(f"check_bench: all {len(gated)} operations within the {LIMIT} limit.", flush=True)
     if baselines:
-        text, changes, geomean, _ = regression_table(runs, baselines)
+        try:
+            limits = read_limits(args.limits)
+            text, changes, geomean, _ = regression_table(runs, baselines, limits)
+        except BenchFormatError as error:
+            print(f"check_bench: {error}", file=sys.stderr)
+            return 2
+        # Both sides must be calibrated alike, or head/main measures the calibration: a bench before Task 5b fix round 4 timed both sides
+        # over one shared window, which reads a fast operation paired with a slow add-on several times slower than per-side windows.
+        head_mode = calibration_mode(texts[args.results[0]])
+        base_modes = {calibration_mode(texts[path]) for path in args.baseline}
+        report_only = base_modes != {head_mode} or head_mode is None
         print("", flush=True)
-        print(f"Against main (Zodiac's ns, head over main; limits {REGRESSION_LIMIT} per op, {REGRESSION_GEOMEAN} geometric mean):", flush=True)
+        print(f"Against main (Zodiac's ns, head over main; per-op limits from {args.limits.name}, default {limits['default']}, geometric mean {limits['geomean']}):", flush=True)
+        if report_only:
+            reason = "main's bench records no calibration (it predates per-side calibration)" if base_modes == {None} else f"main's bench calibrated {sorted(str(m) for m in base_modes)}, head {head_mode}"
+            warning = f"REGRESSION GATE REPORT-ONLY: {reason}; the two sides are not measured alike, so head/main is not gated"
+            print(f"check_bench: {warning}", flush=True)
+            print(f"check_bench: {warning}", file=sys.stderr)
         print(text, flush=True)
-        regressed = [(op, change) for op, change in changes if change > REGRESSION_LIMIT]
-        if regressed or geomean > REGRESSION_GEOMEAN:
-            failed = True
-            print(f"check_bench: slower than main: {len(regressed)} operation(s) above {REGRESSION_LIMIT}, geometric mean {geomean:.4f} (limit {REGRESSION_GEOMEAN}):", file=sys.stderr)
-            for op, change in regressed:
-                print(f"  {op}: head/main {change:.3f}", file=sys.stderr)
+        regressed = [(op, change, limit) for op, change, limit in changes if change > limit]
+        if regressed or geomean > limits["geomean"]:
+            if not report_only:
+                failed = True
+            print(f"check_bench: {'(report-only) ' if report_only else ''}slower than main: {len(regressed)} operation(s) above their limits, geometric mean {geomean:.4f} (limit {limits['geomean']}):", file=sys.stderr)
+            for op, change, limit in regressed:
+                print(f"  {op}: head/main {change:.3f} (limit {limit:.2f})", file=sys.stderr)
         else:
-            print(f"check_bench: no operation slower than main beyond {REGRESSION_LIMIT}, geometric mean {geomean:.4f}.", flush=True)
+            print(f"check_bench: no operation slower than main beyond its limit, geometric mean {geomean:.4f}.", flush=True)
     return 1 if failed else 0
 
 
