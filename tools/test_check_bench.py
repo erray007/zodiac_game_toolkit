@@ -220,10 +220,10 @@ class CheckBenchTests(unittest.TestCase):
         self.assertIn("not in main, not compared: c", out)
         self.assertIn("geometric mean head/main: 1.0050", out)
         # Past the per-operation limit.
-        slow = [line("a", 0.5, new_ns=10.8) + "\n" + line("b", 0.5, new_ns=10.0) + "\n" + line("c", 0.5, new_ns=5.0) + "\n"] * 3
+        slow = [line("a", 0.5, new_ns=11.2) + "\n" + line("b", 0.5, new_ns=9.0) + "\n" + line("c", 0.5, new_ns=5.0) + "\n"] * 3
         code, _, err = self.run_files(slow, ["a", "b", "c"], mains)
         self.assertEqual(code, 1)
-        self.assertIn("a: head/main 1.080", err)
+        self.assertIn("a: head/main 1.120", err)
         # Every operation a little slower: the geometric mean fails although no single one does.
         spread = [line("a", 0.5, new_ns=10.2) + "\n" + line("b", 0.5, new_ns=10.2) + "\n" + line("c", 0.5, new_ns=5.0) + "\n"] * 3
         code, _, err = self.run_files(spread, ["a", "b", "c"], mains)
