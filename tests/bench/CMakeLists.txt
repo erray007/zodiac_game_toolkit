@@ -18,6 +18,17 @@ endif()
 if(DEFINED ZODIAC_BENCH_CORE_PAD AND NOT ZODIAC_BENCH_CORE_PAD STREQUAL "0")
 set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_CORE_PLACEMENT_PAD=${ZODIAC_BENCH_CORE_PAD})
 endif()
+# The calling-convention study (placement-study.yml's variants, Task 5c): -DZODIAC_BENCH_STRING_CALL=objlast or objfirst registers the
+# release core's string byte_at and length as free functions with that convention instead of THISCALL members (string_binding.cpp). It
+# changes the core of this tree only; no preset sets it.
+set(ZODIAC_BENCH_STRING_CALL "" CACHE STRING "Calling-convention study: empty (THISCALL members), objlast or objfirst")
+if(ZODIAC_BENCH_STRING_CALL STREQUAL "objlast")
+set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_STRING_CALL_STUDY=1)
+elseif(ZODIAC_BENCH_STRING_CALL STREQUAL "objfirst")
+set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_STRING_CALL_STUDY=2)
+elseif(NOT ZODIAC_BENCH_STRING_CALL STREQUAL "")
+message(FATAL_ERROR "ZODIAC_BENCH_STRING_CALL is \"${ZODIAC_BENCH_STRING_CALL}\"; it takes objlast, objfirst or nothing")
+endif()
 # The placement study (placement-study.yml, Task 5c): -DZODIAC_BENCH_FIXED_BASE=ON links bench_types without ASLR, so every copy of the
 # file loads at its preferred base instead of a base Windows draws per image file. Windows only; never set by a preset.
 option(ZODIAC_BENCH_FIXED_BASE "Link bench_types without ASLR (the placement study only)" OFF)

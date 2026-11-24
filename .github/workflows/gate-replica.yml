@@ -1,6 +1,7 @@
-# Gate replica (Task 5b fix rounds 4 and 5), report-only: the Windows gate as ci.yml runs it (3 bench processes with --calibrate time,
-# gated on the median ratio per operation, and the regression gate in alternating processes, tools/check_bench.py) on 8 runners at once, with
-# a second build of the same commit standing in for main (an A/A' run of the regression gate). Trigger:
+# Gate replica (Task 5b fix rounds 4 and 5, Task 5c), report-only: the Windows gate as ci.yml runs it (3 bench processes with --calibrate
+# time, each from its own copy of the build, gated on the median ratio per operation, and the regression gate on each side's best process
+# in alternating processes, tools/check_bench.py) on 8 runners at once, with a second build of the same commit standing in for main (an
+# A/A' run of the regression gate, whose head/main values are the samples of tools/bench_regression_limits.json). Trigger:
 #   gh workflow run gate-replica.yml --ref <branch>
 name: gate-replica
 
@@ -67,9 +68,12 @@ jobs:
           bench=build/windows-release/tests/bench/bench_types.exe
           again=build/again/tests/bench/bench_types.exe
           "$bench" --list > bench-ops.txt
-          run() { "$1" --detail --faults --layout --calibrate time --out "$2.json" 2> "$2-stderr.txt"; }
+          # As the gate: each process runs from its own copy of its build (Windows draws an image base per file, Task 5c).
+          mkdir -p copies
+          for i in 1 2 3; do cp "$bench" "copies/bench-$i.exe"; cp "$again" "copies/main-$i.exe"; done
+          run() { "copies/$1.exe" --detail --faults --layout --calibrate time --out "$1.json" 2> "$1-stderr.txt"; grep -m1 "image base" "$1-stderr.txt" || true; }
           # The gate's order: main, head, head, main, main, head.
-          run "$again" main-1; run "$bench" bench-1; run "$bench" bench-2; run "$again" main-2; run "$again" main-3; run "$bench" bench-3
+          run main-1; run bench-1; run bench-2; run main-2; run main-3; run bench-3
           status=0
           python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt --baseline main-1.json main-2.json main-3.json || status=$?
           echo "check_bench exit code $status (report-only)"

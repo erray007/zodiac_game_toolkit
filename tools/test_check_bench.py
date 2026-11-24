@@ -7,12 +7,14 @@ error in the check is also 2, so exit code 1 always means "too slow"."""
 
 import io
 import json
+import os
 import re
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -236,9 +238,72 @@ class CheckBenchTests(unittest.TestCase):
         code, _, err = self.run_files(heads, ["a", "b", "c"], mains[:2])
         self.assertEqual(code, 2)
         self.assertIn("they are paired in order", err)
-        # Each operation's limit is printed.
+        # Each operation's best times, its head/main, the pair median (information) and its limit are printed.
         code, out, _ = self.run_files(heads, ["a", "b", "c"], mains)
-        self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.04")
+        self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.010\s+1\.04")
+        self.assertIn("process speed factors (the add-on side's median over operations): head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
+
+    def test_the_regression_gate_takes_each_side_s_best_process(self):
+        mains = [line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5, new_ns=10.0) + "\n"] * 3
+        # Two of head's three processes in a slow mode on a: the pair median (1.3) would fail, the best (1.0) does not.
+        heads = [line("a", 0.5, new_ns=13.0) + "\n" + line("b", 0.5) + "\n", line("a", 0.5, new_ns=13.0) + "\n" + line("b", 0.5) + "\n", line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5) + "\n"]
+        code, out, err = self.run_files(heads, ["a", "b"], mains)
+        self.assertEqual(code, 0, err)
+        self.assertRegex(out, r"a\s+10\.00\s+10\.00\s+1\.000\s+1\.300\s+1\.04")
+        # A real slowdown is slow in every process and fails.
+        slow = [line("a", 0.5, new_ns=11.0) + "\n" + line("b", 0.5) + "\n"] * 3
+        code, _, err = self.run_files(slow, ["a", "b"], mains)
+        self.assertEqual(code, 1)
+        self.assertIn("a: head/main 1.100", err)
+
+    def test_a_process_the_machine_ran_faster_is_corrected_by_the_add_on_side(self):
+        ops = ["a", "b", "c", "d", "e"]
+        def process(scale, a_ns=10.0):
+            return "".join(line(op, 0.5, new_ns=(a_ns if op == "a" else 10.0) * scale, addon_ns=20.0 * scale) + "\n" for op in ops)
+        heads = [process(1.0)] * 3
+        # main's last process ran everything 10 % faster on both sides (the machine, not the code): uncorrected, its best would make
+        # head read 1.11 slower on every operation.
+        mains = [process(1.0), process(1.0), process(0.9)]
+        code, out, err = self.run_files(heads, ops, mains)
+        self.assertEqual(code, 0, err)
+        self.assertIn("main 1.000 1.000 0.900", out)
+        self.assertIn("geometric mean head/main: 1.0000", out)
+        # One operation's own add-on slow mode does not move the factor (a median over operations).
+        odd = "".join(line(op, 0.5, new_ns=10.0, addon_ns=60.0 if op == "b" else 20.0) + "\n" for op in ops)
+        code, out, err = self.run_files([odd, process(1.0), process(1.0)], ops, [process(1.0)] * 3)
+        self.assertEqual(code, 0, err)
+        self.assertIn("head 1.000 1.000 1.000", out)
+
+    def test_a_zero_head_time_names_the_op(self):
+        mains = [line("a", 0.5) + "\n" + line("b", 0.5) + "\n"] * 3
+        heads = [line("a", 0.5) + "\n" + line("b", 0.5, new_ns=0.0) + "\n"] * 3
+        code, _, err = self.run_files(heads, ["a", "b"], mains)
+        self.assertEqual(code, 2)
+        self.assertIn("head gives b a time of 0 ns", err)
+        self.assertNotIn("internal error", err)
+
+    def test_the_results_files_must_agree_on_the_calibration_mode(self):
+        timed = line("a", 1.0) + "\n"
+        counted = line("a", 1.0, calibrate="count") + "\n"
+        code, _, err = self.run_files([timed, counted, timed], ["a"])
+        self.assertEqual(code, 2)
+        self.assertIn("disagree on the calibration mode", err)
+        mixed = line("a", 1.0) + "\n" + line("b", 1.0, calibrate="count") + "\n"
+        code, _, err = self.run_files([mixed], ["a", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("mixed", err)
+
+    def test_a_report_only_comparison_is_annotated_on_github(self):
+        slow = [line("a", 0.5, new_ns=13.0) + "\n"] * 3
+        old = [line("a", 0.5, new_ns=10.0, calibrate=None) + "\n"] * 3
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, out, _ = self.run_files(slow, ["a"], old)
+        self.assertEqual(code, 0)
+        self.assertIn("::warning title=Regression gate report-only::REGRESSION GATE REPORT-ONLY: main's bench records no calibration", out)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GITHUB_ACTIONS", None)
+            code, out, _ = self.run_files(slow, ["a"], old)
+        self.assertNotIn("::warning", out)
 
     def test_a_baseline_calibrated_otherwise_is_report_only(self):
         slow = [line("a", 0.5, new_ns=13.0) + "\n"] * 3

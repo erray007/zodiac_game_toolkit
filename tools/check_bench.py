@@ -15,26 +15,37 @@ operation list), and every results file must cover exactly those operations, in 
 The add-on gate: per operation, the median over the files of their ratios is at most LIMIT (1.05). Several processes (the Windows gate
 runs 3) are needed because one process's code and heap placement moves a ratio by several percent (Task 5b fix rounds 3 and 4).
 
-The regression gate (--baseline, one file per process of main's bench on the same machine, paired with the results files in order, as the
-gate runs them in alternation): per operation both have, the median over the pairs of head's new_ns over main's is at most that operation's
-limit, and the geometric mean of those medians is at most the geometric-mean limit, both from --limits (tools/bench_regression_limits.json:
-a default, a few placement-sensitive operations with their own limit and the A/A' data behind it, and the geometric mean; the file says how
-they were derived). Each operation's limit is printed. Operations main does not have are listed, not compared; a baseline time of 0 fails
-with the operation named (exit 2). The comparison is report-only, with a REGRESSION GATE REPORT-ONLY warning on stdout and stderr, when
-main's results were calibrated otherwise than head's (no "calibrate" field: a bench older than per-side calibration), since head/main then
-measures the calibration, not the code; it gates by itself once main's bench records the same mode.
+The regression gate (--baseline, one file per process of main's bench on the same machine, as many as results files; the gate runs them
+in alternation): per operation both have, head's best over main's best is at most that operation's limit, and the geometric mean of those
+ratios is at most the geometric-mean limit, both from --limits (tools/bench_regression_limits.json; the file says how they were derived).
+A side's best is the minimum over its processes of the process's new_ns divided by the process's machine-speed factor:
+- Best, not median (Task 5c): the slow modes seen (the Windows heap's per-process slow allocation path, Task 5b) only ever slow a process
+  down, so the fastest process is the one that measured the code; a median of 3 is still slow when 2 of them are.
+- The speed factor is the median over the compared operations of that process's addon_ns over the operation's median addon_ns across all
+  processes of both sides. The add-on side is the same third-party code in both benches, so the factor follows the machine (a runner that
+  gets faster or slower for a whole process, as in one gate replica where one process ran every operation 10 % faster on both sides) and,
+  as a median over operations, not one operation's slow mode or placement. Without it a minimum would read such a fast process as a
+  speed-up of everything on its side, or the reverse as a regression.
+The factors are printed, and so is each operation's limit and the median over the pairs of head's raw new_ns over main's, for information.
+Operations main does not have are listed, not compared; a time of 0 on either side fails with the operation named (exit 2). The comparison
+is report-only, with a REGRESSION GATE REPORT-ONLY warning on stdout and stderr (and, under GitHub Actions, a ::warning:: annotation on
+stdout), when main's results were calibrated otherwise than
+head's (no "calibrate" field: a bench older than per-side calibration), since head/main then measures the calibration, not the code; it
+gates by itself once main's bench records the same mode. Every results file (head's processes) must record the same calibration mode.
 
 Exit codes: 0 both gates pass; 1 some gated ratio is above LIMIT or the regression gate fails (each such operation is named on stderr); 2 a
 file is missing or unreadable, a line is not such an object (malformed JSON, a missing or non-numeric field, a negative or non-finite
 number, an empty op name), an operation appears twice, a file holds no results, the machine line is missing, repeated, malformed or differs
-between files, the expected list is empty, an expected operation is missing or an unknown one is present (each named on stderr), the
-baseline files do not pair with the results files, the arguments are wrong, or the check itself fails unexpectedly. Only 1 means "too
+between files, the results files record different calibration modes, the expected list is empty, an expected operation is missing or an
+unknown one is present (each named on stderr), the baseline files are not as many as the results files, an operation has a time of 0 on
+either side of the regression gate, the arguments are wrong, or the check itself fails unexpectedly. Only 1 means "too
 slow": the report-only Linux job tolerates exactly that code.
 """
 
 import argparse
 import json
 import math
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -174,7 +185,7 @@ def calibration(text: str) -> str:
 
 
 def baseline_ns(text: str) -> dict:
-    """{op: new_ns} of a baseline run (main's bench, which may predate the machine line); raises BenchFormatError."""
+    """{op: (new_ns, addon_ns)} of a baseline run (main's bench, which may predate the machine line); raises BenchFormatError."""
     ns = {}
     for number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
@@ -184,7 +195,7 @@ def baseline_ns(text: str) -> dict:
         except ValueError as error:
             raise BenchFormatError(f"line {number}: malformed JSON ({error})") from None
         if isinstance(record, dict) and isinstance(record.get("op"), str):
-            ns[record["op"]] = _number(record, "new_ns", number)
+            ns[record["op"]] = (_number(record, "new_ns", number), _number(record, "addon_ns", number))
     if not ns:
         raise BenchFormatError("no results")
     return ns
@@ -254,27 +265,48 @@ def gate_table(runs: list) -> tuple:
     return "\n".join(lines), gated
 
 
+def speed_factors(addon: list, ops: list) -> list:
+    """Each process's machine-speed factor: the median over ops of its addon_ns over that op's median addon_ns across all the processes
+    (addon is one {op: addon_ns} per process). Ops whose add-on time is 0 in every process are left out; with none left, every factor is
+    1."""
+    usable = [op for op in ops if median([process[op] for process in addon]) > 0]
+    if not usable:
+        return [1.0] * len(addon)
+    typical = {op: median([process[op] for process in addon]) for op in usable}
+    return [median([process[op] / typical[op] for op in usable]) for process in addon]
+
+
 def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
-    """Zodiac against the baseline (main): per op the median over the run pairs of head's new_ns over main's, against that op's
-    limit, and their geometric mean. Returns (text, [(op, change, limit)], geomean, ops that main does not have). Raises
-    BenchFormatError naming an op whose baseline time is zero (no ratio can be taken)."""
-    heads = [{op: new_ns for op, new_ns, _, _ in results} for results in runs]
+    """Zodiac against the baseline (main): per op head's best over main's best (each the minimum over that side's processes of new_ns
+    over the process's speed factor, see the module text), against that op's limit, and their geometric mean. Returns (text,
+    [(op, change, limit)], geomean, ops that main does not have). Raises BenchFormatError naming an op that has a time of 0 ns on either
+    side (no ratio can be taken)."""
+    heads = [{op: (new_ns, addon_ns) for op, new_ns, addon_ns, _ in results} for results in runs]
     ops = [op for op, *_ in runs[0]]
     compared = [op for op in ops if all(op in base for base in baselines)]
     new = [op for op in ops if op not in compared]
+    for op in compared:
+        if any(base[op][0] <= 0 for base in baselines):
+            raise BenchFormatError(f"the baseline gives {op} a time of 0 ns, so head cannot be compared with it")
+        if any(head[op][0] <= 0 for head in heads):
+            raise BenchFormatError(f"head gives {op} a time of 0 ns, so it cannot be compared with main")
+    factors = speed_factors([{op: side[op][1] for op in compared} for side in heads + baselines], compared)
+    head_factors, main_factors = factors[:len(heads)], factors[len(heads):]
     width = max(len("op"), max(len(op) for op in ops))
-    lines = [f"{'op':<{width}}  {'main ns':>12}  {'head ns':>12}  {'head/main':>9}  {'limit':>6}"]
+    lines = [f"process speed factors (the add-on side's median over operations): head {' '.join(f'{f:.3f}' for f in head_factors)}, main {' '.join(f'{f:.3f}' for f in main_factors)}"]
+    lines.append(f"{'op':<{width}}  {'main best':>12}  {'head best':>12}  {'head/main':>9}  {'pair med':>8}  {'limit':>6}")
     changes = []
     for op in compared:
-        if any(base[op] <= 0 for base in baselines):
-            raise BenchFormatError(f"the baseline gives {op} a time of 0 ns, so head cannot be compared with it")
-        change = median([head[op] / base[op] for head, base in zip(heads, baselines)])
+        head_best = min(head[op][0] / factor for head, factor in zip(heads, head_factors))
+        main_best = min(base[op][0] / factor for base, factor in zip(baselines, main_factors))
+        change = head_best / main_best
+        paired = median([head[op][0] / base[op][0] for head, base in zip(heads, baselines)])
         limit = limits["ops"].get(op, limits["default"])
         changes.append((op, change, limit))
         mark = "  FAIL" if change > limit else ""
-        lines.append(f"{op:<{width}}  {median([b[op] for b in baselines]):>12.2f}  {median([h[op] for h in heads]):>12.2f}  {change:>9.3f}  {limit:>6.2f}{mark}")
+        lines.append(f"{op:<{width}}  {main_best:>12.2f}  {head_best:>12.2f}  {change:>9.3f}  {paired:>8.3f}  {limit:>6.2f}{mark}")
     geomean = math.exp(sum(math.log(c) for _, c, _ in changes) / len(changes)) if changes else 1.0
-    lines.append(f"geometric mean head/main: {geomean:.4f} over {len(changes)} operations ({len(runs)} pairs), limit {limits['geomean']}")
+    lines.append(f"geometric mean head/main: {geomean:.4f} over {len(changes)} operations (best of {len(runs)} and {len(baselines)} processes), limit {limits['geomean']}")
     if new:
         lines.append("not in main, not compared: " + ", ".join(new))
     return "\n".join(lines), changes, geomean, new
@@ -312,6 +344,11 @@ def _check(argv) -> int:
             return 2
         machine = this_machine
         runs.append(results)
+    # Every head process must be calibrated alike, or the median and best over them mix two measurements.
+    head_modes = {path: calibration_mode(texts[path]) for path in args.results}
+    if len(set(head_modes.values())) > 1 or "mixed" in head_modes.values():
+        print("check_bench: the results files disagree on the calibration mode: " + ", ".join(f"{path} {mode}" for path, mode in head_modes.items()), file=sys.stderr)
+        return 2
     baselines = []
     if args.baseline:
         if len(args.baseline) != len(args.results):
@@ -349,12 +386,15 @@ def _check(argv) -> int:
         base_modes = {calibration_mode(texts[path]) for path in args.baseline}
         report_only = base_modes != {head_mode} or head_mode is None
         print("", flush=True)
-        print(f"Against main (Zodiac's ns, head over main; per-op limits from {args.limits.name}, default {limits['default']}, geometric mean {limits['geomean']}):", flush=True)
+        print(f"Against main (Zodiac's ns, head's best over main's best; per-op limits from {args.limits.name}, default {limits['default']}, geometric mean {limits['geomean']}):", flush=True)
         if report_only:
             reason = "main's bench records no calibration (it predates per-side calibration)" if base_modes == {None} else f"main's bench calibrated {sorted(str(m) for m in base_modes)}, head {head_mode}"
             warning = f"REGRESSION GATE REPORT-ONLY: {reason}; the two sides are not measured alike, so head/main is not gated"
             print(f"check_bench: {warning}", flush=True)
             print(f"check_bench: {warning}", file=sys.stderr)
+            # On GitHub Actions also an annotation, so the run's summary page shows the warning without opening the log.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print(f"::warning title=Regression gate report-only::{warning}", flush=True)
         print(text, flush=True)
         regressed = [(op, change, limit) for op, change, limit in changes if change > limit]
         if regressed or geomean > limits["geomean"]:

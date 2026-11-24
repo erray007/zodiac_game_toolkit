@@ -65,12 +65,13 @@ jobs:
           & build/literal-fallback/tests/test_script_literals.exe
           if ($LASTEXITCODE -ne 0) { throw "test_script_literals failed with exit code $LASTEXITCODE" }
       # The speed gate of spec 8.4 on an optimized build, every operation of bench_types --list, in two parts (tools/check_bench.py):
-      # - Zodiac's types against the sample add-ons: 3 bench processes, each with equal-time windows per side (--calibrate time),
-      #   gated on the median of their ratios per operation (at most 1.05). One process's placement moves a ratio by several percent
-      #   (Task 5b fix rounds 3 and 4), so no single process decides, and there is no retry.
+      # - Zodiac's types against the sample add-ons: 3 bench processes, each from its own copy of the build and with equal-time
+      #   windows per side (--calibrate time), gated on the median of their ratios per operation (at most 1.05). One file's placement
+      #   moves a ratio by several percent (Task 5b fix rounds 3 and 4, Task 5c), so no single placement decides, and there is no retry.
       # - Zodiac against main's Zodiac on this same runner: main's bench (cached per main commit, built when the cache misses) runs
-      #   in alternation with this one (main, head, head, main, main, head), and head over main must stay within the regression
-      #   limits per operation and in geometric mean. On main itself both sides are this build (an A/A run).
+      #   in alternation with this one (main, head, head, main, main, head), each process from its own copy too, and head's best
+      #   process over main's best (machine-speed corrected) must stay within the regression limits per operation and in geometric
+      #   mean. On main itself both sides are this build (an A/A run).
       # Each run's table and --detail lines are in the log and, on failure, in the bench artifact.
       - name: Build the benchmark on the release preset
         run: |
@@ -156,14 +157,19 @@ jobs:
           main=bench-main/bench_types.exe
           if [ "$SAME" = true ]; then main=$bench; echo "This is main: the comparison with main is an A/A run of this build."; fi
           "$bench" --list > bench-ops.txt
+          # Each process runs from its own copy of its build: Windows draws an image base per file and keeps it for every process of that
+          # file, and that base moves an operation's speed by several percent on AMD runners (placement-study, Task 5c), so three
+          # processes of one file are one placement, three copies are three.
+          mkdir -p bench-copies
+          for i in 1 2 3; do cp "$bench" "bench-copies/bench-$i.exe"; if [ -x "$main" ]; then cp "$main" "bench-copies/main-$i.exe"; fi; done
           run_head() {
             # --faults and --layout only add stderr lines (each op's page faults, the dictionaries' layout) for telling a slow mode apart.
-            "$bench" --detail --faults --layout --calibrate time --out "bench-$1.json" 2> "bench-$1-stderr.txt" || { cat "bench-$1-stderr.txt"; exit 2; }
+            "bench-copies/bench-$1.exe" --detail --faults --layout --calibrate time --out "bench-$1.json" 2> "bench-$1-stderr.txt" || { cat "bench-$1-stderr.txt"; exit 2; }
             cat "bench-$1-stderr.txt"
           }
           run_main() {
             # Main's bench may predate --calibrate; its default is the calibration it measured with.
-            "$main" --detail --out "main-$1.json" 2> "main-$1-stderr.txt" || { cat "main-$1-stderr.txt"; exit 2; }
+            "bench-copies/main-$1.exe" --detail --out "main-$1.json" 2> "main-$1-stderr.txt" || { cat "main-$1-stderr.txt"; exit 2; }
             grep -v "^bench_types: detail" "main-$1-stderr.txt" || true
           }
           start=$(date +%s)

@@ -373,6 +373,42 @@ const int length=self.length();
 if(length==self.byte_length()&&static_cast<unsigned>(start)<=static_cast<unsigned>(length))return self.find_simple(needle.data(),static_cast<std::size_t>(needle.byte_length()),start);
 return find_any(self,needle,start);
 }
+#if defined(ZODIAC_STRING_CALL_STUDY)
+// Bench study only (Task 5c, tests/bench's ZODIAC_BENCH_STRING_CALL; no preset, the kit or a game): byte_at and length registered as
+// free functions taking the string last (ZODIAC_STRING_CALL_STUDY 1, the add-on's asCALL_CDECL_OBJLAST) or first (2, OBJFIRST)
+// instead of THISCALL members, to measure what AngelScript's dispatch costs per calling convention. The same leaf as script_byte_at.
+#if ZODIAC_STRING_CALL_STUDY==1
+[[gnu::noinline]] static const std::uint8_t& study_byte_out_of_range(int index,const String& self)
+{
+return self.script_byte_out_of_range(index);
+}
+[[gnu::aligned(64)]] static const std::uint8_t& study_byte_at(int index,const String& self)
+{
+if(static_cast<std::uint32_t>(index)<self.size_bytes())return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
+[[clang::musttail]] return study_byte_out_of_range(index,self);
+}
+static int study_length(const String& self) noexcept
+{
+return self.length();
+}
+static constexpr asDWORD study_convention=asCALL_CDECL_OBJLAST;
+#else
+[[gnu::noinline]] static const std::uint8_t& study_byte_out_of_range(const String& self,int index)
+{
+return self.script_byte_out_of_range(index);
+}
+[[gnu::aligned(64)]] static const std::uint8_t& study_byte_at(const String& self,int index)
+{
+if(static_cast<std::uint32_t>(index)<self.size_bytes())return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
+[[clang::musttail]] return study_byte_out_of_range(self,index);
+}
+static int study_length(const String& self) noexcept
+{
+return self.length();
+}
+static constexpr asDWORD study_convention=asCALL_CDECL_OBJFIRST;
+#endif
+#endif
 };
 
 namespace {
@@ -651,11 +687,19 @@ r.value<std::uint64_t>("uint64");
 r.value<float>("float");
 r.value<double>("double");
 r.value<bool>("bool");
+#if defined(ZODIAC_STRING_CALL_STUDY)
+r.method("int length() const",asFUNCTION(StringBindingAccess::study_length),StringBindingAccess::study_convention);
+#else
 r.method("int length() const",asMETHOD(String,length),asCALL_THISCALL);
+#endif
 r.method("int byte_length() const",asMETHOD(String,byte_length),asCALL_THISCALL);
 r.method("bool empty() const",asMETHOD(String,empty),asCALL_THISCALL);
 r.method("const uint &code_at(int) const",asFUNCTION(code_at));
+#if defined(ZODIAC_STRING_CALL_STUDY)
+r.method("const uint8 &byte_at(int) const",asFUNCTION(StringBindingAccess::study_byte_at),StringBindingAccess::study_convention);
+#else
 r.method("const uint8 &byte_at(int) const",StringBindingAccess::byte_at(),asCALL_THISCALL);
+#endif
 r.method("int find(const string &in needle, int start = 0) const",asFUNCTION(find));
 r.method("int rfind(const string &in needle, int start = -1) const",asFUNCTION(guarded<&rfind>::call));
 r.method("bool contains(const string &in) const",asFUNCTION(contains));
