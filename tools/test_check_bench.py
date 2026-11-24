@@ -173,6 +173,11 @@ class CheckBenchTests(unittest.TestCase):
                 path.write_text(text, encoding="utf-8")
                 base_paths.append(str(path))
             argv += ["--baseline"] + base_paths
+            # Fixed limits of the tests' own (default 1.04, geometric mean 1.01), so a re-derived tools/bench_regression_limits.json
+            # never changes what these tests check.
+            limits = Path(self._tmp.name) / "test-limits.json"
+            limits.write_text(json.dumps({"default": 1.04, "geomean": 1.01, "ops": {}}), encoding="utf-8")
+            argv += ["--limits", str(limits)]
         out = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -359,6 +364,17 @@ class CheckBenchTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), redirect_stderr(err):
             code = check_bench.main(paths[:3] + ["--expected", str(ops), "--baseline"] + paths[3:] + ["--limits", str(bad)])
         self.assertEqual(code, 2)
+
+    def test_the_shipped_limits_file_is_well_formed_and_covers_every_operation(self):
+        limits = check_bench.read_limits(check_bench.DEFAULT_LIMITS)
+        self.assertGreaterEqual(limits["default"], 1.0)
+        self.assertGreaterEqual(limits["geomean"], 1.0)
+        data = json.loads(check_bench.DEFAULT_LIMITS.read_text(encoding="utf-8"))
+        for op, entry in data["ops"].items():
+            with self.subTest(op=op):
+                # Every derived limit holds every A/A' sample it was derived from, with the file's 1 % floor.
+                self.assertGreaterEqual(entry["limit"], round(entry["max"] + 0.01, 3) - 1e-9)
+                self.assertGreaterEqual(entry["samples"], 30)
 
     def test_a_missing_file_fails(self):
         out = io.StringIO()
