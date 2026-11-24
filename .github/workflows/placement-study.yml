@@ -74,12 +74,14 @@ jobs:
         run: |
           read -r -a variants <<< "$VARIANTS"
           deps="$PWD/.deps/windows-release"
+          # Fetches the dependency sources first, which a label=@<commit> worktree build reuses.
+          .tools/cmake/bin/cmake --preset windows-release > /dev/null
           for variant in "${variants[@]}"; do
             label=${variant%%=*}
             spec=${variant#*=}
             mkdir -p "builds/$label"
             if [ "${spec:0:1}" = "@" ]; then
-              # label=@<commit>: that commit's bench, built in a worktree from the dependency sources this job fetched.
+              # label=@<full commit SHA>: that commit's bench, built in a worktree from the dependency sources this job fetched.
               ref=${spec:1}
               echo "== $label: commit $ref"
               git fetch -q origin "$ref" || true
