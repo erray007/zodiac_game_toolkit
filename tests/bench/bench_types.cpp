@@ -44,8 +44,9 @@
 //   size, each key's home slot and probe length, and the cache lines the lookups of all its keys touch.
 // - The heap study of Task 5c (heap-study.yml, never the gate): --soak SECONDS runs the --op operations in rounds for that long and
 //   prints per-second medians instead of one line per operation's whole run (see soak_lines); --game-loop SECONDS runs a script game's
-//   frame loop instead of any operation and prints its frame-time percentiles (see game_loop); --heap-state prints the heap's state
-//   before the first and after the last timed run (see print_heap_state). Every run prints the heap kind and, on Windows, the image base
+//   frame loop instead of any operation and prints its frame-time percentiles (see game_loop); --with-gate-heap first builds and
+//   calibrates every gated operation's engines and keeps them alive, so either runs on the heap of a gate process (millions of live
+//   blocks); --heap-state prints the heap's state before the first and after the last timed run (see print_heap_state). Every run prints the heap kind and, on Windows, the image base
 //   to stderr. In a tree of the allocator experiment (ZODIAC_BENCH_ALLOCATOR) the heap is the Segment Heap or mimalloc (core/types/heap.hpp).
 // - Exit codes: 0 measured, 1 bad arguments, 2 a snippet did not build or run, 3 the two sides disagree on a checksum.
 // Not a ctest test (spec 8.4): CI runs it on release presets, and Task 7 reuses it to compare compiler flags.
@@ -1499,6 +1500,7 @@ int rounds=101;
 int soak_seconds=0;
 int game_seconds=0;
 bool heap_state=false;
+bool with_gate_heap=false;
 int target_ms=1;
 const char* pin_path=nullptr;
 std::vector<std::string> only;
@@ -1556,6 +1558,7 @@ else if(arg=="--game-loop"&&has_value){
 if(!parse_int(argv[++i],game_seconds)||game_seconds<1)fail(1,"--game-loop needs a whole number of seconds of at least 1");
 }
 else if(arg=="--heap-state")heap_state=true;
+else if(arg=="--with-gate-heap")with_gate_heap=true;
 else if(arg=="--prewarm-heap")prewarm=true;
 else if(arg=="--zodiac-only")g_only=OnlySide::zodiac;
 else if(arg=="--reference-only")g_only=OnlySide::reference;
@@ -1565,10 +1568,11 @@ else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
 else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--soak SECONDS] [--game-loop SECONDS] [--heap-state] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--soak SECONDS] [--game-loop SECONDS] [--with-gate-heap] [--heap-state] [--list]");
 }
 if(soak_seconds>0&&(only.empty()||g_only!=OnlySide::both))fail(1,"--soak needs the operations named with --op, and both sides");
 if(game_seconds>0&&(soak_seconds>0||!only.empty()))fail(1,"--game-loop runs alone, without --soak or --op");
+if(with_gate_heap&&soak_seconds==0&&game_seconds==0)fail(1,"--with-gate-heap goes with --soak or --game-loop");
 if(g_count_reps>0&&g_calibration!=Calibration::count)fail(1,"--reps needs --calibrate count");
 const std::vector<std::pair<std::string,std::pair<int,int>>> pinned=pin_path?read_pinned(pin_path):std::vector<std::pair<std::string,std::pair<int,int>>>{};
 g_check_rounds=g_calibration==Calibration::count&&g_count_reps>0&&pinned.empty()&&g_only==OnlySide::both;
@@ -1598,6 +1602,17 @@ if(prewarm)prewarm_heap();
 quiet_process();
 asPrepareMultithread();
 const double target_ns=target_ms*1e6;
+// --with-gate-heap: every gated operation's engines, tables and calibration, as a gate run builds them before its rounds, kept alive
+// for the whole process, so the soak or game loop runs on the heap a gate process has (millions of live blocks), not a small one.
+std::deque<Measurement> gate_heap;
+if(with_gate_heap){
+for(std::size_t index=0;index<gated_count;++index)gate_heap.emplace_back(jobs[index],rounds);
+for(Measurement& m:gate_heap){
+verify(m);
+calibrate(m,target_ns,{});
+}
+std::fprintf(stderr,"bench_types: gate heap built (%zu operations)\n",gate_heap.size());
+}
 if(game_seconds>0){
 if(heap_state)print_heap_state("start");
 const std::string line=game_loop(game_seconds);
@@ -1606,6 +1621,7 @@ std::fwrite(line.data(),1,line.size(),stdout);
 if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::string("cannot write ")+out_path);
 std::fflush(stdout);
 if(out&&std::fclose(out)!=0)fail(1,std::string("cannot write ")+out_path);
+gate_heap.clear();
 asUnprepareMultithread();
 return 0;
 }
@@ -1708,6 +1724,7 @@ if(out&&std::fwrite(line.data(),1,line.size(),out)!=line.size())fail(1,std::stri
 std::fflush(stdout);
 }
 if(out&&std::fclose(out)!=0)fail(1,std::string("cannot write ")+out_path);
+gate_heap.clear();
 asUnprepareMultithread();
 // The whole process's page faults (image page-in included), to compare a fresh binary's first run with later ones.
 if(g_count_faults)std::fprintf(stderr,"bench_types: process faults %llu\n",static_cast<unsigned long long>(page_faults()));

@@ -3,7 +3,10 @@
 a game? One allocator per call (the trees of ZODIAC_BENCH_ALLOCATOR: the C runtime's NT heap, the Segment Heap, mimalloc).
 
     python -I tools/bench_heap_study.py --bench <bench_types> --hooks <hooks bench_types> --out-dir <dir> [--processes 5]
-        [--soak 180] [--game 60] [--label nt]
+        [--soak 180] [--game 60] [--label nt] [--gate-heap]
+
+With --gate-heap the soak and the game loop run on the heap of a gate process (bench_types --with-gate-heap: every gated operation's
+engines and tables built first and kept alive, millions of live blocks), where the NT heap's slow sizes were found.
 
 For each process index, three fresh processes, in this order so a drift of the machine spreads over all kinds:
   soak-<i>: the hooks bench with ZODIAC_ARRAY_BLOCK_CACHE=0 (every ScriptArray object from the heap again, as before Task 5b fix round 2),
@@ -71,7 +74,9 @@ def main(argv=None) -> int:
     parser.add_argument("--soak", type=int, default=180)
     parser.add_argument("--game", type=int, default=60)
     parser.add_argument("--label", default="")
+    parser.add_argument("--gate-heap", action="store_true", help="soak and game loop on the heap of a gate process (bench_types --with-gate-heap)")
     args = parser.parse_args(argv)
+    extra = ["--with-gate-heap"] if args.gate_heap else []
     if args.processes < 1 or args.soak < 1 or args.game < 1:
         print("bench_heap_study: --processes, --soak and --game need at least 1", file=sys.stderr)
         return 1
@@ -79,7 +84,7 @@ def main(argv=None) -> int:
     results = []
     try:
         for index in range(1, args.processes + 1):
-            soak_command = [str(args.hooks), "--diagnostic", "--calibrate", "time", "--soak", str(args.soak), "--heap-state"]
+            soak_command = [str(args.hooks), "--diagnostic", "--calibrate", "time", "--soak", str(args.soak), "--heap-state"] + extra
             for op in SOAK_OPS:
                 soak_command += ["--op", op]
             out = args.out_dir / f"soak-{index}.json"
@@ -88,7 +93,7 @@ def main(argv=None) -> int:
                 "heap": heap_lines(stderr), "steps": [line for line in stderr.splitlines() if line.startswith("bench_types: faults dict_keys_10")], "lines": records(out)})
             print(f"bench_heap_study: soak-{index} done", file=sys.stderr, flush=True)
             out = args.out_dir / f"game-{index}.json"
-            stderr = launch([str(args.bench), "--game-loop", str(args.game), "--heap-state"], out, {})
+            stderr = launch([str(args.bench), "--game-loop", str(args.game), "--heap-state"] + extra, out, {})
             results.append({"kind": "game", "index": index, "label": args.label, "heap_kind": header(stderr, "heap kind"), "heap": heap_lines(stderr), "lines": records(out)})
             print(f"bench_heap_study: game-{index} done", file=sys.stderr, flush=True)
             out = args.out_dir / f"bench-{index}.json"

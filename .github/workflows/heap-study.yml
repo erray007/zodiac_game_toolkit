@@ -21,6 +21,9 @@ on:
       game:
         description: "seconds of each game loop"
         default: "60"
+      gate_heap:
+        description: "true: soak and game loop on the heap of a gate process (--with-gate-heap)"
+        default: "false"
 
 permissions:
   contents: read
@@ -29,6 +32,7 @@ env:
   PROCESSES: ${{ inputs.processes || '5' }}
   SOAK: ${{ inputs.soak || '180' }}
   GAME: ${{ inputs.game || '60' }}
+  GATE_HEAP: ${{ inputs.gate_heap || 'false' }}
 
 jobs:
   windows:
@@ -79,7 +83,10 @@ jobs:
         shell: pwsh
         run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
       - name: Study
-        run: python -I tools/bench_heap_study.py --bench build/plain/tests/bench/bench_types.exe --hooks build/hooks/tests/bench/bench_types.exe --out-dir heap-study --processes "$PROCESSES" --soak "$SOAK" --game "$GAME" --label "$ALLOCATOR"
+        run: |
+          extra=()
+          if [ "$GATE_HEAP" = true ]; then extra=(--gate-heap); fi
+          python -I tools/bench_heap_study.py --bench build/plain/tests/bench/bench_types.exe --hooks build/hooks/tests/bench/bench_types.exe --out-dir heap-study --processes "$PROCESSES" --soak "$SOAK" --game "$GAME" --label "$ALLOCATOR" "${extra[@]}"
       - name: Upload the runs
         if: always()
         uses: actions/upload-artifact@v4
