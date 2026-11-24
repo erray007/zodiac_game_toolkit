@@ -151,6 +151,89 @@ class CheckBenchTests(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertIn("line 1", err)
 
+    def run_files(self, texts, expected, baselines=None):
+        """Runs check_bench on several results files (and baseline files); each text gets MACHINE appended."""
+        paths = []
+        for index, text in enumerate(texts):
+            path = Path(self._tmp.name) / f"run{index}.json"
+            path.write_text(text + MACHINE + "\n", encoding="utf-8")
+            paths.append(str(path))
+        ops = Path(self._tmp.name) / "ops.txt"
+        ops.write_text("".join(name + "\n" for name in expected), encoding="utf-8")
+        argv = paths + ["--expected", str(ops)]
+        if baselines is not None:
+            base_paths = []
+            for index, text in enumerate(baselines):
+                path = Path(self._tmp.name) / f"main{index}.json"
+                path.write_text(text, encoding="utf-8")
+                base_paths.append(str(path))
+            argv += ["--baseline"] + base_paths
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = check_bench.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_several_processes_gate_on_the_median_ratio(self):
+        texts = [line("a", 1.2) + "\n" + line("b", 1.0) + "\n", line("a", 1.0) + "\n" + line("b", 1.06) + "\n", line("a", 1.01) + "\n" + line("b", 1.07) + "\n"]
+        code, out, err = self.run_files(texts, ["a", "b"])
+        self.assertEqual(code, 1)
+        self.assertIn("b: ratio 1.060", err)
+        self.assertNotIn("a: ratio", err)
+        self.assertIn("median of 3 process(es)", out)
+        code, _, err = self.run_files([line("a", 1.2) + "\n", line("a", 1.0) + "\n", line("a", 1.04) + "\n"], ["a"])
+        self.assertEqual(code, 0, err)
+
+    def test_processes_must_share_machine_and_order(self):
+        other = json.dumps({"machine": {"cpu": "Other CPU", "logical_cores": 4, "os": "Windows 10.0.26100.4652"}})
+        first = Path(self._tmp.name) / "one.json"
+        second = Path(self._tmp.name) / "two.json"
+        first.write_text(line("a", 1.0) + "\n" + MACHINE + "\n", encoding="utf-8")
+        second.write_text(line("a", 1.0) + "\n" + other + "\n", encoding="utf-8")
+        ops = Path(self._tmp.name) / "ops.txt"
+        ops.write_text("a\n", encoding="utf-8")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = check_bench.main([str(first), str(second), "--expected", str(ops)])
+        self.assertEqual(code, 2)
+        self.assertIn("not on the first file's machine", err.getvalue())
+        code, _, err = self.run_files([line("a", 1.0) + "\n" + line("b", 1.0) + "\n", line("b", 1.0) + "\n" + line("a", 1.0) + "\n"], ["a", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("another order", err)
+
+    def test_both_calibration_modes_are_accepted_and_named(self):
+        timed = json.dumps({"op": "a", "new_ns": 1.0, "addon_ns": 1.0, "ratio": 1.0, "calibrate": "time", "window_ms": 1.0, "zodiac_reps": 900, "addon_reps": 40})
+        counted = json.dumps({"op": "a", "new_ns": 1.0, "addon_ns": 1.0, "ratio": 1.0, "calibrate": "count", "window_ms": 1.0, "zodiac_reps": 40, "addon_reps": 40})
+        code, out, err = self.run_files([timed + "\n"], ["a"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("calibration: time, window 1.0 ms", out)
+        code, out, err = self.run_files([counted + "\n"], ["a"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("calibration: count", out)
+
+    def test_the_regression_gate_against_main(self):
+        heads = [line("a", 0.5, new_ns=10.1) + "\n" + line("b", 0.5, new_ns=10.0) + "\n" + line("c", 0.5, new_ns=5.0) + "\n"] * 3
+        # main lacks c (a new operation) and predates the machine line.
+        mains = [line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5, new_ns=10.0) + "\n"] * 3
+        code, out, err = self.run_files(heads, ["a", "b", "c"], mains)
+        self.assertEqual(code, 0, err)
+        self.assertIn("not in main, not compared: c", out)
+        self.assertIn("geometric mean head/main: 1.0050", out)
+        # Past the per-operation limit.
+        slow = [line("a", 0.5, new_ns=10.8) + "\n" + line("b", 0.5, new_ns=10.0) + "\n" + line("c", 0.5, new_ns=5.0) + "\n"] * 3
+        code, _, err = self.run_files(slow, ["a", "b", "c"], mains)
+        self.assertEqual(code, 1)
+        self.assertIn("a: head/main 1.080", err)
+        # Every operation a little slower: the geometric mean fails although no single one does.
+        spread = [line("a", 0.5, new_ns=10.2) + "\n" + line("b", 0.5, new_ns=10.2) + "\n" + line("c", 0.5, new_ns=5.0) + "\n"] * 3
+        code, _, err = self.run_files(spread, ["a", "b", "c"], mains)
+        self.assertEqual(code, 1)
+        self.assertIn("geometric mean 1.0200", err)
+        # The baseline files pair with the results files.
+        code, _, err = self.run_files(heads, ["a", "b", "c"], mains[:2])
+        self.assertEqual(code, 2)
+        self.assertIn("they are paired in order", err)
+
     def test_a_missing_file_fails(self):
         out = io.StringIO()
         err = io.StringIO()

@@ -64,11 +64,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
           & build/literal-fallback/tests/test_script_literals.exe
           if ($LASTEXITCODE -ne 0) { throw "test_script_literals failed with exit code $LASTEXITCODE" }
-      # The speed gate of spec 8.4 on an optimized build: Zodiac's types against the sample add-ons, every operation of
-      # bench_types --list. A failing run is measured once more (shared runners are noisy) before the job fails. Each run's
-      # table and its --detail lines (each operation's ratio per engine and context) are in the log and, on failure, in the
-      # bench artifact: an operation slower on every engine and context is a real regression, one that only a few placements
-      # push over the limit is noise.
+      # The speed gate of spec 8.4 on an optimized build, every operation of bench_types --list, in two parts (tools/check_bench.py):
+      # - Zodiac's types against the sample add-ons: 3 bench processes, each with equal-time windows per side (--calibrate time),
+      #   gated on the median of their ratios per operation (at most 1.05). One process's placement moves a ratio by several percent
+      #   (Task 5b fix rounds 3 and 4), so no single process decides, and there is no retry.
+      # - Zodiac against main's Zodiac on this same runner: main's bench (cached per main commit, built when the cache misses) runs
+      #   in alternation with this one (main, head, head, main, main, head), and head over main must stay within the regression
+      #   limits per operation and in geometric mean. On main itself both sides are this build (an A/A run).
+      # Each run's table and --detail lines are in the log and, on failure, in the bench artifact.
       - name: Build the benchmark on the release preset
         run: |
           .tools/cmake/bin/cmake --preset windows-release
@@ -95,24 +98,82 @@ jobs:
       - name: Show the CPU
         shell: pwsh
         run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
-      - name: Benchmark against the sample add-ons
+      - name: Find main's commit
+        id: main
         shell: bash
         run: |
+          git fetch --depth=1 origin main
+          sha=$(git rev-parse FETCH_HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$sha" = "$GITHUB_SHA" ] || [ "$GITHUB_REF" = refs/heads/main ]; then echo "same=true" >> "$GITHUB_OUTPUT"; else echo "same=false" >> "$GITHUB_OUTPUT"; fi
+          echo "main is $sha"
+      - name: Restore main's bench
+        if: steps.main.outputs.same == 'false'
+        id: main-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: bench-main
+          key: bench-main-windows-${{ steps.main.outputs.sha }}
+      # Main's sources in a worktree, built like this tree (the dependency sources this job already fetched), only when no earlier job
+      # cached it for this main commit.
+      - name: Build main's bench
+        if: steps.main.outputs.same == 'false' && steps.main-cache.outputs.cache-hit != 'true'
+        id: main-build
+        # A main that no longer builds with this toolchain must not block the branch: the gate step then warns and skips the comparison.
+        continue-on-error: true
+        shell: pwsh
+        env:
+          MAIN_SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          git fetch origin $env:MAIN_SHA
+          git worktree add main-src $env:MAIN_SHA
+          if ($LASTEXITCODE -ne 0) { throw "git worktree failed" }
+          New-Item -ItemType Junction -Path main-src/.tools -Target (Resolve-Path .tools) | Out-Null
+          $deps = "$PWD/.deps/windows-release"
+          Push-Location main-src
+          ../.tools/cmake/bin/cmake --preset windows-release -B ../build/main "-DFETCHCONTENT_BASE_DIR=$PWD/../build/main/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          Pop-Location
+          .tools/cmake/bin/cmake --build build/main --target bench_types
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          New-Item -ItemType Directory -Force bench-main | Out-Null
+          Copy-Item build/main/tests/bench/bench_types.exe bench-main/
+      - name: Save main's bench
+        if: steps.main.outputs.same == 'false' && steps.main-cache.outputs.cache-hit != 'true' && steps.main-build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: bench-main
+          key: bench-main-windows-${{ steps.main.outputs.sha }}
+      - name: Benchmark against the sample add-ons and against main
+        shell: bash
+        env:
+          SAME: ${{ steps.main.outputs.same }}
+        run: |
           bench=build/windows-release/tests/bench/bench_types.exe
+          main=bench-main/bench_types.exe
+          if [ "$SAME" = true ]; then main=$bench; echo "This is main: the comparison with main is an A/A run of this build."; fi
           "$bench" --list > bench-ops.txt
-          run_bench() {
-            local status=0
+          run_head() {
             # --faults and --layout only add stderr lines (each op's page faults, the dictionaries' layout) for telling a slow mode apart.
-            "$bench" --detail --faults --layout --out "$1.json" 2> "$1-stderr.txt" || status=$?
-            cat "$1-stderr.txt"
-            return $status
+            "$bench" --detail --faults --layout --calibrate time --out "bench-$1.json" 2> "bench-$1-stderr.txt" || { cat "bench-$1-stderr.txt"; exit 2; }
+            cat "bench-$1-stderr.txt"
           }
-          run_bench bench
-          if ! python -I tools/check_bench.py bench.json --expected bench-ops.txt; then
-            echo "Measuring again once before failing."
-            run_bench bench-retry
-            python -I tools/check_bench.py bench-retry.json --expected bench-ops.txt
+          run_main() {
+            # Main's bench may predate --calibrate; its default is the calibration it measured with.
+            "$main" --detail --out "main-$1.json" 2> "main-$1-stderr.txt" || { cat "main-$1-stderr.txt"; exit 2; }
+            grep -v "^bench_types: detail" "main-$1-stderr.txt" || true
+          }
+          start=$(date +%s)
+          if [ -x "$main" ]; then
+            run_main 1; run_head 1; run_head 2; run_main 2; run_main 3; run_head 3
+            baseline=(--baseline main-1.json main-2.json main-3.json)
+          else
+            echo "::warning::main's bench could not be built, so this run is not compared with main"
+            run_head 1; run_head 2; run_head 3
+            baseline=()
           fi
+          echo "The bench processes took $(( $(date +%s) - start )) s."
+          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt "${baseline[@]}"
       - name: Upload the benchmark results on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -121,6 +182,8 @@ jobs:
           path: |
             bench*.json
             bench*-stderr.txt
+            main-*.json
+            main-*-stderr.txt
             bench-ops.txt
           if-no-files-found: ignore
       - name: Upload logs on failure
@@ -213,6 +276,9 @@ jobs:
             printf '%s at 0x%x: mod 64 = %d, mod 32 = %d\n' "$name" "$start" $((start % 64)) $((start % 32))
             llvm-objdump-18 -d --start-address=$start --stop-address=$((start + 48)) "$exe" | tail -n +7
           done
+      # Both calibration modes of bench_types give sane results on a fast-against-slow pair (tools/check_bench_modes.py, about 10 s).
+      - name: Check the bench's calibration modes
+        run: python -I tools/check_bench_modes.py --bench build/linux-release/tests/bench/bench_types --out-dir bench-modes
       # The release tree's test of this (test_no_test_hooks) runs in kit-windows on Windows; here the Linux release core and bench are checked.
       - name: Show that the release build holds no test hook
         run: |
