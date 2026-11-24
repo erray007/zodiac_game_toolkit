@@ -464,6 +464,47 @@ kind_=primitive_kind(value_type_id,element_size_);
 }
 }
 
+namespace {
+// ScriptArray objects are recycled through a per-thread cache of at most array_block_limit blocks (as String's heap blocks are):
+// a script that makes and drops arrays in a loop (dictionary keys(), split) then never reaches the C heap for them. Measured on
+// CI's Windows runners (Task 5b fix round 2): in some processes the Windows heap took about 6000 TSC cycles (2-2.5 us) for every
+// malloc of this one size, against 80 in others, which doubled dict_iterate_10; the other sizes keys() allocates stayed fast.
+// Any thread may free any array: a block goes to the cache of the thread that frees it.
+constexpr int array_block_limit=32;
+struct ArrayBlocks {
+void* blocks[array_block_limit];
+int count;
+~ArrayBlocks();
+};
+// Trivially destructible, so it stays usable after the cache is destroyed (arrays freed by later destructors).
+thread_local bool array_blocks_closed=false;
+thread_local ArrayBlocks array_blocks{};
+ArrayBlocks::~ArrayBlocks()
+{
+array_blocks_closed=true;
+while(count>0)std::free(blocks[--count]);
+}
+void* take_array_block() noexcept
+{
+if(!array_blocks_closed){
+ArrayBlocks& cache=array_blocks;
+if(cache.count>0)return cache.blocks[--cache.count];
+}
+return std::malloc(sizeof(ScriptArray));
+}
+void give_array_block(void* block) noexcept
+{
+if(!array_blocks_closed){
+ArrayBlocks& cache=array_blocks;
+if(cache.count<array_block_limit){
+cache.blocks[cache.count++]=block;
+return;
+}
+}
+std::free(block);
+}
+}
+
 #if defined(ZODIAC_TEST_HOOKS)
 testing::StringArraySteps& testing::string_array_steps() noexcept
 {
@@ -538,7 +579,7 @@ ZODIAC_STEP_IF(timed,type_release);
 
 ScriptArray* ScriptArray::allocate(asITypeInfo* type) noexcept
 {
-void* memory=std::malloc(sizeof(ScriptArray));
+void* memory=take_array_block();
 if(!memory){
 raise(memory_error);
 return nullptr;
@@ -584,7 +625,7 @@ return nullptr;
 ScriptArray* array;
 ZODIAC_STEP_MARK;
 if(cache&&cache->strings){
-void* memory=std::malloc(sizeof(ScriptArray));
+void* memory=take_array_block();
 if(!memory){
 raise(memory_error);
 return nullptr;
@@ -721,7 +762,7 @@ const bool timed=timed_;
 #endif
 self->~ScriptArray();
 ZODIAC_STEP_MARK;
-std::free(self);
+give_array_block(self);
 ZODIAC_STEP_IF(timed,array_free);
 }
 }
