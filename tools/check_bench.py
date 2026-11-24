@@ -16,11 +16,18 @@ The add-on gate: per operation, the median over the files of their ratios is at 
 runs 3) are needed because one process's code and heap placement moves a ratio by several percent (Task 5b fix rounds 3 and 4).
 
 The regression gate (--baseline, one file per process of main's bench on the same machine, as many as results files; the gate runs them
-in alternation): per operation both have, head's best over main's best is at most that operation's limit, and the geometric mean of those
-ratios is at most the geometric-mean limit, both from --limits (tools/bench_regression_limits.json; the file says how they were derived).
-A side's best is the minimum over its processes of the process's new_ns divided by the process's machine-speed factor:
-- Best, not median (Task 5c): the slow modes seen (the Windows heap's per-process slow allocation path, Task 5b) only ever slow a process
-  down, so the fastest process is the one that measured the code; a median of 3 is still slow when 2 of them are.
+in alternation) is one-sided: it fails when head is slower. Each process's time is its new_ns divided by its machine-speed factor. Per
+operation both have, head's best (minimum over its processes) over main's median is at most that operation's limit; over all of them,
+the geometric mean of head's best over main's best is at most the geometric-mean limit; both from --limits
+(tools/bench_regression_limits.json; the file says how they were derived). Why these (Task 5c, 96 gate-replica A/A' jobs):
+- Head's best: the slow modes seen (the Windows NT heap's per-process slow request sizes) only slow a process down, and in up to 2 of 3
+  processes at once, so a median of head's processes reads them as a regression; the fastest one measured the code.
+- Main's median: one process of a side is sometimes several percent fast on one operation (its copy's placement; once 13 % on
+  array_find_string), which main's best would read as a regression of head. Main's median ignores one such process, and what makes main
+  slow only makes head look better, which a one-sided gate may allow. Held out one job at a time, best over best failed 3 of 96 jobs at
+  the limits the other 95 give, best over median 0.
+- The geometric mean takes best over best: over every operation one operation's outlier barely moves it, and it stays the sensitive
+  check for a slowdown spread over everything.
 - The speed factor is the median over the compared operations of that process's addon_ns over the operation's median addon_ns across all
   processes of both sides. The add-on side is the same third-party code in both benches, so the factor follows the machine (a runner that
   gets faster or slower for a whole process, as in one gate replica where one process ran every operation 10 % faster on both sides) and,
@@ -277,8 +284,8 @@ def speed_factors(addon: list, ops: list) -> list:
 
 
 def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
-    """Zodiac against the baseline (main): per op head's best over main's best (each the minimum over that side's processes of new_ns
-    over the process's speed factor, see the module text), against that op's limit, and their geometric mean. Returns (text,
+    """Zodiac against the baseline (main): per op head's best over main's median (of new_ns over the process's speed factor, see the
+    module text) against that op's limit, and the geometric mean over ops of head's best over main's best. Returns (text,
     [(op, change, limit)], geomean, ops that main does not have). Raises BenchFormatError naming an op that has a time of 0 ns on either
     side (no ratio can be taken)."""
     heads = [{op: (new_ns, addon_ns) for op, new_ns, addon_ns, _ in results} for results in runs]
@@ -294,19 +301,23 @@ def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
     head_factors, main_factors = factors[:len(heads)], factors[len(heads):]
     width = max(len("op"), max(len(op) for op in ops))
     lines = [f"process speed factors (the add-on side's median over operations): head {' '.join(f'{f:.3f}' for f in head_factors)}, main {' '.join(f'{f:.3f}' for f in main_factors)}"]
-    lines.append(f"{'op':<{width}}  {'main best':>12}  {'head best':>12}  {'head/main':>9}  {'pair med':>8}  {'limit':>6}")
+    lines.append(f"{'op':<{width}}  {'main median':>12}  {'head best':>12}  {'head/main':>9}  {'best/best':>9}  {'pair med':>8}  {'limit':>6}")
     changes = []
+    best_changes = []
     for op in compared:
-        head_best = min(head[op][0] / factor for head, factor in zip(heads, head_factors))
-        main_best = min(base[op][0] / factor for base, factor in zip(baselines, main_factors))
-        change = head_best / main_best
+        head_ns = [head[op][0] / factor for head, factor in zip(heads, head_factors)]
+        main_ns = [base[op][0] / factor for base, factor in zip(baselines, main_factors)]
+        head_best = min(head_ns)
+        main_typical = median(main_ns)
+        change = head_best / main_typical
+        best_changes.append(head_best / min(main_ns))
         paired = median([head[op][0] / base[op][0] for head, base in zip(heads, baselines)])
         limit = limits["ops"].get(op, limits["default"])
         changes.append((op, change, limit))
         mark = "  FAIL" if change > limit else ""
-        lines.append(f"{op:<{width}}  {main_best:>12.2f}  {head_best:>12.2f}  {change:>9.3f}  {paired:>8.3f}  {limit:>6.2f}{mark}")
-    geomean = math.exp(sum(math.log(c) for _, c, _ in changes) / len(changes)) if changes else 1.0
-    lines.append(f"geometric mean head/main: {geomean:.4f} over {len(changes)} operations (best of {len(runs)} and {len(baselines)} processes), limit {limits['geomean']}")
+        lines.append(f"{op:<{width}}  {main_typical:>12.2f}  {head_best:>12.2f}  {change:>9.3f}  {best_changes[-1]:>9.3f}  {paired:>8.3f}  {limit:>6.2f}{mark}")
+    geomean = math.exp(sum(math.log(c) for c in best_changes) / len(best_changes)) if best_changes else 1.0
+    lines.append(f"geometric mean of best/best: {geomean:.4f} over {len(changes)} operations (best of {len(runs)} and {len(baselines)} processes), limit {limits['geomean']}")
     if new:
         lines.append("not in main, not compared: " + ", ".join(new))
     return "\n".join(lines), changes, geomean, new
@@ -386,7 +397,7 @@ def _check(argv) -> int:
         base_modes = {calibration_mode(texts[path]) for path in args.baseline}
         report_only = base_modes != {head_mode} or head_mode is None
         print("", flush=True)
-        print(f"Against main (Zodiac's ns, head's best over main's best; per-op limits from {args.limits.name}, default {limits['default']}, geometric mean {limits['geomean']}):", flush=True)
+        print(f"Against main (Zodiac's ns, head's best over main's median per op, best over best in the geometric mean; per-op limits from {args.limits.name}, default {limits['default']}, geometric mean {limits['geomean']}):", flush=True)
         if report_only:
             reason = "main's bench records no calibration (it predates per-side calibration)" if base_modes == {None} else f"main's bench calibrated {sorted(str(m) for m in base_modes)}, head {head_mode}"
             warning = f"REGRESSION GATE REPORT-ONLY: {reason}; the two sides are not measured alike, so head/main is not gated"
