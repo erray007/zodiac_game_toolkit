@@ -28,7 +28,7 @@ from pathlib import Path
 
 LIMIT = 1.05
 # Functions whose link-map addresses show each copy's layout (the same in every copy of one build; the base moves them all together).
-MAPPED = ("zodiac::String::script_byte_at(int) const", "StringCharAt", "asCContext::ExecuteNext()", "CallSystemFunctionNative")
+MAPPED = ("zodiac::StringBindingAccess::byte_at(", "StringCharAt", "asCContext::ExecuteNext()", "CallSystemFunctionNative")
 BASE = re.compile(r"^bench_types: image base (?:0x)?([0-9A-Fa-f]+)\s*$")
 
 

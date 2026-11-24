@@ -88,7 +88,7 @@ jobs:
           timeout 60 "$exe" --diagnostic --layout --rounds 31 --op dict_keys_10 --op dict_get_ordered_10 --op dict_iterate_10 --op dict_lookup_10 || echo "::warning::the probe exited with $?"
           objdump=.tools/llvm-mingw/bin/llvm-objdump
           base=$("$objdump" -p "$exe" | awk '/^ImageBase/ {print $2}')
-          for name in "zodiac::String::script_byte_at(int) const" "zodiac::String::script_byte_out_of_range(int) const"; do
+          for name in "zodiac::StringBindingAccess::byte_at(" "zodiac::StringBindingAccess::byte_out_of_range("; do
             line=$(grep -m1 -F "$name" "$exe.map") || { echo "$name is not in the map"; continue; }
             start=$(( 0x$base + 0x$(echo "$line" | awk '{print $1}') ))
             printf '%s at 0x%x: mod 64 = %d, mod 32 = %d\n' "$name" "$start" $((start % 64)) $((start % 32))
@@ -288,7 +288,7 @@ jobs:
         run: |
           exe=build/linux-release/tests/bench/bench_types
           timeout 60 "$exe" --diagnostic --layout --rounds 31 --op dict_keys_10 --op dict_get_ordered_10 --op dict_iterate_10 --op dict_lookup_10 || echo "::warning::the probe exited with $?"
-          for name in "zodiac::String::script_byte_at(int) const" "zodiac::String::script_byte_out_of_range(int) const"; do
+          for name in "zodiac::StringBindingAccess::byte_at(" "zodiac::StringBindingAccess::byte_out_of_range("; do
             line=$(grep -m1 -F "$name" "$exe.map") || { echo "$name is not in the map"; continue; }
             start=$(( 0x$(echo "$line" | awk '{print $1}') ))
             printf '%s at 0x%x: mod 64 = %d, mod 32 = %d\n' "$name" "$start" $((start % 64)) $((start % 32))

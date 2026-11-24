@@ -2,9 +2,9 @@
 # variant (by default the bench as the gate links it, "aslr", and the same bench linked without ASLR, "fixed", -DZODIAC_BENCH_FIXED_BASE=ON),
 # each copied several times, every copy run a few times in its own processes, interleaved. Shows whether an operation's ratio and each side's
 # ns follow the copy (the image base Windows draws per file), whether a fixed base removes that, and, with other variants (study-only cache
-# options of tests/bench such as ZODIAC_BENCH_STRING_CALL), how builds compare on the same runner over many files. The tables are in each
-# job's log, the runs in the artifact placement-study-<n>. Trigger:
-#   gh workflow run placement-study.yml --ref <branch> [-f copies=8 -f runs=2 -f rounds=101 -f ops="..." -f variants="label=-DA=x,-DB=y ..."]
+# options of tests/bench, or label=@<commit> for another commit's bench built in a worktree), how builds compare on the same runner over
+# many files. The tables are in each job's log, the runs in the artifact placement-study-<n>. Trigger:
+#   gh workflow run placement-study.yml --ref <branch> [-f copies=8 -f runs=2 -f rounds=101 -f ops="..." -f variants="label=-DA=x,-DB=y label2=@<sha> ..."]
 name: placement-study
 
 on:
@@ -73,18 +73,31 @@ jobs:
       - name: Build the variants
         run: |
           read -r -a variants <<< "$VARIANTS"
+          deps="$PWD/.deps/windows-release"
           for variant in "${variants[@]}"; do
             label=${variant%%=*}
-            options=()
-            # Every study option back to its default first, then this variant's.
-            options+=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_STRING_CALL=)
-            IFS=, read -r -a extra <<< "${variant#*=}"
-            options+=("${extra[@]}")
-            echo "== $label: ${options[*]}"
-            .tools/cmake/bin/cmake --preset windows-release "${options[@]}" > /dev/null
-            .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+            spec=${variant#*=}
             mkdir -p "builds/$label"
-            cp build/windows-release/tests/bench/bench_types.exe build/windows-release/tests/bench/bench_types.exe.map "builds/$label/"
+            if [ "${spec:0:1}" = "@" ]; then
+              # label=@<commit>: that commit's bench, built in a worktree from the dependency sources this job fetched.
+              ref=${spec:1}
+              echo "== $label: commit $ref"
+              git fetch -q origin "$ref" || true
+              git worktree add "src-$label" "$ref"
+              powershell -NoProfile -Command "New-Item -ItemType Junction -Path 'src-$label/.tools' -Target (Resolve-Path .tools) | Out-Null"
+              (cd "src-$label" && ../.tools/cmake/bin/cmake --preset windows-release -B "../build/$label" "-DFETCHCONTENT_BASE_DIR=$PWD/../build/$label/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src" > /dev/null)
+              .tools/cmake/bin/cmake --build "build/$label" --target bench_types
+              cp "build/$label/tests/bench/bench_types.exe" "build/$label/tests/bench/bench_types.exe.map" "builds/$label/"
+            else
+              # Every study option back to its default first, then this variant's (commas between options).
+              options=(-DZODIAC_BENCH_FIXED_BASE=OFF)
+              IFS=, read -r -a extra <<< "$spec"
+              options+=("${extra[@]}")
+              echo "== $label: ${options[*]}"
+              .tools/cmake/bin/cmake --preset windows-release "${options[@]}" > /dev/null
+              .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+              cp build/windows-release/tests/bench/bench_types.exe build/windows-release/tests/bench/bench_types.exe.map "builds/$label/"
+            fi
             .tools/llvm-mingw/bin/llvm-readobj --file-headers "builds/$label/bench_types.exe" | grep -iE "ImageBase|DYNAMIC_BASE" || true
           done
       - name: Show the CPU

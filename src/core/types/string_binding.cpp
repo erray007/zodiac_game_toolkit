@@ -334,23 +334,10 @@ return -1;
 raise_string_error(StringError::index_out_of_range,*this);
 return zero_byte;
 }
-// The script byte_at: a frameless leaf in range, and a forced tail call otherwise. Without musttail, full LTO sees that the cold
-// path always returns zero_byte, calls it as a plain call and, on Windows, gives the whole function a stack frame (sub/add rsp on
-// the in-range path too, seen in the release disassembly). Neither is noexcept: clang cannot make a musttail call out of a
-// noexcept function (its terminate scope is a cleanup); nothing in them can throw. A member, so AngelScript's asBC_Thiscall1
-// dispatch takes its first test (THISCALL), as for the add-on's opIndex, rather than its last (CDECL_OBJFIRST). It starts on a
-// 64-byte boundary, as copy_heap and release do (string.hpp), so its placement does not shift with unrelated code under LTO;
-// CI's probe step prints its release disassembly.
-[[gnu::aligned(64)]] const std::uint8_t& String::script_byte_at(int index) const
-{
-if(static_cast<std::uint32_t>(index)<size_bytes())return *reinterpret_cast<const std::uint8_t*>(data()+index);
-[[clang::musttail]] return script_byte_out_of_range(index);
-}
-
 #if defined(ZODIAC_CORE_PLACEMENT_PAD)&&ZODIAC_CORE_PLACEMENT_PAD>0
 // Bench placement studies only (bench-reference.yml sets ZODIAC_CORE_PLACEMENT_PAD through tests/bench's ZODIAC_BENCH_CORE_PAD; no preset
-// does): an unused function of that many nop bytes right after the byte_at leaf, so a no-op relink moves the code behind the leaf
-// against the leaf itself, not all of it together.
+// does): an unused function of that many nop bytes just before the byte_at leaf (StringBindingAccess below), so a no-op relink moves
+// code near the leaf against other code, not all of it together.
 #define ZODIAC_PAD_TEXT(x) #x
 #define ZODIAC_PAD_STRING(x) ZODIAC_PAD_TEXT(x)
 [[gnu::used,gnu::noinline]] void zodiac_core_placement_pad()
@@ -359,11 +346,28 @@ asm volatile(".fill " ZODIAC_PAD_STRING(ZODIAC_CORE_PLACEMENT_PAD) ",1,0x90");
 }
 #endif
 
-// String's friend for the script find (find_simple's preconditions checked first) and the script byte_at's registration.
+// String's friend for the script find (find_simple's preconditions checked first) and the script byte_at.
 struct StringBindingAccess {
-static asSFuncPtr byte_at() noexcept
+// The script byte_at, registered asCALL_CDECL_OBJLAST (the string last), as the add-on registers its opIndex: a frameless leaf in
+// range, and a forced tail call to byte_out_of_range otherwise.
+// - The convention: asBC_Thiscall1 calls a THISCALL method through a member-function pointer (composite and base offsets, the
+//   virtual bit), an OBJLAST function as a plain call. Measured in Task 5c's placement study (8 Windows runners, 6 copies of each
+//   build, 2 processes per copy): string_byte_ascii read 1.013-1.047 against the add-on as a THISCALL member, 0.979-0.987 as OBJLAST
+//   and 0.982-0.991 as OBJFIRST, on the EPYC 7763, 9V45 and Xeon 8573C alike (length(), on the general call path, did not move).
+// - The tail call: without musttail, full LTO sees that the cold path always returns zero_byte, calls it as a plain call and, on
+//   Windows, gives the whole function a stack frame (sub/add rsp on the in-range path too, seen in the release disassembly).
+//   Neither is noexcept: clang cannot make a musttail call out of a noexcept function (its terminate scope is a cleanup); nothing in
+//   them can throw.
+// - It starts on a 64-byte boundary, as copy_heap and release do (string.hpp), so its own start does not shift with unrelated code
+//   under LTO; CI's probe step prints its release disassembly.
+[[gnu::noinline]] static const std::uint8_t& byte_out_of_range(int index,const String& self)
 {
-return asMETHOD(String,script_byte_at);
+return self.script_byte_out_of_range(index);
+}
+[[gnu::aligned(64)]] static const std::uint8_t& byte_at(int index,const String& self)
+{
+if(static_cast<std::uint32_t>(index)<self.size_bytes())return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
+[[clang::musttail]] return byte_out_of_range(index,self);
 }
 // Text with one byte per character and a valid start goes straight to find_simple, without an exception frame (it
 // never allocates); everything else (multibyte text, which may build its index, or a bad start) takes find_any.
@@ -373,42 +377,6 @@ const int length=self.length();
 if(length==self.byte_length()&&static_cast<unsigned>(start)<=static_cast<unsigned>(length))return self.find_simple(needle.data(),static_cast<std::size_t>(needle.byte_length()),start);
 return find_any(self,needle,start);
 }
-#if defined(ZODIAC_STRING_CALL_STUDY)
-// Bench study only (Task 5c, tests/bench's ZODIAC_BENCH_STRING_CALL; no preset, the kit or a game): byte_at and length registered as
-// free functions taking the string last (ZODIAC_STRING_CALL_STUDY 1, the add-on's asCALL_CDECL_OBJLAST) or first (2, OBJFIRST)
-// instead of THISCALL members, to measure what AngelScript's dispatch costs per calling convention. The same leaf as script_byte_at.
-#if ZODIAC_STRING_CALL_STUDY==1
-[[gnu::noinline]] static const std::uint8_t& study_byte_out_of_range(int index,const String& self)
-{
-return self.script_byte_out_of_range(index);
-}
-[[gnu::aligned(64)]] static const std::uint8_t& study_byte_at(int index,const String& self)
-{
-if(static_cast<std::uint32_t>(index)<self.size_bytes())return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
-[[clang::musttail]] return study_byte_out_of_range(index,self);
-}
-static int study_length(const String& self) noexcept
-{
-return self.length();
-}
-static constexpr asDWORD study_convention=asCALL_CDECL_OBJLAST;
-#else
-[[gnu::noinline]] static const std::uint8_t& study_byte_out_of_range(const String& self,int index)
-{
-return self.script_byte_out_of_range(index);
-}
-[[gnu::aligned(64)]] static const std::uint8_t& study_byte_at(const String& self,int index)
-{
-if(static_cast<std::uint32_t>(index)<self.size_bytes())return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
-[[clang::musttail]] return study_byte_out_of_range(self,index);
-}
-static int study_length(const String& self) noexcept
-{
-return self.length();
-}
-static constexpr asDWORD study_convention=asCALL_CDECL_OBJFIRST;
-#endif
-#endif
 };
 
 namespace {
@@ -687,19 +655,11 @@ r.value<std::uint64_t>("uint64");
 r.value<float>("float");
 r.value<double>("double");
 r.value<bool>("bool");
-#if defined(ZODIAC_STRING_CALL_STUDY)
-r.method("int length() const",asFUNCTION(StringBindingAccess::study_length),StringBindingAccess::study_convention);
-#else
 r.method("int length() const",asMETHOD(String,length),asCALL_THISCALL);
-#endif
 r.method("int byte_length() const",asMETHOD(String,byte_length),asCALL_THISCALL);
 r.method("bool empty() const",asMETHOD(String,empty),asCALL_THISCALL);
 r.method("const uint &code_at(int) const",asFUNCTION(code_at));
-#if defined(ZODIAC_STRING_CALL_STUDY)
-r.method("const uint8 &byte_at(int) const",asFUNCTION(StringBindingAccess::study_byte_at),StringBindingAccess::study_convention);
-#else
-r.method("const uint8 &byte_at(int) const",StringBindingAccess::byte_at(),asCALL_THISCALL);
-#endif
+r.method("const uint8 &byte_at(int) const",asFUNCTION(StringBindingAccess::byte_at),asCALL_CDECL_OBJLAST);
 r.method("int find(const string &in needle, int start = 0) const",asFUNCTION(find));
 r.method("int rfind(const string &in needle, int start = -1) const",asFUNCTION(guarded<&rfind>::call));
 r.method("bool contains(const string &in) const",asFUNCTION(contains));

@@ -27,7 +27,7 @@ from pathlib import Path
 # Mixed first in each group, so with --pin the alone runs after it time exactly its reps.
 MODES = {"mixed": [], "reference": ["--reference-only"], "zodiac": ["--zodiac-only"]}
 # Functions whose addresses show what a no-op relink moved (from the bench's link map, bench_types.map).
-MAPPED = ("StringCharAt", "zodiac::String::script_byte_at(int) const", "asCContext::ExecuteNext()", "CScriptArray::Find", "zodiac::ScriptArray::native_find")
+MAPPED = ("StringCharAt", "zodiac::StringBindingAccess::byte_at(", "asCContext::ExecuteNext()", "CScriptArray::Find", "zodiac::ScriptArray::native_find")
 
 
 BENCH_ARGS = []

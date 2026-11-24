@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-LEAVES = {"zodiac byte_at": "zodiac::String::script_byte_at(int) const", "add-on StringCharAt": "StringCharAt("}
+LEAVES = {"zodiac byte_at": "zodiac::StringBindingAccess::byte_at(", "add-on StringCharAt": "StringCharAt("}
 
 
 def address_of(map_text: str, name: str) -> int:
