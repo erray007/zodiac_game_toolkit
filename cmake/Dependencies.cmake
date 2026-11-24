@@ -117,6 +117,9 @@ set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
 set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
 set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(MI_INSTALL_TOPLEVEL OFF CACHE BOOL "" FORCE)
+# Compiled as C++: mi_new then calls std::get_new_handler and throws std::bad_alloc, as heap.hpp's new_block promises (as C it would abort
+# instead, and it defines a weak std::get_new_handler of its own, which collides with libc++'s on a static MinGW link).
+set(MI_USE_CXX ON CACHE STRING "" FORCE)
 FetchContent_MakeAvailable(mimalloc)
 target_compile_options(mimalloc-static PRIVATE -w)
 endif()

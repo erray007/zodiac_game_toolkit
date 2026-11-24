@@ -3,16 +3,15 @@
 # then per process index a 3-minute soak of allocation-heavy operations (the hooks bench, ScriptArray block cache off), a 60-second script
 # game loop and one gate bench run, each a fresh process logging the heap's state. The tables are in each job's log, the runs in the
 # artifact heap-study-<allocator>-<n>. Trigger:
-#   gh workflow run heap-study.yml --ref <branch> [-f processes=5 -f soak=180 -f game=60]
+#   gh workflow run heap-study.yml --ref <branch> [-f allocators='["mimalloc"]' -f processes=5 -f soak=180 -f game=60]
 name: heap-study
 
 on:
-  # Only to register the new workflow with GitHub (a dispatch needs a workflow it knows); removed right after.
-  push:
-    paths:
-      - .github/workflows/heap-study.yml
   workflow_dispatch:
     inputs:
+      allocators:
+        description: "the allocators, as a JSON list of nt, segment and mimalloc"
+        default: '["nt", "segment", "mimalloc"]'
       processes:
         description: "process indices per job (each a soak, a game loop and a gate bench process)"
         default: "5"
@@ -36,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        allocator: [nt, segment, mimalloc]
+        allocator: ${{ fromJSON(inputs.allocators || '["nt", "segment", "mimalloc"]') }}
         job: [1, 2, 3, 4]
     runs-on: windows-latest
     # Two release trees (about 15 minutes), then 5 x (180 + 60 + 45) s of processes, with a margin.
