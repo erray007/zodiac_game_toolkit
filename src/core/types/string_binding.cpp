@@ -250,11 +250,6 @@ int compare(const String& self,const String& other) noexcept
 const std::strong_ordering order=self<=>other;
 return order<0?-1:order>0?1:0;
 }
-String char_at(const String& self,int index)
-{
-return value_or_raise(self.char_at(index),self);
-}
-
 // Methods.
 // code_at and byte_at are registered as const uint &code_at(int) and const uint8 &byte_at(int): the engine calls methods of
 // the form `type &f(int)` through asBC_Thiscall1, which costs about half of the general asBC_CALLSYS path (the add-on's
@@ -368,6 +363,26 @@ return self.script_byte_out_of_range(index);
 {
 if(static_cast<std::uint32_t>(index)<self.size_bytes())return *reinterpret_cast<const std::uint8_t*>(self.data()+index);
 [[clang::musttail]] return byte_out_of_range(index,self);
+}
+// The script s[i] (get_opIndex): on text known to be ASCII with i in range, the one-byte string built in place; everything else
+// (text not yet scanned, multibyte text, a bad index) takes char_at_any, out of line, which raises the script exception. Before (Task
+// 5c), every s[i] went through guarded's exception frame, std::expected<String> and the general char_at (length, the character
+// index, the copying constructor); string_index_ascii read 1.04-1.05 against the add-on's substr on the EPYC 7763.
+[[gnu::noinline]] static String char_at_any(const String& self,int index) noexcept
+{
+try{
+return value_or_raise(self.char_at(index),self);
+}
+catch(...){
+raise_current_exception();
+}
+return String();
+}
+static String char_at(const String& self,int index) noexcept
+{
+const int code=self.known_ascii_code_at(index);
+if(code>=0)return String(String::OneAsciiByte{static_cast<char>(code)});
+return char_at_any(self,index);
 }
 // Text with one byte per character and a valid start goes straight to find_simple, without an exception frame (it
 // never allocates); everything else (multibyte text, which may build its index, or a bad start) takes find_any.
@@ -643,7 +658,7 @@ r.method("bool opEquals(const string &in) const",asFUNCTION(equals));
 r.method("int opCmp(const string &in) const",asFUNCTION(compare));
 // s[i] is read-only (spec 8.1): a get-only index accessor, so an assignment to s[i] is a compile error rather than a write
 // to a temporary. The engine's default accessor mode (3) only takes functions declared with "property" as accessors.
-r.method("string get_opIndex(int) const property",asFUNCTION(guarded<&char_at>::call));
+r.method("string get_opIndex(int) const property",asFUNCTION(StringBindingAccess::char_at));
 r.value<std::int8_t>("int8");
 r.value<std::int16_t>("int16");
 r.value<std::int32_t>("int");

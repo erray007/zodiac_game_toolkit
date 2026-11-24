@@ -462,6 +462,18 @@ String(const char* bytes,std::size_t size,std::uint32_t meta)
 {
 init(bytes,size,meta);
 }
+// One ASCII byte (below 0x80), inline, its count and ASCII flag known: the script s[i] on ASCII text (StringBindingAccess), with no
+// copy loop and no allocation.
+struct OneAsciiByte {
+char value;
+};
+explicit String(OneAsciiByte byte) noexcept
+{
+rep_.storage.buffer[0]=byte.value;
+rep_.storage.buffer[1]='\0';
+rep_.size=1;
+rep_.meta=1|meta_ascii;
+}
 bool is_heap() const noexcept
 {
 return (rep_.size&heap_bit)!=0;

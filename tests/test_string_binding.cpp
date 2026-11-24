@@ -109,6 +109,12 @@ CHECK(holds(fixture,"\"\".empty()&&!\"a\".empty()"));
 CHECK(holds(fixture,"\"a\\x00b\".byte_length()==3&&\"a\\x00b\".length()==3"));
 CHECK(error_of(fixture,"string s=\"abc\"[3];")=="index out of range");
 CHECK(error_of(fixture,"string s=\"abc\"[-1];")=="index out of range");
+// s[i] on text already known to be ASCII (length() scanned it) takes the one-byte leaf: its edges, heap text, and the strings it makes.
+CHECK(error_of(fixture,"string t=\"abc\";int n=t.length();string s=t[n];")=="index out of range");
+CHECK(error_of(fixture,"string t=\"abc\";int n=t.length();string s=t[-1];")=="index out of range");
+REQUIRE(fixture.run("bool main(){string t=\"a text long enough to live on the heap\";int n=t.length();string c=t[n-1];string d=t[0]+t[2];"
+"return c==\"p\"&&c.length()==1&&c.byte_length()==1&&d==\"at\"&&!t[1].empty()&&t[1]==\" \"&&(t[0]+\"!\")==\"a!\";}","bool main()")==asEXECUTION_FINISHED);
+CHECK(fixture.context->GetReturnByte()!=0);
 CHECK(error_of(fixture,"uint c=\"abc\".code_at(3);")=="index out of range");
 CHECK(error_of(fixture,"uint8 b=\"\xC5\x9F\".byte_at(2);")=="index out of range");
 }

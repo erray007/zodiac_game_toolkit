@@ -20,7 +20,7 @@ on:
         description: "bench_types --rounds"
         default: "101"
       ops:
-        description: "operations, separated by spaces (empty: every gated operation)"
+        description: "operations, separated by spaces, or all (every gated operation)"
         default: "string_byte_ascii string_length_ascii string_code_ascii string_index_ascii string_find_ascii math_sqrt dict_lookup_10 dict_iterate_10 array_find_string array_insert_last_string"
       variants:
         description: "builds, separated by spaces: label=cmake options separated by commas (on top of every study option reset)"
@@ -110,7 +110,7 @@ jobs:
           args=(--copies "$COPIES" --runs "$RUNS" --rounds "$ROUNDS")
           read -r -a variants <<< "$VARIANTS"
           for variant in "${variants[@]}"; do label=${variant%%=*}; args+=(--variant "$label=builds/$label/bench_types.exe"); done
-          if [ -z "$OPS" ]; then mapfile -t names < <("builds/${variants[0]%%=*}/bench_types.exe" --list | tr -d '\r'); else read -r -a names <<< "$OPS"; fi
+          if [ -z "$OPS" ] || [ "$OPS" = all ]; then mapfile -t names < <("builds/${variants[0]%%=*}/bench_types.exe" --list | tr -d '\r'); else read -r -a names <<< "$OPS"; fi
           for op in "${names[@]}"; do args+=(--op "$op"); done
           python -I tools/bench_placement.py "${args[@]}" --bench-arg=--calibrate --bench-arg=time --out-dir placement
       - name: Upload the runs
