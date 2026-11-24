@@ -76,8 +76,8 @@ class String;
 #if defined(ZODIAC_TEST_HOOKS)
 namespace testing {
 // Test hook (ZODIAC_TEST_HOOKS trees only): time stamp counter cycles spent in each step of making and freeing array<string>
-// arrays through create_strings (dictionary keys()), summed over every such array of the calling process. Not synchronized:
-// benches read it from the one thread that runs the scripts.
+// arrays through create_strings (dictionary keys()), summed per thread (thread_local): each thread's arrays add to that thread's
+// sums, and a bench reads those of the thread that runs its scripts.
 struct StringArraySteps {
 std::uint64_t arrays;
 std::uint64_t array_malloc;

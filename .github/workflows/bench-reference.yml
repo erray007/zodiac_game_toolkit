@@ -1,0 +1,147 @@
+# Bench placement and interference experiment (Task 5b fix round 3), report-only and never part of the gate (tools/bench_reference.py). On
+# each runner: the release bench built 6 times, differing only by a no-op relink (ZODIAC_BENCH_PAD: 0, 16, 32, 48, 80 and 112 unused nop
+# bytes), each run --reference-only (the add-on side alone), --zodiac-only and mixed; on Windows also a hooks build whose Zodiac side can use a
+# private heap (ZODIAC_PRIVATE_HEAP=1). The tables are in each job's log and the runs in the artifact bench-reference-<os>-<n>. Trigger:
+#   gh workflow run bench-reference.yml --ref <branch> [-f rounds=101]
+name: bench-reference
+
+on:
+  # Registers the workflow (GitHub dispatches a workflow off the default branch only once a push has); only a push of this file starts it.
+  push:
+    paths:
+      - .github/workflows/bench-reference.yml
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "bench_types --rounds"
+        default: "101"
+
+permissions:
+  contents: read
+
+env:
+  ROUNDS: ${{ inputs.rounds || '101' }}
+  OPS: string_byte_ascii string_length_ascii dict_iterate_10 array_find_string math_sqrt string_find_ascii array_sort_int
+  PADS: 0 16 32 48 80 112
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4]
+    runs-on: windows-latest
+    # Seven release builds (one full, five relinks, one hooks tree: about 40 minutes) and about 90 short bench runs fit with a margin.
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the hooks bench
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release -B build/hooks -DZODIAC_TEST_HOOKS=ON
+          .tools/cmake/bin/cmake --build build/hooks --target bench_types
+      - name: Build the no-op relink variants
+        run: |
+          mkdir -p variants
+          for pad in $PADS; do
+            .tools/cmake/bin/cmake --preset windows-release "-DZODIAC_BENCH_PAD=$pad" > /dev/null
+            .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+            mkdir -p "variants/v$pad"
+            cp build/windows-release/tests/bench/bench_types.exe build/windows-release/tests/bench/bench_types.exe.map "variants/v$pad/"
+          done
+      - name: Show the CPU
+        shell: pwsh
+        run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
+      - name: Experiment
+        run: |
+          args=()
+          for pad in $PADS; do args+=(--variant "v$pad=variants/v$pad/bench_types.exe"); done
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do args+=(--op "$op"); done
+          python -I tools/bench_reference.py "${args[@]}" --hooks build/hooks/tests/bench/bench_types.exe --out-dir bench-reference --rounds "$ROUNDS"
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-reference-windows-${{ matrix.job }}
+          path: bench-reference
+          if-no-files-found: ignore
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-linux-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Install and select clang 18 with libc++, lld and the LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev lld-18 llvm-18
+          echo "CC=clang-18" >> "$GITHUB_ENV"
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the no-op relink variants
+        run: |
+          mkdir -p variants
+          for pad in $PADS; do
+            .tools/cmake/bin/cmake --preset linux-release "-DZODIAC_BENCH_PAD=$pad" > /dev/null
+            .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
+            mkdir -p "variants/v$pad"
+            cp build/linux-release/tests/bench/bench_types build/linux-release/tests/bench/bench_types.map "variants/v$pad/"
+          done
+      - name: Show the CPU
+        run: lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)|MHz|cache'
+      - name: Experiment
+        run: |
+          args=()
+          for pad in $PADS; do args+=(--variant "v$pad=variants/v$pad/bench_types"); done
+          read -r -a names <<< "$OPS"
+          for op in "${names[@]}"; do args+=(--op "$op"); done
+          python -I tools/bench_reference.py "${args[@]}" --out-dir bench-reference --rounds "$ROUNDS"
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-reference-linux
+          path: bench-reference
+          if-no-files-found: ignore

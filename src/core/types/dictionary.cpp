@@ -3,6 +3,7 @@
 #include <core/types/dictionary.hpp>
 #include <core/text.hpp>
 #include <core/types/array.hpp>
+#include <core/types/heap.hpp>
 #include <core/types/script_guard.hpp>
 #include <algorithm>
 #include <atomic>
@@ -487,13 +488,23 @@ static_assert(sizeof(Entry)==64&&sizeof(Slot)==16);
 Dictionary::~Dictionary()
 {
 // Nothing can reach a dictionary being destroyed, so the values are released in place.
-std::free(index_);
+heap::release(index_);
 for(int segment=0;segment<segment_count&&segments_[segment];++segment){
 Entry* block=segments_[segment];
 const std::uint32_t size=first_segment_size<<segment;
 for(std::uint32_t at=0;at<size;++at)block[at].~Entry();
-::operator delete(block,std::align_val_t{alignof(Entry)});
+heap::release_aligned(block,alignof(Entry));
 }
+}
+
+void* Dictionary::operator new(std::size_t size)
+{
+return heap::allocate_aligned_or_throw(size,alignof(Dictionary));
+}
+
+void Dictionary::operator delete(void* block) noexcept
+{
+heap::release_aligned(block,alignof(Dictionary));
 }
 
 Dictionary* Dictionary::create(DictionaryCache& cache)
@@ -527,7 +538,7 @@ void Dictionary::add_segment()
 const unsigned segment=static_cast<unsigned>(std::bit_width((capacity_/first_segment_size)+1))-1;
 if(segment>=static_cast<unsigned>(segment_count))throw std::bad_alloc();
 const std::uint32_t size=first_segment_size<<segment;
-auto* block=static_cast<Entry*>(::operator new(sizeof(Entry)*size,std::align_val_t{alignof(Entry)},std::nothrow));
+auto* block=static_cast<Entry*>(heap::allocate_aligned(sizeof(Entry)*size,alignof(Entry)));
 if(!block)throw std::bad_alloc();
 for(std::uint32_t at=0;at<size;++at)new(block+at) Entry{String(),DictionaryValue(),free_mark,no_entry};
 segments_[segment]=block;
@@ -536,7 +547,7 @@ capacity_+=size;
 
 void Dictionary::rehash(std::uint32_t size)
 {
-auto* slots=static_cast<Slot*>(std::calloc(size,sizeof(Slot)));
+auto* slots=static_cast<Slot*>(heap::allocate_zeroed(size,sizeof(Slot)));
 if(!slots)throw std::bad_alloc();
 Slot* const old=index_;
 const std::uint32_t old_size=old?mask_+1:0;
@@ -550,7 +561,7 @@ std::uint32_t position=home(slot.hash);
 while(slots[position].entry)position=(position+1)&mask_;
 slots[position]=slot;
 }
-std::free(old);
+heap::release(old);
 }
 
 void Dictionary::reserve(std::uint32_t count)

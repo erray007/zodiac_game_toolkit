@@ -32,6 +32,7 @@
 // native fast paths are in array_fast_paths.cpp.
 #include <core/types/array.hpp>
 #include <core/types/script_guard.hpp>
+#include <core/types/heap.hpp>
 #include <core/types/string.hpp>
 #include <core/types/string_binding.hpp>
 #if defined(ZODIAC_TEST_HOOKS)
@@ -469,7 +470,19 @@ namespace {
 // a script that makes and drops arrays in a loop (dictionary keys(), split) then never reaches the C heap for them. Measured on
 // CI's Windows runners (Task 5b fix round 2): in some processes the Windows heap took about 6000 TSC cycles (2-2.5 us) for every
 // malloc of this one size, against 80 in others, which doubled dict_iterate_10; the other sizes keys() allocates stayed fast.
-// Any thread may free any array: a block goes to the cache of the thread that frees it.
+// Any thread may free any array: a block goes to the cache of the thread that frees it. Under AddressSanitizer the cache is
+// bypassed, so use after free and leaks of arrays stay visible to it.
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool array_cache_on=false;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool array_cache_on=false;
+#else
+constexpr bool array_cache_on=true;
+#endif
+#else
+constexpr bool array_cache_on=true;
+#endif
 constexpr int array_block_limit=32;
 struct ArrayBlocks {
 void* blocks[array_block_limit];
@@ -482,33 +495,34 @@ thread_local ArrayBlocks array_blocks{};
 ArrayBlocks::~ArrayBlocks()
 {
 array_blocks_closed=true;
-while(count>0)std::free(blocks[--count]);
+while(count>0)heap::release(blocks[--count]);
 }
 void* take_array_block() noexcept
 {
-if(!array_blocks_closed){
+if(array_cache_on&&!array_blocks_closed){
 ArrayBlocks& cache=array_blocks;
 if(cache.count>0)return cache.blocks[--cache.count];
 }
-return std::malloc(sizeof(ScriptArray));
+return heap::allocate(sizeof(ScriptArray));
 }
 void give_array_block(void* block) noexcept
 {
-if(!array_blocks_closed){
+if(array_cache_on&&!array_blocks_closed){
 ArrayBlocks& cache=array_blocks;
 if(cache.count<array_block_limit){
 cache.blocks[cache.count++]=block;
 return;
 }
 }
-std::free(block);
+heap::release(block);
 }
 }
 
 #if defined(ZODIAC_TEST_HOOKS)
 testing::StringArraySteps& testing::string_array_steps() noexcept
 {
-static StringArraySteps steps{};
+// Per thread, so arrays made and freed on several threads never race on the sums.
+thread_local StringArraySteps steps{};
 return steps;
 }
 namespace {
@@ -571,7 +585,7 @@ for(std::uint32_t index=0;index<count_;++index){
 if(void* pointer=load_pointer(slot(index)))owner->ReleaseScriptObject(pointer,element_type);
 }
 }
-std::free(data_);
+heap::release(data_);
 ZODIAC_STEP_IF(timed,slots_free);
 type_->Release();
 ZODIAC_STEP_IF(timed,type_release);
@@ -800,13 +814,13 @@ raise(memory_error);
 return false;
 }
 if(capacity==0){
-std::free(data_);
+heap::release(data_);
 data_=nullptr;
 capacity_=0;
 return true;
 }
 // Elements are primitives or pointers, so moving the block moves them.
-void* memory=std::realloc(data_,static_cast<std::size_t>(capacity)*element_size_);
+void* memory=heap::reallocate(data_,static_cast<std::size_t>(capacity)*element_size_);
 if(!memory){
 raise(memory_error);
 return false;
@@ -826,7 +840,7 @@ return false;
 // Doubling keeps appends amortized O(1); when the doubled block cannot be had, the exact size is tried.
 const std::uint32_t doubled=capacity_<max_elements/2?std::max<std::uint32_t>(capacity_*2,8):max_elements;
 const std::uint32_t wanted=std::max(needed,doubled);
-if(void* memory=std::realloc(data_,static_cast<std::size_t>(wanted)*element_size_)){
+if(void* memory=heap::reallocate(data_,static_cast<std::size_t>(wanted)*element_size_)){
 data_=static_cast<std::byte*>(memory);
 capacity_=wanted;
 return true;
@@ -912,7 +926,7 @@ asIScriptEngine* owner=engine();
 asITypeInfo* element_type=sub_type();
 constexpr std::uint32_t local_size=16;
 void* local[local_size];
-void** removed=count<=local_size?local:static_cast<void**>(std::malloc(static_cast<std::size_t>(count)*sizeof(void*)));
+void** removed=count<=local_size?local:static_cast<void**>(heap::allocate(static_cast<std::size_t>(count)*sizeof(void*)));
 if(!removed){
 // Without memory for the list the slots are cleared and released in place, the add-on's order.
 for(std::uint32_t index=0;index<count;++index){
@@ -933,7 +947,7 @@ count_-=count;
 for(std::uint32_t index=0;index<count;++index){
 if(removed[index])owner->ReleaseScriptObject(removed[index],element_type);
 }
-if(removed!=local)std::free(removed);
+if(removed!=local)heap::release(removed);
 }
 
 void ScriptArray::reserve(int capacity) noexcept
@@ -948,7 +962,7 @@ if(static_cast<std::uint32_t>(capacity)>capacity_)set_capacity(static_cast<std::
 bool ScriptArray::try_reserve(int capacity) noexcept
 {
 if(capacity<=static_cast<int>(capacity_))return true;
-void* memory=std::realloc(data_,static_cast<std::size_t>(capacity)*element_size_);
+void* memory=heap::reallocate(data_,static_cast<std::size_t>(capacity)*element_size_);
 if(!memory)return false;
 data_=static_cast<std::byte*>(memory);
 capacity_=static_cast<std::uint32_t>(capacity);
@@ -1074,7 +1088,7 @@ return;
 const std::uint32_t count=values.count_;
 if(!count)return;
 // Copies first (values may be this array), then one move into place.
-auto* copies=static_cast<std::byte*>(std::malloc(static_cast<std::size_t>(count)*element_size_));
+auto* copies=static_cast<std::byte*>(heap::allocate(static_cast<std::size_t>(count)*element_size_));
 if(!copies){
 raise(memory_error);
 return;
@@ -1096,7 +1110,7 @@ std::memcpy(slot(static_cast<std::uint32_t>(index)),copies,static_cast<std::size
 }else{
 for(std::uint32_t at=0;at<made;++at)destroy_slot(copies+static_cast<std::size_t>(at)*element_size_);
 }
-std::free(copies);
+heap::release(copies);
 }
 
 void ScriptArray::insert_last(const void* value) noexcept
@@ -1232,7 +1246,7 @@ if(count<2)return true;
 // may read it. The array is busy meanwhile (no element can be destroyed) and handles are counted for the duration, so a
 // compare that replaces handles cannot free them either.
 using Slot=CallLess::Slot;
-auto* order=static_cast<Slot*>(std::malloc(static_cast<std::size_t>(count)*sizeof(Slot)));
+auto* order=static_cast<Slot*>(heap::allocate(static_cast<std::size_t>(count)*sizeof(Slot)));
 if(!order){
 raise(memory_error);
 return false;
@@ -1276,7 +1290,7 @@ for(std::uint32_t index=0;index<count;++index){
 if(void* pointer=load_pointer(&order[index]))owner->ReleaseScriptObject(pointer,element_type);
 }
 }
-std::free(order);
+heap::release(order);
 // Raised after the calls have ended, so the exception lands on the caller's context.
 if(changed)raise(changed_error);
 return !stopped;

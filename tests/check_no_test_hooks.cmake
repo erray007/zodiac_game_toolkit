@@ -3,7 +3,7 @@
 # The test test_no_test_hooks: the table hash seed hook (platform/entropy.hpp, compiled only with ZODIAC_TEST_HOOKS=ON) is absent from
 # every archive and executable of a tree without it, and present in a tree with it, so the check itself is shown to see it.
 # - ARCHIVES (the cores, zodiac_core and zodiac_core_release; separated by | so the list survives add_test's command line): llvm-nm lists
-#   the symbol test_hook_table_hash_seed (any mangling) iff HOOKS. Each archive must also define fill_entropy, the hook's neighbour, so a
+#   the symbols test_hook_table_hash_seed and string_array_steps (any mangling) iff HOOKS. Each archive must also define fill_entropy, the hook's neighbour, so a
 #   listing that read nothing cannot pass. Release archives hold LLVM bitcode (full LTO), which llvm-nm reads.
 # - BINARIES (linked executables, native code): the hook's variable name ZODIAC_TABLE_HASH_SEED, the text it reads the environment with,
 #   is in the file iff HOOKS. Each must also hold "zodiac-dictionary 1" (serialize()'s header, in every core), so a read that found no
@@ -28,13 +28,17 @@ endif()
 if(NOT symbols MATCHES "[0-9a-fA-F-]+ +T +[^\r\n]*fill_entropy")
 message(FATAL_ERROR "check_no_test_hooks: ${NM} listed no definition of fill_entropy in ${archive}, so its symbols were not read")
 endif()
-string(REGEX MATCHALL "[^\r\n]*test_hook_table_hash_seed[^\r\n]*" found "${symbols}")
+# Every hooks-only symbol: the seed hook (platform/entropy.hpp) and keys()'s step sums (types/array.hpp). The private heap of
+# types/heap.hpp is Windows-only and needs no symbol check: outside a Windows hooks tree its functions are inline wrappers.
+foreach(hook test_hook_table_hash_seed string_array_steps)
+string(REGEX MATCHALL "[^\r\n]*${hook}[^\r\n]*" found "${symbols}")
 if(HOOKS AND NOT found)
-string(APPEND failures "\n${archive} lacks the hook symbol test_hook_table_hash_seed in a ZODIAC_TEST_HOOKS tree")
+string(APPEND failures "\n${archive} lacks the hook symbol ${hook} in a ZODIAC_TEST_HOOKS tree")
 elseif(NOT HOOKS AND found)
 list(JOIN found "\n" shown)
-string(APPEND failures "\n${archive} holds the test hook:\n${shown}")
+string(APPEND failures "\n${archive} holds the test hook ${hook}:\n${shown}")
 endif()
+endforeach()
 endforeach()
 foreach(binary IN LISTS binaries)
 if(NOT EXISTS "${binary}")

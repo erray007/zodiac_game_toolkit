@@ -8,3 +8,8 @@ zodiac_target_warnings(bench_types)
 # A link map (bench_types.map beside the executable), so CI can find a function in the stripped, LTO-linked release binary and print
 # its disassembly (the byte_at leaf's placement, Task 5b). Nothing ships it: bench_types is not part of the kit.
 target_link_options(bench_types PRIVATE "-Wl,-Map=$<TARGET_FILE:bench_types>.map")
+# The placement experiment (bench-reference.yml): -DZODIAC_BENCH_PAD=<bytes> links an unused function of that many nop bytes into the
+# bench, a no-op relink that only moves code. Never set by a preset.
+if(DEFINED ZODIAC_BENCH_PAD AND NOT ZODIAC_BENCH_PAD STREQUAL "0")
+target_compile_definitions(bench_types PRIVATE ZODIAC_BENCH_PAD=${ZODIAC_BENCH_PAD})
+endif()

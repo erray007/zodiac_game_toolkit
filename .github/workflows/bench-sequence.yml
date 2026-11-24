@@ -1,16 +1,11 @@
 # Bench sequence experiment (Task 5b fix round 2), report-only and never part of the gate: on each of 8 Windows runners, the gate's exact
 # bench_types invocation run several times in a row right after the release link, then a hooks build (keys()'s per-step cycles), a heap prewarm
 # arm, a fresh copy and a copy in a folder excluded from Windows Defender (tools/bench_sequence.py). Each job's table is in its log and its runs
-# in the artifact bench-sequence-<n>. Trigger by hand:
+# in the artifact bench-sequence-<n>. Trigger by hand only:
 #   gh workflow run bench-sequence.yml --ref <branch> [-f k=6 -f rounds=101]
-# or by a push that changes this file (GitHub only lets a workflow that is not on the default branch be dispatched once a push has registered
-# it; no other push starts it).
 name: bench-sequence
 
 on:
-  push:
-    paths:
-      - .github/workflows/bench-sequence.yml
   workflow_dispatch:
     inputs:
       k:

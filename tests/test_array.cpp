@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using zodiac_test::ScriptFixture;
@@ -413,6 +414,64 @@ CHECK(words->holds_strings());
 CHECK(static_cast<const zodiac::String*>(words->at(1))->bytes()=="kanka");
 CHECK(static_cast<const zodiac::String*>(words->at(0))->empty());
 words->release();
+}
+
+TEST_CASE("arrays made on one thread are freed on another, and a thread ends with a full block cache")
+{
+ScriptFixture fixture;
+asPrepareMultithread();
+asITypeInfo* strings=fixture.engine->GetTypeInfoByDecl("array<string>");
+asITypeInfo* ints=fixture.engine->GetTypeInfoByDecl("array<int>");
+REQUIRE(strings!=nullptr);
+REQUIRE(ints!=nullptr);
+zodiac::ArrayCache* cache=zodiac::ScriptArray::cache_for(strings);
+REQUIRE(cache!=nullptr);
+// More arrays than one thread's cache holds (32), so both the cache and the allocator take some of them.
+constexpr int count=80;
+std::vector<zodiac::ScriptArray*> made(count,nullptr);
+std::thread maker([&]{
+for(int i=0;i<count;++i){
+if(i%2==0){
+made[i]=zodiac::ScriptArray::create_strings(strings,2,cache);
+if(made[i]){
+made[i]->append_string(zodiac::String("kanka"));
+made[i]->append_string(zodiac::String(std::string(100,'x')));
+}
+}else{
+made[i]=zodiac::ScriptArray::create(ints,3);
+}
+}
+asThreadCleanup();
+});
+maker.join();
+for(int i=0;i<count;++i){
+REQUIRE(made[i]!=nullptr);
+CHECK(made[i]->length()==(i%2==0?2:3));
+if(i%2==0)CHECK(static_cast<const zodiac::String*>(made[i]->at(1))->byte_length()==100);
+}
+// Freed here, so they fill this thread's cache (and the rest go to the allocator).
+for(zodiac::ScriptArray* array:made)array->release();
+// A thread that fills its own cache and ends: its blocks are freed with it, and arrays it freed earlier are reused meanwhile.
+std::thread filler([&]{
+std::vector<zodiac::ScriptArray*> mine;
+for(int round=0;round<3;++round){
+for(int i=0;i<count;++i)mine.push_back(zodiac::ScriptArray::create(ints,1));
+for(zodiac::ScriptArray* array:mine){
+if(array)array->release();
+}
+mine.clear();
+}
+asThreadCleanup();
+});
+filler.join();
+// This thread's cache still hands out usable arrays.
+for(int i=0;i<count;++i){
+zodiac::ScriptArray* array=zodiac::ScriptArray::create_strings(strings,1,cache);
+REQUIRE(array!=nullptr);
+CHECK(array->append_string(zodiac::String("x")));
+CHECK(array->length()==1);
+array->release();
+}
 }
 
 TEST_CASE("handle cycles through arrays are collected and the engine shuts down cleanly")

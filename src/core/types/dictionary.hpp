@@ -67,6 +67,7 @@
 #pragma once
 #include <angelscript.h>
 #include <core/types/string.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -198,6 +199,9 @@ void release_all_references(asIScriptEngine* engine) noexcept;
 
 Dictionary(const Dictionary&)=delete;
 Dictionary& operator=(const Dictionary&)=delete;
+// On Zodiac's heap (core/types/heap.hpp), at the class's 64-byte alignment.
+static void* operator new(std::size_t size);
+static void operator delete(void* block) noexcept;
 private:
 friend class DictionaryWriter;
 friend class DictionaryReader;

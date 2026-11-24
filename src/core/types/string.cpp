@@ -1,6 +1,7 @@
 // zodiac::String (string.hpp): UTF-8 scanning with word-at-a-time ASCII fast paths, the heap block (recycled through a
 // per-thread cache) and its sparse character index, the stable and the keyed table hash, inline short copies, an SSE2
 // substring search, searching on character boundaries, case mapping, NFC runs, and number formatting and parsing.
+#include <core/types/heap.hpp>
 #include <core/types/string.hpp>
 #include <core/types/unicode.hpp>
 #include <platform/entropy.hpp>
@@ -554,6 +555,20 @@ std::uint32_t* index;
 // a short heap string does (a copy, a concatenation, a dictionary key), and scripts make and drop those all the time. A
 // block may be freed on any thread; it then goes to that thread's cache. A thread's cache is freed when the thread ends
 // (at most block_classes*block_cache_depth blocks, about 70 KB); blocks freed after that go straight to the allocator.
+// Under AddressSanitizer the cache is bypassed (blocks go straight to the allocator, size classes kept), so use after free and
+// leaks of string blocks stay visible to it.
+#if defined(__SANITIZE_ADDRESS__)
+#define ZODIAC_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define ZODIAC_UNDER_ASAN 1
+#endif
+#endif
+#if defined(ZODIAC_UNDER_ASAN)
+constexpr bool block_cache_on=false;
+#else
+constexpr bool block_cache_on=true;
+#endif
 constexpr std::size_t block_class_step=16;
 constexpr std::size_t block_cache_limit=256;
 constexpr std::size_t block_classes=block_cache_limit/block_class_step;
@@ -575,7 +590,7 @@ block_cache_closed=true;
 for(FreeBlock* head:heads){
 while(head){
 FreeBlock* next=head->next;
-::operator delete(static_cast<void*>(head));
+heap::release(static_cast<void*>(head));
 head=next;
 }
 }
@@ -594,7 +609,7 @@ if(bytes<=block_cache_limit){
 const std::size_t k=block_class(bytes);
 bytes=(k+1)*block_class_step;
 capacity=static_cast<std::uint32_t>(bytes-sizeof(HeapHeader)-1);
-if(!block_cache_closed){
+if(block_cache_on&&!block_cache_closed){
 BlockCache& cache=block_cache;
 if(FreeBlock* head=cache.heads[k]){
 cache.heads[k]=head->next;
@@ -603,7 +618,7 @@ block=head;
 }
 }
 }
-if(!block)block=::operator new(bytes);
+if(!block)block=heap::allocate_or_throw(bytes);
 auto* header=::new(block) HeapHeader{nullptr};
 return reinterpret_cast<char*>(header+1);
 }
@@ -616,7 +631,7 @@ void free_block(char* ptr,std::uint32_t capacity) noexcept
 {
 void* block=header_of(ptr);
 const std::size_t bytes=sizeof(HeapHeader)+std::size_t{capacity}+1;
-if(bytes<=block_cache_limit&&!block_cache_closed){
+if(block_cache_on&&bytes<=block_cache_limit&&!block_cache_closed){
 BlockCache& cache=block_cache;
 const std::size_t k=block_class(bytes);
 if(cache.counts[k]<block_cache_depth){
@@ -625,7 +640,7 @@ cache.heads[k]=::new(block) FreeBlock{cache.heads[k]};
 return;
 }
 }
-::operator delete(block);
+heap::release(block);
 }
 
 // Number parsing. Clinger's fast path is exact when the significand fits in 53 bits and the power of ten is exact.
@@ -1104,7 +1119,7 @@ rep_.meta=n==0?meta_ascii:meta;
 void String::release() noexcept
 {
 HeapHeader* header=header_of(rep_.storage.heap.ptr);
-if(header->index!=nullptr)::operator delete(header->index);
+if(header->index!=nullptr)heap::release(header->index);
 free_block(rep_.storage.heap.ptr,rep_.storage.heap.capacity);
 }
 
@@ -1112,7 +1127,7 @@ void String::free_index() noexcept
 {
 HeapHeader* header=header_of(rep_.storage.heap.ptr);
 if(header->index!=nullptr){
-::operator delete(header->index);
+heap::release(header->index);
 header->index=nullptr;
 }
 }
@@ -1283,9 +1298,9 @@ const std::uint32_t length=(entries-1)*step+count_chars(last,end,ascii);
 const std::uint32_t needed=(length-1)/step+1;
 if(needed>block[1]){
 const std::uint32_t capacity=std::max(needed,block[1]*2);
-auto* grown=static_cast<std::uint32_t*>(::operator new(sizeof(std::uint32_t)*(std::size_t{capacity}+2)));
+auto* grown=static_cast<std::uint32_t*>(heap::allocate_or_throw(sizeof(std::uint32_t)*(std::size_t{capacity}+2)));
 std::memcpy(grown,block,sizeof(std::uint32_t)*(std::size_t{entries}+2));
-::operator delete(block);
+heap::release(block);
 grown[1]=capacity;
 header->index=block=grown;
 }
@@ -1412,7 +1427,7 @@ HeapHeader* header=header_of(ptr);
 std::uint32_t* block=__atomic_load_n(&header->index,__ATOMIC_ACQUIRE);
 if(block!=nullptr)return block+2;
 const std::uint32_t needed=((load_meta()&meta_length)-1)/step+1;
-auto* built=static_cast<std::uint32_t*>(::operator new(sizeof(std::uint32_t)*(std::size_t{needed}+2)));
+auto* built=static_cast<std::uint32_t*>(heap::allocate_or_throw(sizeof(std::uint32_t)*(std::size_t{needed}+2)));
 built[0]=needed;
 built[1]=needed;
 built[2]=0;
@@ -1425,7 +1440,7 @@ built[2+k]=static_cast<std::uint32_t>(p-begin);
 }
 std::uint32_t* expected=nullptr;
 if(__atomic_compare_exchange_n(&header->index,&expected,built,false,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE))return built+2;
-::operator delete(built);
+heap::release(built);
 return expected+2;
 }
 

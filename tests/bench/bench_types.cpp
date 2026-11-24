@@ -43,6 +43,7 @@
 #include <core/library/library.hpp>
 #include <core/types/array.hpp>
 #include <core/types/dictionary.hpp>
+#include <core/types/heap.hpp>
 #include <core/types/string_binding.hpp>
 #include <scriptarray/scriptarray.h>
 #include <scriptdictionary/scriptdictionary.h>
@@ -77,6 +78,17 @@
 #endif
 #if defined(__x86_64__)
 #include <cpuid.h>
+#endif
+
+#if defined(ZODIAC_BENCH_PAD)&&ZODIAC_BENCH_PAD>0
+// The placement experiment's no-op relink (Task 5b fix round 3, tests/bench/CMakeLists.txt's ZODIAC_BENCH_PAD): an unused function
+// of ZODIAC_BENCH_PAD bytes of nops, kept by the linker, that moves the code laid out after it. Nothing calls it.
+#define ZODIAC_BENCH_TEXT(x) #x
+#define ZODIAC_BENCH_STRING(x) ZODIAC_BENCH_TEXT(x)
+[[gnu::used,gnu::noinline]] void zodiac_bench_placement_pad()
+{
+asm volatile(".fill " ZODIAC_BENCH_STRING(ZODIAC_BENCH_PAD) ",1,0x90");
+}
 #endif
 
 namespace zodiac {
@@ -812,14 +824,26 @@ void check(const Measurement& m,std::int64_t zodiac_sum,std::int64_t addon_sum)
 if(zodiac_sum!=addon_sum)fail(3,m.job->name+": Zodiac's checksum "+std::to_string(zodiac_sum)+" differs from the add-on's "+std::to_string(addon_sum)+" at reps "+std::to_string(m.reps));
 }
 
-// Grows reps until one run of both sides takes at least twice the target (each run doubles as a warm-up).
+// --zodiac-only and --reference-only (the placement experiment of Task 5b fix round 3): only that side runs, with the same
+// engines, contexts, placements, rounds and timing; the output then gives that side's absolute nanoseconds (median, 10th and
+// 90th percentile) instead of a ratio. Both sides are still built, so the process holds the same objects as a gate run.
+enum class OnlySide {both,zodiac,reference};
+OnlySide g_only=OnlySide::both;
+
+// Grows reps until one run of both sides takes at least twice the target (each run doubles as a warm-up); with one side
+// only, until that side's run does.
 void calibrate(Measurement& m,double target_ns)
 {
 for(;;){
 double zodiac_ns=0,addon_ns=0;
+if(g_only!=OnlySide::both){
+if(g_only==OnlySide::zodiac)m.zodiac.run(m.reps,zodiac_ns);
+else m.addon.run(m.reps,addon_ns);
+}else{
 const std::int64_t zodiac_sum=m.zodiac.run(m.reps,zodiac_ns);
 const std::int64_t addon_sum=m.addon.run(m.reps,addon_ns);
 check(m,zodiac_sum,addon_sum);
+}
 const double total=zodiac_ns+addon_ns;
 if(total>=2*target_ns||m.reps>=(1<<24))return;
 const double scale=total>0?2*target_ns/total*1.1:16;
@@ -831,6 +855,16 @@ m.reps=static_cast<int>(std::min<double>(1<<24,std::max<double>(m.reps*2.0,m.rep
 void measure_round(Measurement& m,int round)
 {
 double zodiac_ns=0,addon_ns=0;
+if(g_only!=OnlySide::both){
+if(g_only==OnlySide::zodiac){
+m.zodiac.run(m.reps,zodiac_ns);
+m.zodiac_times.push_back(zodiac_ns);
+}else{
+m.addon.run(m.reps,addon_ns);
+m.addon_times.push_back(addon_ns);
+}
+return;
+}
 std::int64_t zodiac_sum,addon_sum;
 if(round%2==0){
 zodiac_sum=m.zodiac.run(m.reps,zodiac_ns);
@@ -868,9 +902,29 @@ line.append("\n");
 return line;
 }
 
+// The value at fraction q of the sorted values (nearest rank).
+double percentile(std::vector<double> values,double q)
+{
+std::sort(values.begin(),values.end());
+const std::size_t at=static_cast<std::size_t>(q*static_cast<double>(values.size()-1)+0.5);
+return values[std::min(at,values.size()-1)];
+}
+
 std::string result_line(const Measurement& m)
 {
 const double units=static_cast<double>(m.reps)*m.job->items;
+if(g_only!=OnlySide::both){
+const std::vector<double>& times=g_only==OnlySide::zodiac?m.zodiac_times:m.addon_times;
+std::string line="{\"op\":\"";
+line.append(m.job->name).append("\",\"side\":\"").append(g_only==OnlySide::zodiac?"zodiac":"reference").append("\",\"ns\":");
+append_number(line,median(times)/units);
+line.append(",\"p10\":");
+append_number(line,percentile(times,0.1)/units);
+line.append(",\"p90\":");
+append_number(line,percentile(times,0.9)/units);
+line.append("}\n");
+return line;
+}
 std::string line="{\"op\":\"";
 line.append(m.job->name).append("\",\"new_ns\":");
 append_number(line,median(m.zodiac_times)/units);
@@ -1075,13 +1129,15 @@ if(at==jobs.end()||static_cast<std::size_t>(at-jobs.begin())<gated_count)fail(1,
 also.push_back(name);
 }
 else if(arg=="--prewarm-heap")prewarm=true;
+else if(arg=="--zodiac-only")g_only=OnlySide::zodiac;
+else if(arg=="--reference-only")g_only=OnlySide::reference;
 else if(arg=="--out"&&has_value)out_path=argv[++i];
 else if(arg=="--list")list=true;
 else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
 else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--diagnostic] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--target-ms N] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--list]");
 }
 if(list){
 for(const Job& job:jobs)std::printf("%s\n",job.name.c_str());
@@ -1094,6 +1150,7 @@ if(!out)fail(1,std::string("cannot write ")+out_path+": "+std::strerror(errno));
 }
 const Machine machine=this_machine();
 std::fprintf(stderr,"bench_types: machine: %s, %u logical cores, %s\n",machine.cpu.c_str(),machine.logical_cores,machine.os.c_str());
+std::fprintf(stderr,"bench_types: zodiac heap: %s\n",zodiac::heap::private_heap()?"private (ZODIAC_PRIVATE_HEAP=1)":"the C runtime's");
 {
 const std::string line=machine_line(machine);
 std::fwrite(line.data(),1,line.size(),stdout);
@@ -1134,7 +1191,7 @@ std::fwrite(line.data(),1,line.size(),stderr);
 }
 if(g_count_faults){
 for(const Measurement& m:measurements){
-const double runs=static_cast<double>(m.ratios.size());
+const double runs=static_cast<double>(std::max<std::size_t>(1,std::max(m.zodiac_times.size(),m.addon_times.size())));
 char line[256];
 std::snprintf(line,sizeof line,"bench_types: faults %s zodiac %llu addon %llu (per timed run %.2f and %.2f, %d reps each)",m.job->name.c_str(),static_cast<unsigned long long>(m.zodiac.faults),static_cast<unsigned long long>(m.addon.faults),static_cast<double>(m.zodiac.faults)/runs,static_cast<double>(m.addon.faults)/runs,m.reps);
 std::string text=line;
