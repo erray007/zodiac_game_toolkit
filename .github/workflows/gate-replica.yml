@@ -1,0 +1,69 @@
+# Gate replica (Task 5b fix round 4), report-only: the Windows gate's add-on part exactly as ci.yml runs it (3 bench processes with
+# --calibrate time, gated on the median ratio per operation by tools/check_bench.py) on 8 runners at once, to see each CPU model's results
+# without re-running the whole CI. Trigger: gh workflow run gate-replica.yml --ref <branch>
+name: gate-replica
+
+on:
+  # Registers the workflow (GitHub dispatches a workflow off the default branch only once a push has); only a push of this file starts it.
+  push:
+    paths:
+      - .github/workflows/gate-replica.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-windows-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the benchmark on the release preset
+        run: |
+          .tools/cmake/bin/cmake --preset windows-release
+          .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
+      - name: Gate replica
+        run: |
+          bench=build/windows-release/tests/bench/bench_types.exe
+          "$bench" --list > bench-ops.txt
+          for n in 1 2 3; do "$bench" --detail --faults --layout --calibrate time --out "bench-$n.json" 2> "bench-$n-stderr.txt"; done
+          status=0
+          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt || status=$?
+          echo "check_bench exit code $status (report-only)"
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-replica-${{ matrix.job }}
+          path: |
+            bench*.json
+            bench*-stderr.txt
+          if-no-files-found: ignore
