@@ -26,7 +26,9 @@ set(link -flto -Wl,--gc-sections -s -Wl,--icf=safe)
 # at compile time, which the bitcode keeps, and the LTO code generator's -align-all-functions at the link). "blocks": that, plus every block
 # not entered by fall-through and every loop on 32 bytes at the link (the VM's computed-goto handlers in asCContext::ExecuteNext are such
 # blocks). Empty: neither. The link options are in the captured game link line too, so games are laid out like the kit.
-set(ZODIAC_RELEASE_CODE_ALIGN "" CACHE STRING "Release code alignment: empty, functions or blocks")
+# blocks is the default (placement-study 45582108121, 8 Windows runners, 4 relink layouts each): the spread of an operation's time across
+# layouts fell from a 90th percentile of 6.8 % to 4.1 %, and every operation got faster or stayed (geometric mean 0.966, slowest 1.007).
+set(ZODIAC_RELEASE_CODE_ALIGN "blocks" CACHE STRING "Release code alignment: empty, functions or blocks")
 set_property(CACHE ZODIAC_RELEASE_CODE_ALIGN PROPERTY STRINGS "" functions blocks)
 if(ZODIAC_RELEASE_CODE_ALIGN STREQUAL "functions" OR ZODIAC_RELEASE_CODE_ALIGN STREQUAL "blocks")
 list(APPEND compile -falign-functions=64)

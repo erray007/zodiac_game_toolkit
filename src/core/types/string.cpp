@@ -570,7 +570,9 @@ constexpr std::uint32_t block_cache_depth=32;
 #if defined(ZODIAC_STRING_BLOCK_CACHE_TOP)
 constexpr std::size_t block_cache_top=ZODIAC_STRING_BLOCK_CACHE_TOP;
 #else
-constexpr std::size_t block_cache_top=256;
+// 4 KB (Task 5c fix round 2, placement-study 45582113234 and 45587237177): against 256, string_concat_append 0.94, string_replace 0.87
+// and the game loop's median frame 0.96 on Windows; 8 and 16 KB gained nothing more within the noise and hold 65 or 196 KB more per thread.
+constexpr std::size_t block_cache_top=4096;
 #endif
 static_assert(block_cache_top==block_cache_limit||(std::has_single_bit(block_cache_top)&&block_cache_top>block_cache_limit&&block_cache_top<=65536),
 "the top of String's block cache is 256 or a power of two from 512 to 65536");

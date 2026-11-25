@@ -102,8 +102,9 @@ jobs:
               .tools/cmake/bin/cmake --build "build/$label" --target bench_types
               cp "build/$label/tests/bench/bench_types.exe" "build/$label/tests/bench/bench_types.exe.map" "builds/$label/"
             else
-              # Every study option back to its default first, then this variant's (commas between options).
-              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR= -DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN= -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
+              # Every study option back to its default first (the release code alignment's is blocks), then this variant's (commas between
+              # options; -DZODIAC_RELEASE_CODE_ALIGN= for none).
+              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR= -DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN=blocks -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
               IFS=, read -r -a extra <<< "$spec"
               options+=("${extra[@]}")
               echo "== $label: ${options[*]}"
@@ -174,7 +175,7 @@ jobs:
             label=${variant%%=*}
             spec=${variant#*=}
             if [ "${spec:0:1}" = "@" ]; then echo "== $label: a commit variant, Windows only"; continue; fi
-            options=(-DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN= -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
+            options=(-DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN=blocks -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
             IFS=, read -r -a extra <<< "$spec"
             options+=("${extra[@]}")
             echo "== $label: ${options[*]}"
