@@ -107,7 +107,8 @@ def main(argv=None) -> int:
             folder = args.out_dir / "copies" / f"{label}-{index + 1}"
             folder.mkdir(parents=True, exist_ok=True)
             target = folder / exe.name
-            shutil.copyfile(exe, target)
+            # With the mode, so a copy stays executable on Linux.
+            shutil.copy2(exe, target)
             copies[(label, index + 1)] = target
     records = []
     games = []
