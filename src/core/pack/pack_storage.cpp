@@ -329,10 +329,13 @@ std::shared_ptr<PackStorage> PackStorage::share(std::unique_ptr<PackStorage> sto
 // The last holder closes the storage (flushing it) and reports a failure there is no one else to tell.
 return std::shared_ptr<PackStorage>(storage.release(),[](PackStorage* released) noexcept{
 try{
-if(auto closed=released->close();!closed&&released->log_){
+if(auto closed=released->close();!closed){
+const std::lock_guard guard(released->log_mutex_);
+if(released->log_){
 std::string line="error: cannot write \"";
 line.append(one_line(released->log_name_)).append("\": ").append(vfs::reason_text(closed.error()));
 released->log_(line);
+}
 }
 }
 catch(...){
@@ -429,6 +432,11 @@ if(!created){
 if(created.error().in_use)return std::unexpected(std::move(created.error()));
 discard();
 return std::unexpected(std::move(created.error()));
+}
+// The new name reaches the device too (POSIX; nothing on Windows), else a crash could lose the whole new pack.
+if(const std::error_code synced=platform::sync_directory(host.parent_path())){
+discard();
+return std::unexpected(system_failure(FileAction::write,synced));
 }
 return storage;
 }
@@ -1000,11 +1008,14 @@ dirty_=false;
 truncate_pending_=false;
 {
 const std::unique_lock lock(mutex_);
-file_=std::move(next);
+file_.swap(next);
 entries_.swap(fresh);
 wasted_=0;
 }
-// The old entries (fresh now) are freed outside the lock.
+// The old file (next now) stays open for its readers but is no longer written: its lock goes. The old entries (fresh now) are
+// freed outside the lock.
+next->unlock();
+next.reset();
 fresh.clear();
 if(const std::error_code synced=platform::sync_directory(host_.parent_path()))return std::unexpected(file_error(synced));
 return {};
@@ -1051,6 +1062,8 @@ entries_.swap(dropped);
 files_=0;
 file_.swap(file);
 }
+// Readers may keep the file open a long time; the lock covers only the storage's writable life, so it goes now.
+if(file&&!read_only_)file->unlock();
 }
 unregister();
 return result;
@@ -1064,7 +1077,8 @@ return !closed_;
 
 void PackStorage::set_log(std::string name,Log log)
 {
-const std::lock_guard writing(writer_mutex_);
+// Its own mutex, so an open never waits for a write (a compact) in progress.
+const std::lock_guard guard(log_mutex_);
 if(log_)return;
 log_name_=std::move(name);
 log_=std::move(log);

@@ -270,6 +270,15 @@ if(GetLastError()==ERROR_LOCK_VIOLATION)return false;
 return std::unexpected(last_error());
 }
 
+void File::unlock() noexcept
+{
+OVERLAPPED at{};
+at.Offset=0xFFFFFFFEu;
+at.OffsetHigh=0xFFFFFFFFu;
+// Fails harmlessly (ERROR_NOT_LOCKED) when the byte is not locked.
+UnlockFileEx(handle_of(handle_),0,1,0,&at);
+}
+
 bool File::sync() noexcept
 {
 return FlushFileBuffers(handle_of(handle_))!=0;

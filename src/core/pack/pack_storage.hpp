@@ -8,15 +8,18 @@
 //
 // Opening (open):
 // - A new pack (create, and nothing at host; never with a window) gets a random salt, PackOptions' settings (std::invalid_argument
-//   outside the header's limits) and at once its header, an empty index and a footer, made durable as flush does. A failure
-//   removes the file it made.
+//   outside the header's limits) and at once its header, an empty index and a footer, made durable as flush does, and its
+//   folder is flushed (POSIX) so the new name is durable too. A failure removes the file it made.
 // - An existing pack is opened for reading and writing, or for reading only when the system refuses writing (access denied:
 //   read_only() is then true). With window the pack lies at window->offset for window->size bytes of the file (a pack inside an
 //   executable): it is read only, every offset in it is relative to window->offset, and nothing outside the window is read.
-// - A pack opened for writing takes the file's exclusive lock (platform::File::lock_exclusive) for as long as the storage holds
-//   the file: when another program (another process's storage) holds it, the open fails with PackError::in_use (text
-//   `"<host path>" is in use by another program`; the script names its own path). A file system that cannot lock is used
-//   unlocked. Read-only opens take no lock and are never refused for one.
+// - A pack opened for writing takes the file's exclusive lock (platform::File::lock_exclusive) for its writable life: from the
+//   open to close (or the last release), released then with File::unlock even while readers keep the file open, and moved to
+//   the new file by compact (the old one is unlocked). When another program (another process's storage) holds it, the open
+//   fails with PackError::in_use (text `"<host path>" is in use by another program`; the script names its own path). A file
+//   system that cannot lock is used unlocked. Read-only opens take no lock and are never refused for one. On Linux NFS, flock is
+//   emulated with POSIX record locks, which belong to the process, so two opens in one process may not conflict there (the
+//   registry already keeps one storage per file per process); other processes still do.
 // - The header is decoded first: a newer version is PackError text kNewerFormatText, anything else wrong kWrongKeyText, before
 //   any key is derived. A key derivation that throws (settings out of range, std::bad_alloc) is kWrongKeyText too.
 // - The footer is the window's last kFooterSize bytes when they are complete (inspect_footer). A footer whose whole magic is
@@ -213,6 +216,8 @@ std::uint64_t index_length_=0;
 bool dirty_=false;
 // The file holds bytes past end_ (a recovered crash, a failed write): the next append truncates it first.
 bool truncate_pending_=false;
+// set_log's, behind a mutex of its own (an open never waits for a write in progress).
+std::mutex log_mutex_;
 std::string log_name_;
 Log log_;
 // What lookups read: changed only with writer_mutex_ held and this taken exclusively, so a writer reads it without this.

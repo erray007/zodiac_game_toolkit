@@ -432,6 +432,14 @@ std::string changed=good;
 changed[at]=static_cast<char>(changed[at]^0xFF);
 CHECK(open_error(variant(changed+data_of(40,at)),key)==pack::kWrongKeyText);
 }
+// A complete newest footer over an index that fails authentication, behind junk: the scan takes that footer and refuses it,
+// never skipping to an older one.
+for(const std::size_t back:{std::size_t{1},std::size_t{17},std::size_t{30}}){
+CAPTURE(back);
+std::string changed=good;
+changed[footer-back]=static_cast<char>(changed[footer-back]^0x01);
+CHECK(open_error(variant(changed+data_of(40,back)),key)==pack::kWrongKeyText);
+}
 // Junk after an unchanged pack (a crash in the next append): the newest flush, untouched.
 const auto storage=reopen(variant(good+data_of(40,9)),key);
 CHECK(names_of(*storage)==std::vector<std::string>{"a","b"});
@@ -746,6 +754,46 @@ REQUIRE(storage->close());
 CHECK(try_lock());
 }
 
+// The lock covers the writable life only: a reader that outlives close (a file object reading an entry) keeps the file open
+// but not locked, so the pack reopens for writing at once; while it is open for writing, another open still finds it locked.
+TEST_CASE("a reader that outlives close keeps no lock, and the pack reopens for writing")
+{
+TempDir dir;
+const fs::path path=dir.path/"reopen.zpk";
+const crypto::Key key=test_key(18);
+std::shared_ptr<zodiac::vfs::Reader> reader;
+{
+const auto storage=make(path,key);
+add(*storage,"a","alpha");
+REQUIRE(storage->flush());
+reader=*storage->open_reader("a");
+REQUIRE(storage->close());
+}
+const auto try_lock=[&]{
+auto probe=zodiac::platform::File::open(path,zodiac::platform::FileAccess::read);
+REQUIRE(probe);
+return *probe->lock_exclusive();
+};
+CHECK(try_lock());
+const auto reopened=pack::PackStorage::open(path,key,false);
+REQUIRE(reopened);
+CHECK_FALSE((*reopened)->read_only());
+CHECK_FALSE(try_lock());
+add(**reopened,"b","beta");
+REQUIRE((*reopened)->flush());
+// The reader still reads its snapshot of the old open.
+std::string bytes(5,'\0');
+CHECK(reader->read_at(0,writable(bytes))==5);
+CHECK(bytes=="alpha");
+// The compacted file is locked and the old one (still read by reader) is not.
+auto old_handle=zodiac::platform::File::open(path,zodiac::platform::FileAccess::read);
+REQUIRE(old_handle);
+REQUIRE((*reopened)->compact());
+CHECK(*old_handle->lock_exclusive());
+old_handle->unlock();
+CHECK_FALSE(try_lock());
+}
+
 // The writer mutex: a lookup never waits for a write's I/O. A thread keeps finding and reading a small entry while another adds a
 // large one and compacts, and makes progress all along.
 TEST_CASE("lookups go on while a large entry is added and the pack is compacted")
@@ -1009,6 +1057,10 @@ REQUIRE(storage->flush());
 for(const auto& [name,bytes]:expected)CHECK(read_ok(*storage,name)==bytes);
 // Appends that fail part way (the second write of chunks fails): the index stays, the ids they took stay used, and the adds
 // after them (over the half-written bytes) seal under new ones.
+// Disarmed however the test ends, so a failed REQUIRE never leaves a write armed to fail for the next test.
+struct Disarm{
+~Disarm(){pack::testing::pack_fail_chunk_write(std::numeric_limits<std::uint64_t>::max());}
+} disarm;
 for(int round=0;round<3;++round){
 pack::testing::pack_fail_chunk_write(1);
 const std::string name="e"+std::to_string(round);

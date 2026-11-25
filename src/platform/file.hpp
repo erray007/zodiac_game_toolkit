@@ -75,6 +75,8 @@ std::expected<FileIdentity,std::error_code> identity() const noexcept;
 // immediately) on the one byte at offset 2^64 - 2, far past any data, so the lock never blocks a read or a write of the file's
 // bytes through any handle (Windows byte-range locks are mandatory for the bytes they cover).
 std::expected<bool,std::error_code> lock_exclusive() noexcept;
+// Releases a lock lock_exclusive took (nothing when there is none), while the File stays open: flock(LOCK_UN), UnlockFileEx.
+void unlock() noexcept;
 // Flushes the file's data and metadata to the device.
 bool sync() noexcept;
 // Flushes the file's written data (and what reading it back needs) to the device: fdatasync (fsync on macOS, whose fdatasync

@@ -160,6 +160,14 @@ if(errno==EWOULDBLOCK)return false;
 return std::unexpected(errno_code(errno));
 }
 
+void File::unlock() noexcept
+{
+int result;
+do{
+result=::flock(static_cast<int>(handle_),LOCK_UN);
+}while(result!=0&&errno==EINTR);
+}
+
 bool File::sync() noexcept
 {
 return ::fsync(static_cast<int>(handle_))==0;
