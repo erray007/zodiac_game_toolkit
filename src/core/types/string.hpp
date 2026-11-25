@@ -137,12 +137,14 @@ String(const char* text):String(std::string_view(text)) {}
 // The inline buffer and the sizes are never written by const members. Inline text is copied here, heap text out of line.
 String(const String& other)
 {
-if(other.is_heap()){
+// The size is read once: it decides the path and is the copy's size (reading it again after the test costs the script copy a load).
+const std::uint32_t size=other.rep_.size;
+if((size&heap_bit)!=0){
 copy_heap(other);
 return;
 }
 rep_.storage=other.rep_.storage;
-rep_.size=other.rep_.size;
+rep_.size=size;
 rep_.meta=other.load_meta();
 }
 String(String&& other) noexcept:rep_(other.rep_)
