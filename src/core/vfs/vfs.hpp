@@ -9,14 +9,17 @@
 // not_found, remove and delete_directory too, and the older mounts are not asked; list leaves the name out of every older
 // mount. rename, copy and move take both sides (see rename).
 // Writes (open_write, write_file, the to side of rename, copy and move, host_file for writing) go, newest first, to the first
-// writable mount, unless a read-only mount before it provides the name: then they fail with read_only_pack (a file there; a
-// folder is is_directory), since the write would be hidden under it; a deletion marker before it provides nothing. When only
-// read-only mounts cover a write, it fails with read_only_pack. Opening "a" or "r+" on a name the mount written lacks but an
-// older mount provides starts the new file with the older one's bytes, so the file continues what the path read. A write
-// target of a source without host files (a pack) stores its bytes only at commit. create_directory goes to the newest writable
-// mount. list merges every covering mount's entries and the folders that lead to deeper mount points by fold: each name once, as
-// the newest mount that has it spells it (every spelling that mount has). A path that only leads to a mount point is a
-// directory. "host:" paths (only parsed when host paths are on) go to the HostSource, which opens them exactly as given.
+// writable mount, unless a read-only mount before it has the name: then they fail with read_only_pack (a file or a deletion
+// marker there; a folder is is_directory), since the write would be hidden under it. When only read-only mounts cover a write,
+// it fails with read_only_pack. Opening "a" or "r+" on a name the mount written lacks but an older mount provides starts the
+// new file with the older one's bytes, so the file continues what the path read (a copy that fails removes the file it made).
+// A write target of a source without host files (a pack) stores its bytes only at commit. remove takes the file from the first
+// mount that has it, asking that source to leave a deletion marker when an older mount still provides the name (a pack does;
+// a folder cannot). create_directory goes to the newest writable mount. list merges every covering mount's entries (every
+// kind) and the folders that lead to deeper mount points by fold: each fold once, decided by the newest mount that has it (as
+// that mount spells it, every spelling it has), listed only when that mount's entry is of the kind asked for; a marker there
+// leaves it out. A path that only leads to a mount point is a directory. "host:" paths (only parsed when host paths are on)
+// go to the HostSource, which opens them exactly as given.
 //
 // Failures: Failure::code is the FileError; Failure::message is set for the failures with a text of their own:
 // - the path rules (bad_path): `"<path>" leaves its mount`, `"<path>" is a host path; set [files] host_paths = true to use it`,
@@ -134,7 +137,9 @@ virtual std::expected<std::unique_ptr<WriteTarget>,FileError> open_write(std::st
 // Appends the entries of folder relative (names, kinds; sizes and times may be 0). Deletion markers are appended too, even
 // when the listing then fails with not_found (a folder that holds only markers): they still hide older names.
 virtual std::expected<void,FileError> list(std::string_view relative,std::vector<EntryInfo>& out)=0;
-virtual std::expected<void,FileError> remove(std::string_view relative)=0;
+// leave_marker: an older mount still provides the name, so a source that holds deletion markers leaves one in the file's place
+// (the name stays gone); a source without markers (a folder) ignores it.
+virtual std::expected<void,FileError> remove(std::string_view relative,bool leave_marker)=0;
 // Creates one folder; succeeds when it already exists. Its parent must exist.
 virtual std::expected<void,FileError> make_directory(std::string_view relative)=0;
 virtual std::expected<void,FileError> remove_directory(std::string_view relative,bool recursive)=0;
@@ -186,11 +191,19 @@ Vfs();
 ~Vfs();
 Vfs(const Vfs&)=delete;
 Vfs& operator=(const Vfs&)=delete;
-// False (nothing mounted) for a mount point that is not a valid VFS folder path (a host path included) or one where owner already
-// has a mount. owner identifies the mount for unmount; nullptr makes it permanent.
-bool mount(std::string_view at,std::shared_ptr<Source> source,bool writable,const void* owner);
-// Removes every mount owner made (none for nullptr) and returns how many. Reads already open keep their sources.
-std::size_t unmount(const void* owner);
+// Why a mount was refused: at is no valid VFS folder path (a host path included) or source is null; owner already has a live
+// mount there; memory (or another internal failure) ran out.
+enum class MountError{bad_point,taken,out_of_memory};
+// Mounts source at at, in front of every mount made before it; nothing is mounted on a failure. owner identifies the mount for
+// unmount; nullptr makes it permanent.
+std::expected<void,MountError> try_mount(std::string_view at,std::shared_ptr<Source> source,bool writable,const void* owner) noexcept;
+// try_mount, false on any failure.
+bool mount(std::string_view at,std::shared_ptr<Source> source,bool writable,const void* owner) noexcept{return try_mount(at,std::move(source),writable,owner).has_value();}
+// Removes every live mount owner made (none for nullptr) and returns how many. It cannot fail: each mount is marked gone (one
+// atomic store) in the table every lookup shares, so lookups through it stop at once, and is then dropped from the table when
+// memory allows (a gone mount that stays is skipped by every lookup, by try_mount's check and by unmount, so an owner reusing
+// the address never inherits it). Reads already open keep their sources.
+std::size_t unmount(const void* owner) noexcept;
 // mount(at, a FolderSource for host, writable, owner); the source is read-only unless writable.
 bool mount_folder(std::string_view at,const std::filesystem::path& host,bool writable,const void* owner=nullptr);
 std::expected<EntryInfo,Failure> stat(std::string_view path);
@@ -268,10 +281,13 @@ std::size_t at_segments=0;
 std::shared_ptr<Source> source;
 bool writable=false;
 const void* owner=nullptr;
+// Cleared by unmount; shared by every table holding the mount.
+mutable std::atomic<bool> live{true};
+bool alive() const noexcept{return live.load(std::memory_order_acquire);}
 };
 struct Table{
-// Oldest first.
-std::vector<Mount> mounts;
+// Oldest first; a table only ever shares mounts (copying it allocates no mount).
+std::vector<std::shared_ptr<const Mount>> mounts;
 };
 // A mount serving a path, and the part of the path below its mount point.
 struct Target{
@@ -284,15 +300,14 @@ Source* source=nullptr;
 const Mount* mount=nullptr;
 std::string_view sub;
 };
-// Where a write of a path goes (see Writes above), and whether a deletion marker above that mount hides the name.
-struct Route{
-Target target;
-bool hidden=false;
-};
 std::shared_ptr<const Table> snapshot() const;
-std::expected<Route,Failure> writing_route(const Table& table,std::string_view path,const VfsPath& p) const;
+// Where a write of a path goes (see Writes above).
+std::expected<Target,Failure> writing_route(const Table& table,std::string_view path,const VfsPath& p) const;
 // The reader of p in the first mount older than newer that has it: null when none has it or a deletion marker hides it.
 std::expected<std::shared_ptr<Reader>,Failure> older_reader(const Table& table,std::string_view path,const VfsPath& p,const Mount* newer) const;
+// Whether a mount older than newer provides p (a file or folder before any deletion marker); an older mount that fails to
+// answer counts as providing it, so a marker is left rather than a file shown again.
+static bool older_provides(const Table& table,const VfsPath& p,const Mount* newer);
 // Writes every byte of in into out from offset 0 on, in 256 KiB pieces; MoveError::to false for a failed read, true for a write.
 static std::expected<void,MoveError> fill(Reader& in,WriteTarget& out);
 // from's side, found as open_read finds it (as remove does when removing: a read-only mount then fails with read_only_pack), and

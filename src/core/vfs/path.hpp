@@ -19,6 +19,7 @@
 //   on such a path fail with is_directory; folder operations and mount points accept it.
 // Each <path> in a message is the path as given, through one_line. Path-rule failures are never wrapped in another message.
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -67,4 +68,7 @@ bool temp_held(std::string_view name);
 std::string fold_name(std::string_view utf8);
 // Appends fold_name(utf8) to out.
 void append_fold(std::string& out,std::string_view utf8);
+// Writes fold_name(utf8) into out (capacity bytes) and returns its length, or SIZE_MAX when it needs more room (out then holds
+// a part). Allocates nothing: lookups fold into a stack buffer this way.
+std::size_t fold_into(std::string_view utf8,char* out,std::size_t capacity) noexcept;
 }

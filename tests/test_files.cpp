@@ -190,7 +190,7 @@ info.name=name;
 }
 return {};
 }
-std::expected<void,FileError> remove(std::string_view relative) override
+std::expected<void,FileError> remove(std::string_view relative,bool) override
 {
 const auto found=files.find(relative);
 if(found==files.end())return std::unexpected(FileError::not_found);

@@ -56,8 +56,9 @@ return static_cast<std::int64_t>(count);
 void PackWriteTarget::reserve(std::size_t size)
 {
 if(size<=capacity_)return;
-const std::size_t grown=capacity_>std::numeric_limits<std::size_t>::max()/2?std::numeric_limits<std::size_t>::max():capacity_*2;
-const std::size_t capacity=std::max({size,grown,std::size_t{4096}});
+// size is at most kMaxPackWriteBytes (the callers check), and so is what the doubling gives.
+const auto cap=static_cast<std::size_t>(kMaxPackWriteBytes);
+const std::size_t capacity=std::max(size,std::min(std::max(capacity_*2,std::size_t{4096}),cap));
 auto bytes=std::make_unique_for_overwrite<std::byte[]>(capacity);
 if(size_)std::memcpy(bytes.get(),bytes_.get(),size_);
 bytes_=std::move(bytes);
@@ -67,7 +68,8 @@ capacity_=capacity;
 std::expected<void,FileError> PackWriteTarget::write_at(std::uint64_t offset,std::span<const std::byte> bytes)
 {
 if(bytes.empty())return {};
-if(offset>std::numeric_limits<std::size_t>::max()-bytes.size())return std::unexpected(FileError::io);
+// Refused before anything is allocated: past the cap there is no room, as on a full disk.
+if(offset>kMaxPackWriteBytes||bytes.size()>kMaxPackWriteBytes-offset)return std::unexpected(FileError::disk_full);
 const auto at=static_cast<std::size_t>(offset);
 const std::size_t end=at+bytes.size();
 reserve(end);
@@ -81,7 +83,7 @@ return {};
 
 std::expected<void,FileError> PackWriteTarget::truncate(std::uint64_t size)
 {
-if(size>std::numeric_limits<std::size_t>::max())return std::unexpected(FileError::io);
+if(size>kMaxPackWriteBytes)return std::unexpected(FileError::disk_full);
 const auto length=static_cast<std::size_t>(size);
 if(length>size_){
 reserve(length);
@@ -110,7 +112,7 @@ return storage_->flush();
 std::expected<void,FileError> PackWriteTarget::load(vfs::Reader& reader)
 {
 const std::uint64_t size=reader.size();
-if(size>std::numeric_limits<std::size_t>::max())return std::unexpected(FileError::io);
+if(size>kMaxPackWriteBytes)return std::unexpected(FileError::disk_full);
 reserve(static_cast<std::size_t>(size));
 std::size_t done=0;
 while(done<size){
@@ -130,7 +132,7 @@ std::expected<vfs::EntryInfo,FileError> stat(std::string_view relative) override
 std::expected<std::shared_ptr<vfs::Reader>,FileError> open_read(std::string_view relative) override;
 std::expected<std::unique_ptr<vfs::WriteTarget>,FileError> open_write(std::string_view relative,WriteMode mode) override;
 std::expected<void,FileError> list(std::string_view relative,std::vector<vfs::EntryInfo>& out) override;
-std::expected<void,FileError> remove(std::string_view relative) override;
+std::expected<void,FileError> remove(std::string_view relative,bool leave_marker) override;
 std::expected<void,FileError> make_directory(std::string_view relative) override;
 std::expected<void,FileError> remove_directory(std::string_view relative,bool recursive) override;
 std::expected<bool,vfs::MoveError> rename(std::string_view from,std::string_view to) override;
@@ -160,9 +162,13 @@ std::expected<std::unique_ptr<vfs::WriteTarget>,FileError> PackSource::open_writ
 {
 if(read_only_)return std::unexpected(FileError::access_denied);
 if(relative.empty())return std::unexpected(FileError::is_directory);
-std::optional<std::string> name=storage_->stored_name(relative);
+// A file below a file, or over a folder, would give the pack a file and a folder of one fold (PackStorage::add refuses it
+// too; refused here, so the open fails rather than the commit).
+const auto place=storage_->place(relative);
+if(!place)return std::unexpected(place.error());
+if(*place==EntryKind::directory)return std::unexpected(FileError::is_directory);
+std::optional<std::string> name=*place==EntryKind::file?storage_->stored_name(relative):std::nullopt;
 if(!name){
-if(const auto info=storage_->stat(relative);info&&info->kind==EntryKind::directory)return std::unexpected(FileError::is_directory);
 if(mode==WriteMode::update)return std::unexpected(FileError::not_found);
 return std::make_unique<PackWriteTarget>(storage_,std::string(relative),true);
 }
@@ -181,10 +187,10 @@ std::expected<void,FileError> PackSource::list(std::string_view relative,std::ve
 return storage_->list_folder(relative,out);
 }
 
-std::expected<void,FileError> PackSource::remove(std::string_view relative)
+std::expected<void,FileError> PackSource::remove(std::string_view relative,bool leave_marker)
 {
 if(read_only_)return std::unexpected(FileError::access_denied);
-const auto removed=storage_->remove(relative);
+const auto removed=storage_->remove(relative,leave_marker);
 if(!removed)return std::unexpected(removed.error());
 if(*removed)return {};
 const auto info=storage_->stat(relative);
@@ -195,7 +201,10 @@ std::expected<void,FileError> PackSource::make_directory(std::string_view relati
 {
 if(read_only_)return std::unexpected(FileError::access_denied);
 if(relative.empty())return {};
-if(const auto info=storage_->stat(relative);info&&info->kind==EntryKind::file)return std::unexpected(FileError::not_a_directory);
+// A folder below a file, or of a file's name, is no folder this pack can have.
+const auto place=storage_->place(relative);
+if(!place)return std::unexpected(place.error());
+if(*place==EntryKind::file)return std::unexpected(FileError::not_a_directory);
 return {};
 }
 

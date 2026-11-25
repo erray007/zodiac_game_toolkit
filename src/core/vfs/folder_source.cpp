@@ -553,7 +553,7 @@ info.fold=name.fold;
 return {};
 }
 
-std::expected<void,FileError> FolderSource::remove(std::string_view relative)
+std::expected<void,FileError> FolderSource::remove(std::string_view relative,bool)
 {
 if(read_only_)return std::unexpected(FileError::access_denied);
 if(relative.empty())return std::unexpected(FileError::is_directory);

@@ -15,7 +15,8 @@ std::expected<EntryInfo,FileError> stat(std::string_view relative) override;
 std::expected<std::shared_ptr<Reader>,FileError> open_read(std::string_view relative) override;
 std::expected<std::unique_ptr<WriteTarget>,FileError> open_write(std::string_view relative,WriteMode mode) override;
 std::expected<void,FileError> list(std::string_view relative,std::vector<EntryInfo>& out) override;
-std::expected<void,FileError> remove(std::string_view relative) override;
+// leave_marker is ignored: host paths have nothing below them.
+std::expected<void,FileError> remove(std::string_view relative,bool leave_marker) override;
 std::expected<void,FileError> make_directory(std::string_view relative) override;
 std::expected<void,FileError> remove_directory(std::string_view relative,bool recursive) override;
 // platform::replace_file; false (copy instead) between volumes.

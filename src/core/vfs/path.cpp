@@ -3,6 +3,7 @@
 #include <core/text.hpp>
 #include <core/types/unicode.hpp>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -91,10 +92,9 @@ default:
 return static_cast<char32_t>(((p[0]&0x07u)<<18)|((p[1]&0x3Fu)<<12)|((p[2]&0x3Fu)<<6)|(p[3]&0x3Fu));
 }
 }
-// to_upper maps scalar values to scalar values, so c is never a surrogate or above U+10FFFF here.
-void append_utf8(std::string& out,char32_t c)
+// to_upper maps scalar values to scalar values, so c is never a surrogate or above U+10FFFF here. Returns the length.
+std::size_t encode_utf8(char32_t c,char (&bytes)[4]) noexcept
 {
-char bytes[4];
 std::size_t size;
 if(c<0x80){
 bytes[0]=static_cast<char>(c);
@@ -118,7 +118,7 @@ bytes[2]=static_cast<char>(0x80|((c>>6)&0x3F));
 bytes[3]=static_cast<char>(0x80|(c&0x3F));
 size=4;
 }
-out.append(bytes,size);
+return size;
 }
 std::string quote_path(std::string_view path,std::string_view rest)
 {
@@ -286,28 +286,61 @@ break;
 return !is_device_stem(name.substr(0,name.find('.')));
 }
 
-void append_fold(std::string& out,std::string_view utf8)
+namespace {
+// The fold of utf8, piece by piece: emit(bytes, count) for each byte run of the result, in order; stops (returning false) as
+// soon as emit does.
+template<class Emit>
+bool fold_pieces(std::string_view utf8,Emit&& emit)
 {
 const byte* p=reinterpret_cast<const byte*>(utf8.data());
 const byte* const end=p+utf8.size();
 while(p<end){
 if(*p<0x80){
-out.push_back(ascii_upper(static_cast<char>(*p)));
+const char upper=ascii_upper(static_cast<char>(*p));
+if(!emit(&upper,1))return false;
 ++p;
 continue;
 }
 const std::size_t size=sequence_size(p,end);
 if(size==1){
-out.push_back(static_cast<char>(*p));
+if(!emit(reinterpret_cast<const char*>(p),1))return false;
 ++p;
 continue;
 }
 const char32_t c=decode(p,size);
 const char32_t upper=unicode::to_upper(c);
-if(upper==c)out.append(reinterpret_cast<const char*>(p),size);
-else append_utf8(out,upper);
+if(upper==c){
+if(!emit(reinterpret_cast<const char*>(p),size))return false;
+}
+else{
+char encoded[4];
+if(!emit(encoded,encode_utf8(upper,encoded)))return false;
+}
 p+=size;
 }
+return true;
+}
+}
+
+void append_fold(std::string& out,std::string_view utf8)
+{
+fold_pieces(utf8,[&out](const char* bytes,std::size_t count){
+if(count==1)out.push_back(*bytes);
+else out.append(bytes,count);
+return true;
+});
+}
+
+std::size_t fold_into(std::string_view utf8,char* out,std::size_t capacity) noexcept
+{
+std::size_t size=0;
+const bool fits=fold_pieces(utf8,[&](const char* bytes,std::size_t count){
+if(count>capacity-size)return false;
+std::memcpy(out+size,bytes,count);
+size+=count;
+return true;
+});
+return fits?size:static_cast<std::size_t>(-1);
 }
 
 std::string fold_name(std::string_view utf8)

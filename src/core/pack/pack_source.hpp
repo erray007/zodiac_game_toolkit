@@ -11,17 +11,26 @@
 //   bytes for append and update (update needs the entry: not_found otherwise), and stores it with PackStorage::add (now as
 //   its time) at commit, so a truncating write replaces the entry only then. A name that exists keeps its stored spelling.
 //   sync stores what has been written so far (when anything changed since it was last stored) and flushes the pack; after
-//   commit it flushes the pack. A write target holds the storage. make_directory succeeds for anything but a file (folders
-//   come with the files in them); remove_directory removes every file below a folder when recursive, else is not_empty;
-//   rename is PackStorage::rename, which moves the entry without rewriting it. A folder is is_directory for open_write.
+//   commit it flushes the pack. Each store re-appends the whole file, so a file synced after every line costs O(n^2) bytes.
+//   A write target holds the storage. The buffer holds at most kMaxPackWriteBytes (2 GiB): a write, truncate or starting
+//   entry past it fails with disk_full before anything is allocated (there is no room for those bytes, as on a full disk;
+//   io would mean a device fault). Far below stored_size's limit (2^32 chunks of at least 4 KiB). make_directory succeeds
+//   unless a file has the name or lies above it (not_a_directory; folders come with the files in them); remove_directory
+//   removes every file below a folder when recursive, else is not_empty; rename is PackStorage::rename, which moves the entry
+//   without rewriting it. A folder is is_directory and a name below a file not_a_directory for open_write, so a pack never
+//   holds a file and a folder of one fold. remove with leave_marker (the Vfs asks when an older mount still has the name)
+//   leaves a deletion marker in the file's place, so the name stays gone; a later write replaces the marker.
 // - writable sets read_only() to its opposite; the Vfs routes writes by the flag given to Vfs::mount, which mount_pack sets
 //   to the same value.
 // Every function may be called from several threads at once (the storage is thread-safe); a write target by one at a time.
 #pragma once
 #include <core/pack/pack_storage.hpp>
 #include <core/vfs/vfs.hpp>
+#include <cstdint>
 #include <memory>
 
 namespace zodiac::pack {
+// The most bytes one file written through a mount may hold (it is buffered in memory until commit).
+inline constexpr std::uint64_t kMaxPackWriteBytes=std::uint64_t{1}<<31;
 std::shared_ptr<vfs::Source> make_pack_source(std::shared_ptr<PackStorage> storage,bool writable);
 }

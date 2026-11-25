@@ -50,7 +50,7 @@ info.name=std::move(entry.name);
 return {};
 }
 
-std::expected<void,FileError> HostSource::remove(std::string_view relative)
+std::expected<void,FileError> HostSource::remove(std::string_view relative,bool)
 {
 if(const std::error_code error=platform::remove_file(path_from_utf8(relative)))return std::unexpected(detail::file_error(error));
 return {};

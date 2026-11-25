@@ -201,6 +201,27 @@ bool below(std::string_view fold,std::string_view folder) noexcept
 {
 return fold.size()>folder.size()&&fold[folder.size()]=='/'&&fold.starts_with(folder);
 }
+// How many folders a name has (its '/'s).
+std::size_t folder_depth(std::string_view fold) noexcept
+{
+return static_cast<std::size_t>(std::ranges::count(fold,'/'));
+}
+// The fold of a name for a lookup: on the stack when it fits PackStorage::kStackFold bytes (every usual name), else in a string.
+class FoldKey{
+public:
+explicit FoldKey(std::string_view name)
+{
+size_=vfs::fold_into(name,stack_,sizeof stack_);
+if(size_==static_cast<std::size_t>(-1))heap_=vfs::fold_name(name);
+}
+FoldKey(const FoldKey&)=delete;
+FoldKey& operator=(const FoldKey&)=delete;
+std::string_view view() const noexcept{return size_==static_cast<std::size_t>(-1)?std::string_view(heap_):std::string_view(stack_,size_);}
+private:
+char stack_[PackStorage::kStackFold];
+std::size_t size_=0;
+std::string heap_;
+};
 
 // Reads one entry of a pack file from the snapshot open_reader took.
 class PackReader final:public vfs::Reader{
@@ -749,37 +770,59 @@ if(slot!=folders_.end())++(marker?slot->second.markers:slot->second.files);
 });
 }
 
-void PackStorage::uncount_locked(std::string_view fold,bool marker) noexcept
+void PackStorage::uncount_locked(std::string_view fold,bool marker,FolderNodes& dropped) noexcept
 {
 each_folder(fold,[&](std::string_view folder){
 const auto slot=folders_.find(folder);
 if(slot==folders_.end())return;
 --(marker?slot->second.markers:slot->second.files);
-if(slot->second.files==0&&slot->second.markers==0)folders_.erase(slot);
+// Unlinked here, freed by the caller once the shared mutex is released (push_back has the room reserved).
+if(slot->second.files==0&&slot->second.markers==0)dropped.push_back(folders_.extract(slot));
 });
 }
 
-vfs::EntryKind PackStorage::kind_locked(const std::string& fold,const Entry** entry) const
+vfs::EntryKind PackStorage::kind_locked(std::string_view fold,const Entry** entry) const
 {
 const auto found=entries_.find(fold);
 if(found!=entries_.end()){
 *entry=&found->second;
 return found->second.record.deleted?vfs::EntryKind::deleted:vfs::EntryKind::file;
 }
-const auto folder=folders_.find(std::string_view(fold));
+const auto folder=folders_.find(fold);
 return folder!=folders_.end()&&folder->second.files?vfs::EntryKind::directory:vfs::EntryKind::none;
+}
+
+bool PackStorage::below_file_locked(std::string_view fold) const
+{
+bool file=false;
+each_folder(fold,[&](std::string_view folder){
+if(file)return;
+const auto found=entries_.find(folder);
+file=found!=entries_.end()&&!found->second.record.deleted;
+});
+return file;
+}
+
+std::expected<void,vfs::FileError> PackStorage::name_free_writing(std::string_view fold) const
+{
+// entries_ and folders_ change only under writer_mutex_, held here, so they are read without the shared mutex.
+if(below_file_locked(fold))return std::unexpected(FileError::not_a_directory);
+if(const auto folder=folders_.find(fold);folder!=folders_.end()&&folder->second.files)return std::unexpected(FileError::is_directory);
+return {};
 }
 
 void PackStorage::insert_writing(std::string fold,IndexEntry record)
 {
 const std::uint64_t stored=record.deleted?0:*stored_size(record.size,header_.chunk_log2);
-// Everything that allocates is made before the shared mutex is taken, so lookups wait only for the pointers to move: the
-// folders the entry adds, and (for a new name) its node. entries_ changes only under writer_mutex_, held here.
+// Everything that allocates is made before the shared mutex is taken: the folders the entry adds, (for a new name) its node,
+// and room for the folders it may drop. entries_ changes only under writer_mutex_, held here.
 FolderNodes folders=new_folders_writing(fold);
+FolderNodes dropped;
+dropped.reserve(folder_depth(fold));
 const auto existing=entries_.find(fold);
-std::unordered_map<std::string,Entry>::node_type node;
+EntryNode node;
 if(existing==entries_.end()){
-std::unordered_map<std::string,Entry> made;
+Entries made;
 node=made.extract(made.try_emplace(std::move(fold)).first);
 }
 const bool fresh=static_cast<bool>(node);
@@ -788,7 +831,7 @@ const bool marker=record.deleted;
 Entry previous;
 {
 const std::unique_lock lock(mutex_);
-// The reserves are all that can throw, and they come before any change.
+// The reserves are all that can throw (growing a bucket array, rarely), and they come before any change.
 folders_.reserve(folders_.size()+folders.size());
 if(fresh)entries_.reserve(entries_.size()+1);
 add_folders_locked(folders);
@@ -798,7 +841,7 @@ count_locked(slot->first,marker);
 if(!fresh){
 wasted_+=slot->second.stored;
 if(!slot->second.record.deleted)--files_;
-uncount_locked(slot->first,slot->second.record.deleted);
+uncount_locked(slot->first,slot->second.record.deleted,dropped);
 previous=std::move(slot->second);
 }
 if(!marker)++files_;
@@ -814,6 +857,7 @@ if(auto writable=writable_writing();!writable)return std::unexpected(writable.er
 const auto canonical=canonical_entry_name(name);
 if(!canonical||*canonical!=name)return std::unexpected(FileError::bad_path);
 std::string fold=vfs::fold_name(name);
+if(auto free=name_free_writing(fold);!free)return std::unexpected(free.error());
 auto record=append_entry(bytes.size(),[&](std::uint64_t at,std::span<std::byte> room)->std::expected<std::span<const std::byte>,FileError>{
 return bytes.subspan(static_cast<std::size_t>(at),room.size());
 });
@@ -831,6 +875,7 @@ if(auto writable=writable_writing();!writable)return std::unexpected(vfs::MoveEr
 const auto canonical=canonical_entry_name(name);
 if(!canonical||*canonical!=name)return std::unexpected(vfs::MoveError{FileError::bad_path,true});
 std::string fold=vfs::fold_name(name);
+if(auto free=name_free_writing(fold);!free)return std::unexpected(vfs::MoveError{free.error(),true});
 const std::uint64_t size=from.size();
 auto record=append_entry(size,[&](std::uint64_t at,std::span<std::byte> room)->std::expected<std::span<const std::byte>,FileError>{
 std::size_t done=0;
@@ -863,36 +908,56 @@ insert_writing(vfs::fold_name(name),std::move(record));
 return {};
 }
 
-std::expected<bool,vfs::FileError> PackStorage::remove(std::string_view name)
+std::expected<bool,vfs::FileError> PackStorage::remove(std::string_view name,bool leave_marker)
 {
-const std::string fold=vfs::fold_name(name);
+const FoldKey fold(name);
 const std::lock_guard writing(writer_mutex_);
 if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
 // entries_ changes only under writer_mutex_, held here, so it is searched without the shared mutex.
-const auto found=entries_.find(fold);
+const auto found=entries_.find(fold.view());
 if(found==entries_.end()||found->second.record.deleted)return false;
+if(leave_marker){
+// The marker takes the file's place (insert_writing wastes the file's bytes and counts its folders over).
+IndexEntry marker;
+marker.name=found->second.record.name;
+marker.deleted=true;
+insert_writing(found->first,std::move(marker));
+return true;
+}
+FolderNodes dropped;
+dropped.reserve(folder_depth(fold.view()));
 // Freed after the shared mutex is released.
-std::unordered_map<std::string,Entry>::node_type removed;
+EntryNode removed;
 {
 const std::unique_lock lock(mutex_);
 wasted_+=found->second.stored;
 --files_;
-uncount_locked(found->first,false);
+uncount_locked(found->first,false,dropped);
 removed=entries_.extract(found);
 }
 dirty_=true;
 return true;
 }
 
+std::expected<vfs::EntryKind,vfs::FileError> PackStorage::place(std::string_view name) const
+{
+const FoldKey fold(name);
+const std::shared_lock lock(mutex_);
+if(closed_)return std::unexpected(FileError::io);
+if(below_file_locked(fold.view()))return std::unexpected(FileError::not_a_directory);
+const Entry* entry=nullptr;
+return kind_locked(fold.view(),&entry);
+}
+
 std::expected<vfs::EntryInfo,vfs::FileError> PackStorage::stat(std::string_view name) const
 {
-const std::string fold=vfs::fold_name(name);
+const FoldKey fold(name);
 vfs::EntryInfo info;
 {
 const std::shared_lock lock(mutex_);
 if(closed_)return std::unexpected(FileError::not_found);
 const Entry* entry=nullptr;
-info.kind=kind_locked(fold,&entry);
+info.kind=kind_locked(fold.view(),&entry);
 if(info.kind==vfs::EntryKind::none)return std::unexpected(FileError::not_found);
 if(entry){
 info.size=entry->record.size;
@@ -906,10 +971,10 @@ return info;
 
 std::optional<std::string> PackStorage::stored_name(std::string_view name) const
 {
-const std::string fold=vfs::fold_name(name);
+const FoldKey fold(name);
 const std::shared_lock lock(mutex_);
 if(closed_)return std::nullopt;
-const auto found=entries_.find(fold);
+const auto found=entries_.find(fold.view());
 if(found==entries_.end()||found->second.record.deleted)return std::nullopt;
 return found->second.record.name;
 }
@@ -985,24 +1050,27 @@ found->second.record.name.swap(name);
 dirty_=true;
 return {};
 }
-if(const auto folder=folders_.find(std::string_view(to_fold));folder!=folders_.end()&&folder->second.files)return std::unexpected(vfs::MoveError{FileError::is_directory,true});
+if(auto free=name_free_writing(to_fold);!free)return std::unexpected(vfs::MoveError{free.error(),true});
 FolderNodes folders=new_folders_writing(to_fold);
-std::unordered_map<std::string,Entry>::node_type moved;
+// The folders from and a replaced to leave (to's own are counted in first, so they stay).
+FolderNodes dropped;
+dropped.reserve(folder_depth(from_fold)+folder_depth(to_fold));
+EntryNode moved;
 // The file to replaced, freed after the shared mutex is released.
-std::unordered_map<std::string,Entry>::node_type replaced;
+EntryNode replaced;
 {
 const std::unique_lock lock(mutex_);
-// The reserve is all that can throw, and it comes before any change. entries_ never grows here: one node leaves before it
-// (or another) goes back.
+// The reserve is all that can throw (growing the bucket array, rarely), and it comes before any change. entries_ never grows
+// here: one node leaves before it (or another) goes back.
 folders_.reserve(folders_.size()+folders.size());
 add_folders_locked(folders);
 count_locked(to_fold,false);
-uncount_locked(from_fold,false);
+uncount_locked(from_fold,false,dropped);
 moved=entries_.extract(found);
 if(const auto old=entries_.find(to_fold);old!=entries_.end()){
 wasted_+=old->second.stored;
 if(!old->second.record.deleted)--files_;
-uncount_locked(old->first,old->second.record.deleted);
+uncount_locked(old->first,old->second.record.deleted,dropped);
 replaced=entries_.extract(old);
 }
 moved.key().swap(to_fold);
@@ -1022,17 +1090,20 @@ if(auto writable=writable_writing();!writable)return std::unexpected(writable.er
 // is taken only to take them out.
 const auto counted=folders_.find(std::string_view(fold));
 if(counted==folders_.end()||counted->second.files==0)return std::unexpected(FileError::not_found);
-std::vector<std::unordered_map<std::string,Entry>::iterator> doomed;
+std::vector<Entries::iterator> doomed;
 doomed.reserve(counted->second.files);
 for(auto it=entries_.begin();it!=entries_.end();++it)if(!it->second.record.deleted&&below(it->first,fold))doomed.push_back(it);
-std::vector<std::unordered_map<std::string,Entry>::node_type> removed;
+std::vector<EntryNode> removed;
 removed.reserve(doomed.size());
+// No more folders can go than there are.
+FolderNodes dropped;
+dropped.reserve(folders_.size());
 {
 const std::unique_lock lock(mutex_);
 for(const auto it:doomed){
 wasted_+=it->second.stored;
 --files_;
-uncount_locked(it->first,false);
+uncount_locked(it->first,false,dropped);
 removed.push_back(entries_.extract(it));
 }
 }
@@ -1068,13 +1139,13 @@ return wasted_;
 
 std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> PackStorage::open_reader(std::string_view name) const
 {
-const std::string fold=vfs::fold_name(name);
+const FoldKey fold(name);
 std::shared_ptr<platform::File> file;
 IndexEntry record;
 {
 const std::shared_lock lock(mutex_);
 if(closed_)return std::unexpected(FileError::not_found);
-const auto found=entries_.find(fold);
+const auto found=entries_.find(fold.view());
 if(found==entries_.end()||found->second.record.deleted)return std::unexpected(FileError::not_found);
 file=file_;
 record.offset=found->second.record.offset;
@@ -1087,7 +1158,7 @@ return std::make_shared<PackReader>(std::move(file),base_+record.offset,record.s
 
 std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> PackStorage::open_mounted(std::string_view name,std::shared_ptr<const void> holder) const
 {
-const std::string fold=vfs::fold_name(name);
+const FoldKey fold(name);
 std::shared_ptr<platform::File> file;
 std::uint64_t offset=0;
 std::uint64_t size=0;
@@ -1096,7 +1167,7 @@ std::uint64_t id=0;
 const std::shared_lock lock(mutex_);
 if(closed_)return std::unexpected(FileError::not_found);
 const Entry* entry=nullptr;
-switch(kind_locked(fold,&entry)){
+switch(kind_locked(fold.view(),&entry)){
 case vfs::EntryKind::file:
 break;
 case vfs::EntryKind::deleted:
@@ -1224,7 +1295,7 @@ platform::discard_file(temp);
 }
 } discard{temp,*next};
 if(auto written=next->write_at(0,header_bytes_);!written)return std::unexpected(file_error(written.error()));
-std::unordered_map<std::string,Entry> fresh;
+Entries fresh;
 fresh.reserve(entries_.size());
 std::vector<const IndexEntry*> records;
 records.reserve(entries_.size());
@@ -1334,7 +1405,7 @@ result=flush_writing();
 catch(const std::bad_alloc&){
 result=std::unexpected(FileError::io);
 }
-std::unordered_map<std::string,Entry> dropped;
+Entries dropped;
 Folders dropped_folders;
 // The storage lets go of the file here; readers may keep it open, but not its lock, which is released below.
 std::shared_ptr<platform::File> file;

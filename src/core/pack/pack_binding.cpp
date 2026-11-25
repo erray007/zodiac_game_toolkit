@@ -341,7 +341,19 @@ if(!storage_)return fail(kNotOpen);
 if(auto point=vfs::parse_path(at,false);!point)return fail(std::move(point.error()));
 // A pack this object cannot change takes no writes through a mount either: the same failure as its own changes.
 if(writable&&!writable_)return write_failed(FileError::access_denied);
-if(!vfs_->mount(at,pack::make_pack_source(storage_,writable),writable,this))return fail(kAlreadyMounted);
+auto source=pack::make_pack_source(storage_,writable);
+const auto mounted=vfs_->try_mount(at,std::move(source),writable,this);
+if(!mounted){
+switch(mounted.error()){
+case vfs::Vfs::MountError::taken:
+return fail(kAlreadyMounted);
+case vfs::Vfs::MountError::out_of_memory:
+return fail(kOutOfMemory);
+default:
+// parse_path accepted at above, so only a source that could not be made gets here.
+return fail(kOutOfMemory);
+}
+}
 return succeeded();
 }
 

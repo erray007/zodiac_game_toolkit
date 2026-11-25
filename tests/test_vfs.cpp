@@ -738,7 +738,7 @@ std::expected<zodiac::vfs::EntryInfo,FileError> stat(std::string_view) override{
 std::expected<std::shared_ptr<zodiac::vfs::Reader>,FileError> open_read(std::string_view) override{throw 42;}
 std::expected<std::unique_ptr<zodiac::vfs::WriteTarget>,FileError> open_write(std::string_view,WriteMode) override{throw std::logic_error("source broke");}
 std::expected<void,FileError> list(std::string_view,std::vector<zodiac::vfs::EntryInfo>&) override{throw std::logic_error("source broke");}
-std::expected<void,FileError> remove(std::string_view) override{throw std::logic_error("source broke");}
+std::expected<void,FileError> remove(std::string_view,bool) override{throw std::logic_error("source broke");}
 std::expected<void,FileError> make_directory(std::string_view) override{throw std::logic_error("source broke");}
 std::expected<void,FileError> remove_directory(std::string_view,bool) override{throw std::logic_error("source broke");}
 bool read_only() const noexcept override{return false;}
@@ -806,7 +806,7 @@ std::expected<zodiac::vfs::EntryInfo,FileError> stat(std::string_view) override{
 std::expected<std::shared_ptr<zodiac::vfs::Reader>,FileError> open_read(std::string_view) override{return std::unexpected(FileError::ambiguous);}
 std::expected<std::unique_ptr<zodiac::vfs::WriteTarget>,FileError> open_write(std::string_view,WriteMode) override{return std::unexpected(FileError::ambiguous);}
 std::expected<void,FileError> list(std::string_view,std::vector<zodiac::vfs::EntryInfo>&) override{return std::unexpected(FileError::ambiguous);}
-std::expected<void,FileError> remove(std::string_view) override{return std::unexpected(FileError::ambiguous);}
+std::expected<void,FileError> remove(std::string_view,bool) override{return std::unexpected(FileError::ambiguous);}
 std::expected<void,FileError> make_directory(std::string_view) override{return std::unexpected(FileError::ambiguous);}
 std::expected<void,FileError> remove_directory(std::string_view,bool) override{return std::unexpected(FileError::ambiguous);}
 bool read_only() const noexcept override{return false;}

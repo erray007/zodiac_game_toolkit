@@ -8,6 +8,7 @@
 //   read, a second pack object on one file, and compact under an open file object.
 // Packs are made with 64 KiB, 1 pass Argon2id or raw keys for speed.
 #include "script_fixture.hpp"
+#include <core/pack/pack_format.hpp>
 #include <core/pack/pack_source.hpp>
 #include <core/pack/pack_storage.hpp>
 #include <core/vfs/folder_source.hpp>
@@ -16,7 +17,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -30,6 +33,38 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+// Every allocation of this executable's code through the replaceable operator new, counted per thread, so a test can show
+// that a lookup allocates nothing.
+namespace {
+thread_local std::uint64_t allocations=0;
+}
+void* operator new(std::size_t size)
+{
+++allocations;
+if(void* memory=std::malloc(size?size:1))return memory;
+throw std::bad_alloc();
+}
+void* operator new[](std::size_t size)
+{
+return ::operator new(size);
+}
+void operator delete(void* memory) noexcept
+{
+std::free(memory);
+}
+void operator delete[](void* memory) noexcept
+{
+std::free(memory);
+}
+void operator delete(void* memory,std::size_t) noexcept
+{
+std::free(memory);
+}
+void operator delete[](void* memory,std::size_t) noexcept
+{
+std::free(memory);
+}
 
 namespace pack=zodiac::pack;
 namespace crypto=zodiac::crypto;
@@ -339,12 +374,21 @@ REQUIRE(target);
 REQUIRE((*target)->write_at(0,span_of("K")));
 REQUIRE((*target)->commit());
 }
+{
+// "r+" on a name only the folder below has starts from the folder's bytes too.
+auto target=m.vfs.open_write("Under.txt",WriteMode::update);
+REQUIRE(target);
+CHECK((*target)->size()==6);
+REQUIRE((*target)->write_at(0,span_of("F")));
+REQUIRE((*target)->commit());
+}
 CHECK(m.vfs.open_write("none.txt",WriteMode::update).error().code==FileError::not_found);
 CHECK(read_ok(m.vfs,"new.txt")=="brand new");
 CHECK(read_ok(m.vfs,"old.txt")=="replaced");
 CHECK(read_ok(m.vfs,"log.txt")=="abcd");
 CHECK(read_ok(m.vfs,"keep.txt")=="Kept");
-CHECK(read_ok(m.vfs,"under.txt")=="folder");
+CHECK(read_ok(m.vfs,"under.txt")=="Folder");
+CHECK(file_bytes(m.root()/"under.txt")=="folder");
 CHECK(file_bytes(m.root()/"log.txt")=="ab");
 CHECK_FALSE(fs::exists(m.root()/"new.txt"));
 // A rename inside the pack moves the entry; a recursive delete of a pack folder removes its files.
@@ -363,7 +407,7 @@ CHECK(m.vfs.unmount(&owner_a)==1);
 CHECK(m.vfs.open_read("new.txt").error().code==FileError::not_found);
 // The mount held the last reference: the storage flushed and closed when it went.
 const auto storage=reopen(file,test_key(5));
-CHECK(storage->list()==std::vector<std::string>{"dir/stream.bin","keep.txt","log.txt","moved/new.txt","old.txt"});
+CHECK(storage->list()==std::vector<std::string>{"Under.txt","dir/stream.bin","keep.txt","log.txt","moved/new.txt","old.txt"});
 Vfs fresh;
 REQUIRE(fresh.mount("/",pack::make_pack_source(storage,false),false,&owner_a));
 CHECK(read_ok(fresh,"old.txt")=="replaced");
@@ -410,16 +454,19 @@ CHECK(listed(m.vfs,"sub").empty());
 CHECK(m.vfs.remove("f.txt").error().code==FileError::not_found);
 CHECK(file_bytes(m.root()/"f.txt")=="folder f");
 CHECK(m.vfs.copy("m.txt","data:/c.txt").error().failure.code==FileError::not_found);
-// A write of a hidden name goes to the folder, where it stays hidden while the marker is mounted.
-REQUIRE(m.vfs.write_file("f.txt",span_of("new f")));
-CHECK(file_bytes(m.root()/"f.txt")=="new f");
+// A write below a read-only marker would succeed and never be read back: it is refused like one below a read-only file.
+const auto hidden=m.vfs.write_file("f.txt",span_of("new f"));
+REQUIRE_FALSE(hidden);
+CHECK(hidden.error().message=="\"f.txt\" is in a read-only pack; save files in data:/ instead");
+CHECK(m.vfs.open_write("F.TXT",WriteMode::append).error().code==FileError::read_only_pack);
+CHECK(file_bytes(m.root()/"f.txt")=="folder f");
 auto third=pack_of(m.packs()/"3.zpk",10,{{"m.txt","three"}});
 REQUIRE(m.vfs.mount("/",pack::make_pack_source(third,false),false,&owner_c));
 CHECK(read_ok(m.vfs,"m.txt")=="three");
 CHECK(m.vfs.stat("f.txt").error().code==FileError::not_found);
 CHECK(listed(m.vfs,"/")=="kept.txt,m.txt");
 CHECK(m.vfs.unmount(&owner_b)==1);
-CHECK(read_ok(m.vfs,"f.txt")=="new f");
+CHECK(read_ok(m.vfs,"f.txt")=="folder f");
 CHECK(read_ok(m.vfs,"sub/x.txt")=="x");
 }
 
@@ -641,4 +688,226 @@ CHECK(text_of(fixture,
 "return s;")==
 "false,pack is not open|false,\"../up\" leaves its mount|true,|false,already mounted there|shipped,true,|false,\"shipped.txt\" is in a read-only pack; save files in data:/ instead|false,false|true,saved,true,mine");
 CHECK_FALSE(fs::exists(fixture.root()/"saved.txt"));
+}
+
+TEST_CASE("mount_pack refuses a writable mount of a pack it cannot change, throws on a null handle, and delete_file leaves a marker")
+{
+ScriptFixture fixture;
+REQUIRE(fixture.vfs.mount_folder("ro",fixture.folder/"ro",false));
+{
+auto storage=make(fixture.folder/"ro"/"x.zpk",std::string("k"));
+add(*storage,"in.txt","inside");
+REQUIRE(storage->flush());
+}
+{
+auto storage=make(fixture.root()/"w.zpk",std::string("k"));
+add(*storage,"s.txt","pack s");
+REQUIRE(storage->flush());
+}
+put_bytes(fixture.root()/"s.txt","folder s");
+CHECK(text_of(fixture,
+"pack p; if(!p.open(\"ro/x.zpk\", \"k\"))return p.error;"
+"string s=mount_pack(p, \"/\", true)+\",\"+p.error+\"|\"+mount_pack(p)+\",\"+read_file(\"in.txt\")+\"|\";"
+"pack@ none; try{ mount_pack(none); }catch{ s+=exception_info(); } try{ unmount_pack(none); }catch{ s+=\",\"+exception_info(); }"
+"pack w; if(!w.open(\"w.zpk\", \"k\"))return w.error; if(!mount_pack(w, \"/\", true))return w.error;"
+"s+=\"|\"+read_file(\"s.txt\")+\",\"+delete_file(\"s.txt\")+\",\"+file_exists(\"s.txt\")+\",\"+w.exists(\"s.txt\");"
+"s+=\",\"+write_file(\"s.txt\", \"again\")+\",\"+read_file(\"s.txt\");"
+"return s;")==
+"false,cannot write \"ro/x.zpk\": access denied|true,inside|Null pointer access,Null pointer access|pack s,true,false,false,true,again");
+CHECK(file_bytes(fixture.root()/"s.txt")=="folder s");
+}
+
+TEST_CASE("a pack never holds a file and a folder of one fold, and its folders follow renames and folder removals")
+{
+Mounted m;
+auto storage=pack_of(m.packs()/"fold.zpk",50,{{"a.txt","a"},{"d/x.txt","x"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+CHECK(m.vfs.write_file("a.txt/x",span_of("no")).error().code==FileError::not_a_directory);
+CHECK(m.vfs.open_write("A.TXT/x/y",WriteMode::truncate).error().code==FileError::not_a_directory);
+CHECK(m.vfs.write_file("D",span_of("no")).error().code==FileError::is_directory);
+CHECK(m.vfs.create_directory("a.txt/sub",false).error().code==FileError::not_a_directory);
+CHECK(m.vfs.create_directory("a.txt",false).error().code==FileError::not_a_directory);
+REQUIRE(m.vfs.create_directory("d/new",false));
+// PackStorage itself refuses them too, so the pack object's add and rename cannot make one either.
+CHECK(storage->add("a.txt/b",span_of("no"),0).error()==FileError::not_a_directory);
+CHECK(storage->add("d",span_of("no"),0).error()==FileError::is_directory);
+CHECK(storage->rename("a.txt","D").error().code==FileError::is_directory);
+CHECK(storage->rename("d/x.txt","a.txt/x.txt").error().code==FileError::not_a_directory);
+CHECK(storage->list()==std::vector<std::string>{"a.txt","d/x.txt"});
+REQUIRE(m.vfs.move("d/x.txt","e/x.txt"));
+CHECK(m.vfs.stat("d").error().code==FileError::not_found);
+CHECK(m.vfs.stat("E")->kind==EntryKind::directory);
+REQUIRE(m.vfs.write_file("e/f/g.txt",span_of("g")));
+CHECK(m.vfs.stat("e/F")->kind==EntryKind::directory);
+REQUIRE(m.vfs.delete_directory("e",true));
+CHECK(m.vfs.stat("e").error().code==FileError::not_found);
+CHECK(m.vfs.stat("e/f").error().code==FileError::not_found);
+CHECK(storage->stat("e/f/g.txt").error()==FileError::not_found);
+// The names are free again, for a file this time.
+REQUIRE(m.vfs.write_file("e",span_of("now a file")));
+CHECK(read_ok(m.vfs,"E")=="now a file");
+}
+
+TEST_CASE("a file written through a pack mount holds at most 2 GiB, refused before anything is allocated")
+{
+Mounted m;
+auto storage=pack_of(m.packs()/"cap.zpk",56,{});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+auto target=m.vfs.open_write("big.bin",WriteMode::truncate);
+REQUIRE(target);
+zodiac::vfs::WriteTarget& out=**target;
+const std::uint64_t before=allocations;
+const auto far=out.write_at(std::uint64_t{1}<<40,span_of("x"));
+const auto edge=out.write_at(pack::kMaxPackWriteBytes-1,span_of("xy"));
+const auto grown=out.truncate(pack::kMaxPackWriteBytes+1);
+const std::uint64_t allocated=allocations-before;
+REQUIRE_FALSE(far);
+CHECK(far.error()==FileError::disk_full);
+REQUIRE_FALSE(edge);
+CHECK(edge.error()==FileError::disk_full);
+REQUIRE_FALSE(grown);
+CHECK(grown.error()==FileError::disk_full);
+CHECK(allocated==0);
+CHECK(out.size()==0);
+CHECK(zodiac::vfs::write_failure_text("big.bin",zodiac::vfs::Failure{far.error(),{}})=="cannot write \"big.bin\": disk full");
+REQUIRE(out.write_at(0,span_of("ok")));
+REQUIRE(out.commit());
+CHECK(read_ok(m.vfs,"big.bin")=="ok");
+}
+
+TEST_CASE("remove leaves a deletion marker when an older mount still has the name, which a write replaces and a reopen keeps")
+{
+Mounted m;
+put_bytes(m.root()/"f.txt","folder f");
+const fs::path file=m.packs()/"rm.zpk";
+{
+auto storage=pack_of(file,51,{{"f.txt","pack f"},{"only.txt","only"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+REQUIRE(m.vfs.remove("F.txt"));
+CHECK(m.vfs.stat("f.txt").error().code==FileError::not_found);
+CHECK(m.vfs.open_read("f.txt").error().code==FileError::not_found);
+CHECK(listed(m.vfs,"/")=="only.txt");
+CHECK(file_bytes(m.root()/"f.txt")=="folder f");
+CHECK(storage->stat("f.txt")->kind==EntryKind::deleted);
+CHECK(m.vfs.remove("f.txt").error().code==FileError::not_found);
+// Nothing older has only.txt: no marker.
+REQUIRE(m.vfs.remove("only.txt"));
+CHECK(storage->stat("only.txt").error()==FileError::not_found);
+REQUIRE(m.vfs.write_file("f.txt",span_of("again")));
+CHECK(read_ok(m.vfs,"f.txt")=="again");
+CHECK(storage->stat("f.txt")->kind==EntryKind::file);
+REQUIRE(m.vfs.remove("f.txt"));
+}
+CHECK(m.vfs.unmount(&owner_a)==1);
+CHECK(read_ok(m.vfs,"f.txt")=="folder f");
+const auto storage=reopen(file,test_key(51));
+CHECK(storage->stat("f.txt")->kind==EntryKind::deleted);
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+CHECK(m.vfs.stat("f.txt").error().code==FileError::not_found);
+}
+
+TEST_CASE("an append seeded from an older mount that fails part way leaves no file behind")
+{
+Mounted m;
+const fs::path file=m.packs()/"bad.zpk";
+const std::string bytes=data_of(5000,53);
+{
+auto storage=pack_of(file,52,{{"x.txt",bytes}});
+}
+// One byte of x.txt's only chunk, which starts right after the empty index and footer the pack began with.
+std::string damaged=file_bytes(file);
+damaged[pack::kHeaderSize+pack::kMinIndexLength+pack::kFooterSize+100]^=1;
+put_bytes(file,damaged);
+auto storage=reopen(file,test_key(52));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+TempDir newer;
+REQUIRE(m.vfs.mount("/",std::make_shared<FolderSource>(newer.path,false),true,&owner_b));
+const auto opened=m.vfs.open_write("x.txt",WriteMode::append);
+REQUIRE_FALSE(opened);
+CHECK(opened.error().code==FileError::damaged);
+CHECK_FALSE(fs::exists(newer.path/"x.txt"));
+}
+
+TEST_CASE("a listing takes each fold from its newest mount whatever its kind")
+{
+Mounted m;
+put_bytes(m.root()/"maps","a file in the folder");
+put_bytes(m.root()/"tiles"/"t.txt","t");
+auto storage=pack_of(m.packs()/"kinds.zpk",57,{{"Maps/a.txt","a"},{"TILES","a file in the pack"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+CHECK(listed(m.vfs,"/")=="TILES");
+CHECK(listed(m.vfs,"/",ListKind::directories)=="Maps");
+CHECK(m.vfs.unmount(&owner_a)==1);
+CHECK(listed(m.vfs,"/")=="maps");
+CHECK(listed(m.vfs,"/",ListKind::directories)=="tiles");
+}
+
+TEST_CASE("unmount cannot fail, a remount under the same owner works, and try_mount names its failures")
+{
+Mounted m;
+auto storage=pack_of(m.packs()/"owner.zpk",58,{{"o.txt","o"}});
+REQUIRE(m.vfs.try_mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+CHECK(m.vfs.try_mount("/",pack::make_pack_source(storage,false),false,&owner_a).error()==Vfs::MountError::taken);
+CHECK(m.vfs.try_mount("../x",pack::make_pack_source(storage,false),false,&owner_b).error()==Vfs::MountError::bad_point);
+CHECK(m.vfs.try_mount("/",nullptr,false,&owner_b).error()==Vfs::MountError::bad_point);
+CHECK(m.vfs.unmount(&owner_a)==1);
+CHECK(m.vfs.unmount(&owner_a)==0);
+CHECK(m.vfs.open_read("o.txt").error().code==FileError::not_found);
+REQUIRE(m.vfs.try_mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+CHECK(read_ok(m.vfs,"o.txt")=="o");
+}
+
+TEST_CASE("sync stores a pack file's bytes durably before it is closed")
+{
+Mounted m;
+const fs::path file=m.packs()/"sync.zpk";
+auto storage=pack_of(file,54,{});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+auto target=m.vfs.open_write("saved.txt",WriteMode::truncate);
+REQUIRE(target);
+REQUIRE((*target)->write_at(0,span_of("line 1\n")));
+REQUIRE((*target)->sync());
+const auto on_disk=[&](const char* copy_name){
+// The file as the device has it now, opened as a pack of its own.
+const fs::path copy=m.packs()/copy_name;
+put_bytes(copy,file_bytes(file));
+const auto copied=reopen(copy,test_key(54));
+const auto reader=copied->open_reader("saved.txt");
+REQUIRE(reader);
+const auto bytes=read_all(**reader);
+REQUIRE(bytes);
+return *bytes;
+};
+CHECK(on_disk("copy1.zpk")=="line 1\n");
+REQUIRE((*target)->write_at(7,span_of("line 2\n")));
+REQUIRE((*target)->sync());
+CHECK(on_disk("copy2.zpk")=="line 1\nline 2\n");
+REQUIRE((*target)->commit());
+}
+
+TEST_CASE("a lookup that finds an entry allocates nothing but what it returns")
+{
+TempDir dir;
+auto storage=pack_of(dir.path/"alloc.zpk",55,{{"sounds/step.ogg","s"}});
+REQUIRE(storage->stat("sounds/step.ogg"));
+const std::uint64_t before=allocations;
+const auto hit=storage->stat("SOUNDS/Step.ogg");
+const auto miss=storage->stat("sounds/none.ogg");
+const auto folder=storage->stat("Sounds");
+const auto place=storage->place("sounds/new.ogg");
+const std::uint64_t looked=allocations-before;
+const std::uint64_t opening=allocations;
+const auto reader=storage->open_mounted("sounds/STEP.ogg",storage);
+const std::uint64_t opened=allocations-opening;
+REQUIRE(hit);
+CHECK(hit->kind==EntryKind::file);
+CHECK_FALSE(miss);
+REQUIRE(folder);
+CHECK(folder->kind==EntryKind::directory);
+REQUIRE(place);
+CHECK(*place==EntryKind::none);
+CHECK(looked==0);
+REQUIRE(reader);
+// The reader itself (one make_shared), nothing else.
+CHECK(opened==1);
 }

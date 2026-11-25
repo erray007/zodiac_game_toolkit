@@ -69,7 +69,8 @@ std::expected<EntryInfo,FileError> stat(std::string_view relative) override;
 std::expected<std::shared_ptr<Reader>,FileError> open_read(std::string_view relative) override;
 std::expected<std::unique_ptr<WriteTarget>,FileError> open_write(std::string_view relative,WriteMode mode) override;
 std::expected<void,FileError> list(std::string_view relative,std::vector<EntryInfo>& out) override;
-std::expected<void,FileError> remove(std::string_view relative) override;
+// A folder holds no deletion markers: leave_marker is ignored.
+std::expected<void,FileError> remove(std::string_view relative,bool leave_marker) override;
 std::expected<void,FileError> make_directory(std::string_view relative) override;
 std::expected<void,FileError> remove_directory(std::string_view relative,bool recursive) override;
 // platform::replace_file, so readers of a replaced file keep reading it. to reuses an existing case-insensitive match as writes do;

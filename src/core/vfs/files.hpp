@@ -24,7 +24,8 @@
 // - int64 size, int64 position (bytes from the start of the file), bool eof (position >= size), all 0, 0 and true when closed;
 //   bool seek(int64 position): false (nothing changed) outside 0 to size.
 // - bool sync(): flushes what was written so far to the device (FlushFileBuffers; fdatasync, fsync on macOS); true at once for a
-//   file opened "r"; false and error (`cannot write "<path>": <reason>`) when the flush fails.
+//   file opened "r"; false and error (`cannot write "<path>": <reason>`) when the flush fails. A file in a writable pack mount
+//   is re-appended whole by each sync (see mount_pack below).
 // - void close() (a write target's commit failure sets error), bool is_open, string error: the last failure's text, cleared by
 //   every successful open, write, sync and seek.
 // - Reading, writing, syncing or seeking a closed file throws `file is not open`; writing a file opened "r" throws
@@ -98,8 +99,15 @@
 //   data:/ and its subfolders included; never a host path), in front of everything mounted before it there (pack_source.hpp,
 //   the resolution and write rules of vfs.hpp): entry names are paths below at. false with p.error set: `pack is not open`,
 //   the path rule's text, `cannot write "<path>": access denied` (writable on a pack p cannot change), `already mounted
-//   there` (p has a mount at that folder already). void unmount_pack(pack@ p) removes every mount p made; lookups through
-//   them stop at once, while files already open read on. A null handle throws `Null pointer access`.
+//   there` (p has a mount at that folder already), `out of memory`. void unmount_pack(pack@ p) removes every mount p made
+//   (it cannot fail); lookups through them stop at once, while files already open read on. A null handle throws
+//   `Null pointer access`.
+// - A file written through a writable pack mount is held in memory and stored as one entry when it is closed; it holds at
+//   most 2 GiB (pack::kMaxPackWriteBytes): a write, or "a"/"r+" of a larger entry, past that fails with `cannot write
+//   "<path>": disk full` before anything is allocated. Each sync of such a file re-appends the whole file to the pack, so
+//   syncing after every line costs O(n^2) bytes: sync once, or close the file, when the data must be safe. delete_file of a
+//   name an older mount (the game folder, an older pack) also has leaves a deletion marker in the pack, so file_exists is
+//   false afterwards; a later write of the name replaces the marker.
 // The pack object is not internally synchronized (one thread at a time); the storage under it is.
 #pragma once
 
