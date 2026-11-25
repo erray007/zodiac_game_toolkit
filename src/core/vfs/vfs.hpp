@@ -210,6 +210,22 @@ std::expected<void,MoveFailure> copy(std::string_view from,std::string_view to,b
 // Replaces file path with bytes as copy does: to a host file through a temporary file and a rename, else through open_write
 // (truncate) and commit. Failures as open_write's. sync as for copy (a sync failure may come after the replace).
 std::expected<void,Failure> write_file(std::string_view path,std::span<const std::byte> bytes,bool sync=false);
+// Replaces file path with the bytes of from (read in 256 KiB pieces) as write_file does: to a host file through a temporary file
+// and a rename, else through open_write (truncate) and commit; to stays its old file after any failure. MoveFailure::to is false
+// for a failure of from, true for one of path. sync as for copy.
+std::expected<void,MoveFailure> write_from(std::string_view path,Reader& from,bool sync=false);
+// The host file behind path, for a client that opens it itself (a pack file): found as open_read finds it, or, with for_write,
+// the place open_write would write (the newest writable mount covering it; the file need not exist). writable is the serving
+// mount's writability (always true for a host path). nullopt when the source serving it has no host files (a pack). Failures as
+// open_read's or open_write's, a folder form included (is_directory).
+struct HostFile{
+std::filesystem::path path;
+bool writable=false;
+};
+std::expected<std::optional<HostFile>,Failure> host_file(std::string_view path,bool for_write);
+// Tells every source covering path that its file was made or changed outside the Vfs (after host_file), so their cached
+// listings are dropped. Never throws.
+void forget(std::string_view path) noexcept;
 // rename, else copy then remove(from). A copy that finds one file on both sides removes nothing. A failed remove after the copy
 // is MoveFailure::removing (both files are then there).
 // sync only concerns that copy: a rename moves no data.
@@ -269,6 +285,8 @@ void written(std::string_view path,const VfsPath& p,const End& end) noexcept;
 void warn_copy_metadata(std::string_view path,const std::error_code& error) const noexcept;
 // copy; true when from and to turned out to be one file (nothing was written).
 std::expected<bool,MoveFailure> copy_file(std::string_view from,std::string_view to,bool sync);
+// Copies every byte of in into out in 256 KiB pieces, then commits (and syncs, with sync) it.
+static std::expected<void,MoveFailure> pump(Reader& in,WriteTarget& out,bool sync);
 // Calls visit(Target) for the mounts covering p, newest first, until it returns true; returns whether one did. Allocates nothing
 // unless a mount point below the root has to be compared by fold.
 template<class Visit>

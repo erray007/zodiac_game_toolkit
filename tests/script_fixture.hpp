@@ -72,6 +72,7 @@ host.set_log_handler([this](zodiac_log_level level,std::string_view message){log
 REQUIRE(vfs.mount("/",std::make_shared<zodiac::vfs::FolderSource>(root(),false,true),true,nullptr));
 REQUIRE(vfs.mount("data:/",std::make_shared<zodiac::vfs::FolderSource>(data(),false,true),true,nullptr));
 zodiac::register_files(engine,vfs);
+zodiac::register_pack(engine,vfs);
 }
 ~ScriptFixture()
 {

@@ -901,8 +901,12 @@ const auto reader=open_read(from);
 if(!reader)return move_failed(reader.error(),false);
 auto writer=open_write(to,WriteMode::truncate);
 if(!writer)return move_failed(writer.error(),true);
-Reader& in=**reader;
-WriteTarget& out=**writer;
+if(auto pumped=pump(**reader,**writer,sync);!pumped)return std::unexpected(std::move(pumped.error()));
+return false;
+}
+
+std::expected<void,MoveFailure> Vfs::pump(Reader& in,WriteTarget& out,bool sync)
+{
 const std::uint64_t size=in.size();
 std::byte* const buffer=size?copy_buffer():nullptr;
 std::uint64_t done=0;
@@ -916,7 +920,68 @@ done+=static_cast<std::uint64_t>(got);
 }
 if(auto committed=out.commit();!committed)return move_failed(Failure{committed.error(),{}},true);
 if(sync)if(auto synced=out.sync();!synced)return move_failed(Failure{synced.error(),{}},true);
+return {};
+}
+
+std::expected<void,MoveFailure> Vfs::write_from(std::string_view path,Reader& from,bool sync)
+{
+return guarded_move(*this,"write_from",path,[&]()->std::expected<void,MoveFailure>{
+const auto p=parse_failure(path);
+if(!p)return move_failed(p.error(),true);
+if(p->folder)return move_failed(Failure{FileError::is_directory,{}},true);
+{
+const std::shared_ptr<const Table> table=snapshot();
+const auto target=writing_end(*table,path,*p);
+if(!target)return move_failed(target.error(),true);
+const auto file=target->source->host_file(target->sub,true);
+if(!file)return move_failed(end_failure(path,*target,file.error()),true);
+if(*file){
+std::error_code unused;
+const auto replaced=replace_host(**file,sync,[&](const std::filesystem::path& temp,const TempPlan& plan){return write_reader(temp,plan,from,copy_buffer(),copy_chunk);},unused);
+target->source->forget(target->sub);
+if(!replaced)return std::unexpected(replaced.error());
+written(path,*p,*target);
+return {};
+}
+}
+// A target without host files takes the bytes at commit (Source's contract).
+auto writer=open_write(path,WriteMode::truncate);
+if(!writer)return move_failed(writer.error(),true);
+return pump(from,**writer,sync);
+});
+}
+
+std::expected<std::optional<Vfs::HostFile>,Failure> Vfs::host_file(std::string_view path,bool for_write)
+{
+return guarded(*this,"host_file",path,[&]()->std::expected<std::optional<HostFile>,Failure>{
+const auto p=parse_failure(path);
+if(!p)return std::unexpected(p.error());
+if(p->folder)return failed(FileError::is_directory);
+const std::shared_ptr<const Table> table=snapshot();
+const auto end=for_write?writing_end(*table,path,*p):reading_end(*table,path,*p,false);
+if(!end)return std::unexpected(end.error());
+const auto file=end->source->host_file(end->sub,for_write);
+if(!file)return std::unexpected(end_failure(path,*end,file.error()));
+if(!*file)return std::optional<HostFile>();
+const bool writable=end->mount?end->mount->writable&&!end->source->read_only():true;
+return std::optional<HostFile>(HostFile{std::move(**file),writable});
+});
+}
+
+void Vfs::forget(std::string_view path) noexcept
+{
+try{
+const auto p=parse(path);
+if(!p||p->mount=="host:")return;
+const std::shared_ptr<const Table> table=snapshot();
+visit_covering(*table,*p,[&](const Target& target){
+target.mount->source->forget(target.sub);
 return false;
+});
+}
+catch(...){
+report_internal_error("forget",path);
+}
 }
 
 std::expected<void,Failure> Vfs::write_file(std::string_view path,std::span<const std::byte> bytes,bool sync)

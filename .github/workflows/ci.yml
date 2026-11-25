@@ -278,6 +278,18 @@ jobs:
           .tools/cmake/bin/cmake --preset linux-debug -B build/literal-fallback -DZODIAC_AS_STRTOD_FALLBACK=ON "-DFETCHCONTENT_BASE_DIR=$PWD/build/literal-fallback/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src"
           .tools/cmake/bin/cmake --build build/literal-fallback --target test_script_literals
           build/literal-fallback/tests/test_script_literals
+      # The pack nonce rule end to end (test_pack's stress test of every (file key, nonce) pair sealed) needs the seal log of a
+      # ZODIAC_TEST_HOOKS tree: test_pack alone, built in one that reuses the sources the first step fetched and patched. The
+      # test prints a line, so a renamed test that matches nothing cannot pass. Pack writing is the same code on both systems,
+      # so this runs here only.
+      - name: Test the pack nonce rule with the test hooks
+        run: |
+          set -o pipefail
+          deps="$PWD/.deps/linux-debug"
+          .tools/cmake/bin/cmake --preset linux-debug -B build/hooks -DZODIAC_TEST_HOOKS=ON "-DFETCHCONTENT_BASE_DIR=$PWD/build/hooks/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src" "-DFETCHCONTENT_SOURCE_DIR_MONOCYPHER=$deps/monocypher-src"
+          .tools/cmake/bin/cmake --build build/hooks --target test_pack
+          build/hooks/tests/test_pack "--test-case=no file key and nonce pair is ever sealed twice" | tee pack-hooks.txt
+          grep -q "pack seal log checked" pack-hooks.txt || { echo "::error::the pack nonce test did not run"; exit 1; }
       # The benchmark of spec 8.4 on an optimized build, as in the windows job, with only its speed gate report-only: GitHub's
       # Linux runners vary from job to job, and one noisy runner failed operations no commit had touched, so the windows job
       # is the speed gate. Everything else still fails the job: bench_types exiting nonzero (a snippet that does not build or

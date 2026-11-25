@@ -65,6 +65,34 @@
 // - string last_file_error(): the calling thread's last helper failure (thread_local). The helpers that return bool, and the lists,
 //   set it on failure and clear it on success.
 // Each throws std::runtime_error naming the declaration when the engine refuses one.
+//
+// register_pack(engine, vfs) (src/core/pack/pack_binding.cpp; spec 8.3 of the library-and-packs design) comes after
+// register_files: pack, a reference type (pack p; or pack@ p = pack();), over pack::PackStorage (core/pack/pack_storage.hpp).
+// Each <name> in a text is the entry name as given, through one_line; an entry name is a VFS file path of the root mount
+// (pack_format.hpp's canonical_entry_name: "sounds\a.ogg" is "sounds/a.ogg"), matched by fold_name.
+// - bool open(path, key, bool create = false): the pack file at VFS path path with the password key (Argon2id). It must be a
+//   plain file of a folder mount (or a host path): one inside a pack fails with `"<path>" is inside a pack; a pack file must
+//   be a plain file`. create makes the pack when nothing is there (in the newest writable mount covering path); without it a
+//   missing file fails with `cannot read "<path>": file not found`. A wrong key or a damaged pack fails with `wrong key or
+//   damaged pack`, a pack of a newer format with `unsupported pack (newer format)`, a system failure with `cannot read|write
+//   "<path>": <reason>`. An open pack is closed first. A pack found through a read-only mount, or a file the system will not
+//   let it write, is read only: its changes fail with `cannot write "<path>": access denied`.
+// - void close() (also on release): flushes (a failure sets error), removes the mounts this object made (Task 8) and drops this
+//   object's hold on the storage; other pack objects, mounts and readers of the file keep it open until the last one goes.
+//   bool is_open, string error: the last failure's text, cleared by every success.
+// - bool exists(name) (a file entry; deletion markers and invalid names are not), array<string>@ list() (the file entries'
+//   names sorted by bytes), int count, int64 size(name) (-1 when there is no such file).
+// - bool add_file(vfs_path, name) (the file's bytes, read in batches, and its modification time), bool add(name, data) (any
+//   bytes, now as its time), bool remove(name): false and error set on failure: `"<name>" is not a valid entry name`,
+//   `cannot read "<vfs_path>": <reason>`, `cannot write "<path>": <reason>`, `cannot delete "<name>" from the pack: file not
+//   found`.
+// - string read(name): throws `cannot read "<name>" from the pack: <reason>` (file not found, damaged data, ...) or
+//   `"<name>" is not a valid entry name`. bool extract(name, vfs_path): Vfs::write_from, so vfs_path is its old file or the
+//   whole entry; false with that read text, or `cannot write "<vfs_path>": <reason>`.
+// - bool compact(), bool flush(), int64 wasted_bytes.
+// - On a pack that is not open: read throws and the changes fail with `pack is not open`; exists is false, list empty, count
+//   and wasted_bytes 0, size -1.
+// The pack object is not internally synchronized (one thread at a time); the storage under it is.
 #pragma once
 
 class asIScriptEngine;
@@ -74,4 +102,5 @@ namespace vfs {
 class Vfs;
 }
 void register_files(asIScriptEngine* engine,vfs::Vfs& vfs);
+void register_pack(asIScriptEngine* engine,vfs::Vfs& vfs);
 }
