@@ -391,8 +391,9 @@ class CheckBenchTests(unittest.TestCase):
         data = json.loads(check_bench.DEFAULT_LIMITS.read_text(encoding="utf-8"))
         for op, entry in data["ops"].items():
             with self.subTest(op=op):
-                # Every derived limit holds every A/A' sample it was derived from, with the file's 1 % floor.
+                # Every derived limit holds every A/A' sample it was derived from, with the file's 1 % floor, and is at least the minimum.
                 self.assertGreaterEqual(entry["limit"], round(entry["max"] + 0.01, 3) - 1e-9)
+                self.assertGreaterEqual(entry["limit"], data["minimum"])
                 self.assertGreaterEqual(entry["samples"], 30)
 
     def test_a_missing_file_fails(self):
