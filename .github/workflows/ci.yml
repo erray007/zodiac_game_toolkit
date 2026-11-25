@@ -508,6 +508,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "hello.exe does not run on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
           & $probe --require-segment $zodiac --version
           if ($LASTEXITCODE -ne 0) { throw "zodiac.exe does not run on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
+          $zodiacw = Join-Path $root 'Zodiac\bin\zodiacw.exe'
+          & $probe --require-segment $zodiacw --version
+          if ($LASTEXITCODE -ne 0) { throw "zodiacw.exe does not run on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
+          # A game whose name Windows' installer detection looks for (setup) runs as the user who starts it: the manifest's asInvoker.
+          & $zodiac new setup
+          if ($LASTEXITCODE -ne 0) { throw "zodiac new setup failed with exit code $LASTEXITCODE" }
+          & $zodiac build setup --no-window
+          if ($LASTEXITCODE -ne 0) { throw "zodiac build setup failed with exit code $LASTEXITCODE" }
+          $setupGame = Join-Path $root 'setup\release\setup.exe'
+          if (-not [IO.File]::ReadAllText($setupGame, [Text.Encoding]::Latin1).Contains('<requestedExecutionLevel level="asInvoker" uiAccess="false"/>')) { throw "setup.exe's manifest does not ask for asInvoker" }
+          & $setupGame
+          if ($LASTEXITCODE -ne 0) { throw "setup.exe failed with exit code $LASTEXITCODE" }
+          & $probe --require-same-elevation --require-segment $setupGame
+          if ($LASTEXITCODE -ne 0) { throw "setup.exe is elevated beyond the user or not on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
       # Two rounds. Round 1: .zs already belongs to another program (a fake ProgID); every option is installed, then uninstall must give .zs back and
       # remove everything else it added. Round 2: the user PATH already holds the kit's bin folder; uninstall must leave that entry, which it did not add.
       - name: Setup wizard, silent install and uninstall

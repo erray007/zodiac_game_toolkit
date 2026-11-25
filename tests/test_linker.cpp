@@ -205,6 +205,8 @@ CHECK(pe_subsystem(folder.dir()/"game.exe")==2);
 std::ifstream in(folder.dir()/"game.exe",std::ios::binary);
 const std::string image((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
 CHECK(image.find("<heapType xmlns=\"http://schemas.microsoft.com/SMI/2020/WindowsSettings\">SegmentHeap</heapType>")!=std::string::npos);
+// And the user's own rights, whatever the game is called (installer detection would otherwise look at names such as setup).
+CHECK(image.find("<requestedExecutionLevel level=\"asInvoker\" uiAccess=\"false\"/>")!=std::string::npos);
 }
 // wWinMain hands [zodiac_payload, zodiac_payload_end) to start_linked: any other end than just past the data is a size mismatch (exit 2).
 const zodiac::platform::ProcessResult ran=run_exe(folder.dir()/"game.exe");

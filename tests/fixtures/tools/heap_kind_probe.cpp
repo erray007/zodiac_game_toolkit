@@ -1,6 +1,9 @@
 // Test tool (Windows): which heap a program's process heap is, the Segment Heap or the NT heap (Task 5c fix round 1: every shipped executable
 // and every game asks for the Segment Heap in its application manifest, src/platform/windows/application.manifest).
-//   heap_kind_probe [--require-segment] <program> [arguments...]
+//   heap_kind_probe [--require-segment] [--require-same-elevation] <program> [arguments...]
+// It also prints whether the child's token is elevated, beside the probe's own; --require-same-elevation fails (1) when the child is
+// elevated and the probe is not (the manifest's asInvoker keeps installer detection off a game named setup or update). A program that
+// Windows wants to elevate cannot be started at all here (error 740, ERROR_ELEVATION_REQUIRED, exit 2).
 // Starts the program under the debugging API (DEBUG_ONLY_THIS_PROCESS) with _NO_DEBUG_HEAP=1, so being debugged does not switch its heap to
 // the debug heap. At the loader's initial breakpoint, after the process heap exists and before any of the program's own code runs, it reads
 // the child's PEB (ProcessHeap at offset 0x30, NtGlobalFlag at 0xBC on x64) and the heap header's signature at offset 0x10 (0xDDEEDDEE for a
@@ -67,6 +70,32 @@ std::uint32_t signature=0;
 std::uint32_t global_flag=0;
 };
 
+// A process's token elevation: elevated or not, and its TokenElevationType (1 default, 2 full, 3 limited).
+struct Elevation {
+bool known=false;
+bool elevated=false;
+int type=0;
+};
+Elevation elevation_of(HANDLE process)
+{
+Elevation result;
+HANDLE token=nullptr;
+if(!OpenProcessToken(process,TOKEN_QUERY,&token))return result;
+TOKEN_ELEVATION elevation{};
+TOKEN_ELEVATION_TYPE type{};
+DWORD size=0;
+result.known=GetTokenInformation(token,TokenElevation,&elevation,sizeof elevation,&size)&&GetTokenInformation(token,TokenElevationType,&type,sizeof type,&size);
+result.elevated=elevation.TokenIsElevated!=0;
+result.type=static_cast<int>(type);
+CloseHandle(token);
+return result;
+}
+const char* elevation_text(const Elevation& elevation)
+{
+if(!elevation.known)return "unknown";
+return elevation.elevated?"elevated":"not elevated";
+}
+
 HeapInfo read_heap(HANDLE process)
 {
 HeapInfo info;
@@ -88,12 +117,14 @@ int wmain(int argc,wchar_t** argv)
 {
 int first=1;
 bool require_segment=false;
-if(argc>first&&std::wcscmp(argv[first],L"--require-segment")==0){
-require_segment=true;
-++first;
+bool require_same_elevation=false;
+for(;argc>first;++first){
+if(std::wcscmp(argv[first],L"--require-segment")==0)require_segment=true;
+else if(std::wcscmp(argv[first],L"--require-same-elevation")==0)require_same_elevation=true;
+else break;
 }
 if(argc<=first){
-std::fprintf(stderr,"usage: heap_kind_probe [--require-segment] <program> [arguments...]\n");
+std::fprintf(stderr,"usage: heap_kind_probe [--require-segment] [--require-same-elevation] <program> [arguments...]\n");
 return 2;
 }
 std::wstring line;
@@ -103,10 +134,13 @@ STARTUPINFOW startup{};
 startup.cb=sizeof startup;
 PROCESS_INFORMATION process{};
 if(!CreateProcessW(nullptr,line.data(),nullptr,nullptr,FALSE,DEBUG_ONLY_THIS_PROCESS,nullptr,nullptr,&startup,&process)){
-std::fprintf(stderr,"heap_kind_probe: cannot start %s (error %lu)\n",utf8(argv[first]).c_str(),GetLastError());
+const DWORD error=GetLastError();
+// ERROR_ELEVATION_REQUIRED: Windows wants to elevate the program (its manifest, or installer detection without one).
+std::fprintf(stderr,"heap_kind_probe: cannot start %s (error %lu%s)\n",utf8(argv[first]).c_str(),error,error==ERROR_ELEVATION_REQUIRED?", the program requires elevation":"");
 return 2;
 }
 HeapInfo info;
+Elevation child_elevation;
 bool at_breakpoint=false;
 for(bool running=true;running;){
 DEBUG_EVENT event{};
@@ -128,6 +162,7 @@ case EXCEPTION_DEBUG_EVENT:
 if(!at_breakpoint&&event.u.Exception.ExceptionRecord.ExceptionCode==EXCEPTION_BREAKPOINT){
 at_breakpoint=true;
 info=read_heap(process.hProcess);
+child_elevation=elevation_of(process.hProcess);
 TerminateProcess(process.hProcess,0);
 }
 else status=DBG_EXCEPTION_NOT_HANDLED;
@@ -148,8 +183,11 @@ return 2;
 }
 const DWORD build=windows_build();
 const char* kind=info.signature==0xDDEEDDEEu?"segment":info.signature==0xFFEEFFEEu?"nt":"unknown";
-std::printf("%s: heap %s %08x, Windows build %lu, NtGlobalFlag 0x%x\n",utf8(argv[first]).c_str(),kind,info.signature,build,info.global_flag);
+const Elevation own=elevation_of(GetCurrentProcess());
+std::printf("%s: heap %s %08x, Windows build %lu, NtGlobalFlag 0x%x, %s (token type %d; the probe %s)\n",utf8(argv[first]).c_str(),kind,info.signature,build,info.global_flag,elevation_text(child_elevation),child_elevation.type,elevation_text(own));
 std::fflush(stdout);
+// The program runs as the user who starts it: not elevated beyond the probe (installer detection, or a manifest asking for more).
+if(require_same_elevation&&(!child_elevation.known||(child_elevation.elevated&&!own.elevated)))return 1;
 if(!require_segment)return 0;
 if(build<segment_heap_build){
 std::printf("Windows build %lu is older than %lu (Windows 10 2004): heapType is ignored there, so the NT heap is expected (report only)\n",build,segment_heap_build);

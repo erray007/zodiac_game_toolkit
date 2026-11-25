@@ -18,6 +18,13 @@ endif()
 if(DEFINED ZODIAC_BENCH_CORE_PAD AND NOT ZODIAC_BENCH_CORE_PAD STREQUAL "0")
 set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_CORE_PLACEMENT_PAD=${ZODIAC_BENCH_CORE_PAD})
 endif()
+# The String block cache study (placement-study.yml's variants, Task 5c fix round 2): -DZODIAC_BENCH_STRING_CACHE_TOP=<bytes> compiles the
+# release core's string.cpp with that largest cached block (256, or a power of two from 512 to 65536) instead of its default. It changes
+# the core of this tree only; no preset sets it.
+set(ZODIAC_BENCH_STRING_CACHE_TOP "" CACHE STRING "String block cache study: the largest cached block in bytes (empty: the default)")
+if(NOT ZODIAC_BENCH_STRING_CACHE_TOP STREQUAL "")
+set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_STRING_BLOCK_CACHE_TOP=${ZODIAC_BENCH_STRING_CACHE_TOP})
+endif()
 # The placement study (placement-study.yml, Task 5c): -DZODIAC_BENCH_FIXED_BASE=ON links bench_types without ASLR, so every copy of the
 # file loads at its preferred base instead of a base Windows draws per image file. Windows only; never set by a preset.
 option(ZODIAC_BENCH_FIXED_BASE "Link bench_types without ASLR (the placement study only)" OFF)

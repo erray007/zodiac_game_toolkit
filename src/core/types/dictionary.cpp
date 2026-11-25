@@ -588,7 +588,7 @@ return heap::allocate_aligned_or_throw(size,alignof(Dictionary));
 
 void Dictionary::operator delete(void* block) noexcept
 {
-// Every Dictionary is sizeof(Dictionary) (the class has no derived types), so every block fits the cache.
+// Every Dictionary is sizeof(Dictionary) (the class is final), so every block fits the cache.
 if(block)give_dictionary_block(DictionaryBlock::object,block);
 }
 

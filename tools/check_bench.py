@@ -35,7 +35,9 @@ the geometric mean of head's best over main's best is at most the geometric-mean
   such a process as a change of everything on its side. Taken within each side, it never divides away a difference between the two
   builds: a head whose whole build is slower (a dropped optimization, a changed AngelScript patch, a harness change), on both its sides,
   keeps factors near 1 and fails.
-The factors are printed, and so is each operation's limit and the median over the pairs of head's raw new_ns over main's, for information.
+The factors are printed, and so is each operation's limit, the median over the pairs of head's raw new_ns over main's, and the add-on
+normalized change (head's median new_ns/addon_ns over main's), for information only: it cancels a shift both sides share, a layout shift
+of the shared VM as much as a real slowdown of shared code, so it is never gated.
 Operations main does not have are listed, not compared; a time of 0 on either side fails with the operation named (exit 2). The comparison
 is report-only, with a REGRESSION GATE REPORT-ONLY warning on stdout and stderr (and, under GitHub Actions, a ::warning:: annotation on
 stdout), when main's results were calibrated otherwise than
@@ -304,7 +306,7 @@ def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
     main_factors = speed_factors([{op: side[op][1] for op in compared} for side in baselines], compared)
     width = max(len("op"), max(len(op) for op in ops))
     lines = [f"process speed factors (the add-on side's median over operations, within each side): head {' '.join(f'{f:.3f}' for f in head_factors)}, main {' '.join(f'{f:.3f}' for f in main_factors)}"]
-    lines.append(f"{'op':<{width}}  {'main median':>12}  {'head best':>12}  {'head/main':>9}  {'best/best':>9}  {'pair med':>8}  {'limit':>6}")
+    lines.append(f"{'op':<{width}}  {'main median':>12}  {'head best':>12}  {'head/main':>9}  {'best/best':>9}  {'pair med':>8}  {'add-on':>7}  {'limit':>6}")
     changes = []
     best_changes = []
     for op in compared:
@@ -315,10 +317,15 @@ def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
         change = head_best / main_typical
         best_changes.append(head_best / min(main_ns))
         paired = median([head[op][0] / base[op][0] for head, base in zip(heads, baselines)])
+        # Diagnostic only, never gated: head's median Zodiac/add-on over main's. It cancels what both sides share (a layout shift of the
+        # VM, but also a real slowdown of shared code), which is why the gate never uses it.
+        head_ratio = median([head[op][0] / head[op][1] for head in heads if head[op][1] > 0] or [0.0])
+        main_ratio = median([base[op][0] / base[op][1] for base in baselines if base[op][1] > 0] or [0.0])
+        normalized = head_ratio / main_ratio if main_ratio > 0 else float("nan")
         limit = limits["ops"].get(op, limits["default"])
         changes.append((op, change, limit))
         mark = "  FAIL" if change > limit else ""
-        lines.append(f"{op:<{width}}  {main_typical:>12.2f}  {head_best:>12.2f}  {change:>9.3f}  {best_changes[-1]:>9.3f}  {paired:>8.3f}  {limit:>6.2f}{mark}")
+        lines.append(f"{op:<{width}}  {main_typical:>12.2f}  {head_best:>12.2f}  {change:>9.3f}  {best_changes[-1]:>9.3f}  {paired:>8.3f}  {normalized:>7.3f}  {limit:>6.2f}{mark}")
     geomean = math.exp(sum(math.log(c) for c in best_changes) / len(best_changes)) if best_changes else 1.0
     lines.append(f"geometric mean of best/best: {geomean:.4f} over {len(changes)} operations (best of {len(runs)} and {len(baselines)} processes), limit {limits['geomean']}")
     if new:

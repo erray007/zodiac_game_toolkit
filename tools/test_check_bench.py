@@ -245,7 +245,7 @@ class CheckBenchTests(unittest.TestCase):
         self.assertIn("they are paired in order", err)
         # Each operation's best times, its head/main, the pair median (information) and its limit are printed.
         code, out, _ = self.run_files(heads, ["a", "b", "c"], mains)
-        self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.010\s+1\.010\s+1\.04")
+        self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.010\s+1\.010\s+1\.010\s+1\.04")
         self.assertIn("process speed factors (the add-on side's median over operations, within each side): head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
 
     def test_a_uniformly_slower_head_build_fails_although_its_add_on_side_slows_too(self):
@@ -260,6 +260,8 @@ class CheckBenchTests(unittest.TestCase):
         for op in ops:
             self.assertIn(f"{op}: head/main 1.080", err)
         self.assertIn("geometric mean 1.0800", err)
+        # The add-on normalized column reads 1.000 there (both sides moved together): it is a diagnostic and gates nothing.
+        self.assertRegex(out, r"a\s+10\.00\s+10\.80\s+1\.080\s+1\.080\s+1\.080\s+1\.000\s+1\.04\s+FAIL")
 
     def test_the_regression_gate_takes_each_side_s_best_process(self):
         mains = [line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5, new_ns=10.0) + "\n"] * 3
@@ -267,12 +269,12 @@ class CheckBenchTests(unittest.TestCase):
         heads = [line("a", 0.5, new_ns=13.0) + "\n" + line("b", 0.5) + "\n", line("a", 0.5, new_ns=13.0) + "\n" + line("b", 0.5) + "\n", line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5) + "\n"]
         code, out, err = self.run_files(heads, ["a", "b"], mains)
         self.assertEqual(code, 0, err)
-        self.assertRegex(out, r"a\s+10\.00\s+10\.00\s+1\.000\s+1\.000\s+1\.300\s+1\.04")
+        self.assertRegex(out, r"a\s+10\.00\s+10\.00\s+1\.000\s+1\.000\s+1\.300\s+1\.300\s+1\.04")
         # One of main's processes fast on a (its copy's placement): main's median ignores it, where main's best would read 1.25.
         fast_main = [line("a", 0.5, new_ns=8.0) + "\n" + line("b", 0.5) + "\n", line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5) + "\n", line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5) + "\n"]
         code, out, err = self.run_files([line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5) + "\n"] * 3, ["a", "b"], fast_main)
         self.assertEqual(code, 1, err)
-        self.assertRegex(out, r"a\s+10\.00\s+10\.00\s+1\.000\s+1\.250\s+1\.000\s+1\.04")
+        self.assertRegex(out, r"a\s+10\.00\s+10\.00\s+1\.000\s+1\.250\s+1\.000\s+1\.000\s+1\.04")
         self.assertIn("geometric mean 1.1180", err)
         # The real slowdown is slow in every process and fails.
         slow = [line("a", 0.5, new_ns=11.0) + "\n" + line("b", 0.5) + "\n"] * 3

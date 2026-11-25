@@ -148,8 +148,9 @@ asITypeInfo* type_=nullptr;
 int type_id_=0;
 };
 
-// 64-byte aligned (C++17 aligned new) so the fields a lookup reads, which come first, share one cache line.
-class alignas(64) Dictionary {
+// 64-byte aligned (C++17 aligned new) so the fields a lookup reads, which come first, share one cache line. Final: its operator new and
+// delete recycle blocks of exactly sizeof(Dictionary) (dictionary.cpp's per-thread caches).
+class alignas(64) Dictionary final {
 public:
 static constexpr int max_depth=100;
 

@@ -21,6 +21,22 @@ set(CMAKE_C_FLAGS_RELEASE "${ZODIAC_RELEASE_OPT} -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "${ZODIAC_RELEASE_OPT} -DNDEBUG")
 set(compile -ffunction-sections -fdata-sections -flto)
 set(link -flto -Wl,--gc-sections -s -Wl,--icf=safe)
+# Code alignment (Task 5c fix round 2, ZODIAC_RELEASE_CODE_ALIGN): how much of the code starts on fixed boundaries, so a change elsewhere moves
+# less of what runs hot (the regression gate read such layout shifts as regressions). "functions": every function on 64 bytes (-falign-functions
+# at compile time, which the bitcode keeps, and the LTO code generator's -align-all-functions at the link). "blocks": that, plus every block
+# not entered by fall-through and every loop on 32 bytes at the link (the VM's computed-goto handlers in asCContext::ExecuteNext are such
+# blocks). Empty: neither. The link options are in the captured game link line too, so games are laid out like the kit.
+set(ZODIAC_RELEASE_CODE_ALIGN "" CACHE STRING "Release code alignment: empty, functions or blocks")
+set_property(CACHE ZODIAC_RELEASE_CODE_ALIGN PROPERTY STRINGS "" functions blocks)
+if(ZODIAC_RELEASE_CODE_ALIGN STREQUAL "functions" OR ZODIAC_RELEASE_CODE_ALIGN STREQUAL "blocks")
+list(APPEND compile -falign-functions=64)
+list(APPEND link "-Wl,-mllvm,-align-all-functions=6")
+if(ZODIAC_RELEASE_CODE_ALIGN STREQUAL "blocks")
+list(APPEND link "-Wl,-mllvm,-align-all-nofallthru-blocks=5" "-Wl,-mllvm,-align-loops=32")
+endif()
+elseif(NOT ZODIAC_RELEASE_CODE_ALIGN STREQUAL "")
+message(FATAL_ERROR "ZODIAC_RELEASE_CODE_ALIGN is \"${ZODIAC_RELEASE_CODE_ALIGN}\"; it takes functions, blocks or nothing")
+endif()
 add_compile_options("$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:${compile}>")
 add_link_options("$<$<CONFIG:Release>:${link}>")
 set(ZODIAC_RELEASE_GAME_LINK_FLAGS ${ZODIAC_RELEASE_OPT} ${link})

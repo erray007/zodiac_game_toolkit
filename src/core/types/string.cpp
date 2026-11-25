@@ -552,22 +552,44 @@ std::uint32_t* index;
 };
 // Blocks of up to block_cache_limit bytes come in size classes of block_class_step bytes and are recycled through a
 // per-thread cache of up to block_cache_depth blocks per class: the C runtime's allocator costs more than everything else
-// a short heap string does (a copy, a concatenation, a dictionary key), and scripts make and drop those all the time. A
-// block may be freed on any thread; it then goes to that thread's cache. A thread's cache is freed when the thread ends
-// (at most block_classes*block_cache_depth blocks, about 70 KB); blocks freed after that go straight to the allocator.
-// Under AddressSanitizer the cache is bypassed (blocks go straight to the allocator, size classes kept), so use after free and
+// a short heap string does (a copy, a concatenation, a dictionary key), and scripts make and drop those all the time. Above
+// that, blocks of up to block_cache_top bytes come in power-of-two classes (512, 1024, ... block_cache_top) recycled the same
+// way, block_large_depth per class (Task 5c fix round 2: text that grows by appends, a line or a message of a few hundred bytes
+// to a few kilobytes, moved through blocks above 256 bytes, which on the Segment Heap cost string_concat_append 2 %; the top was
+// chosen by measurement, see the report). A block may be freed on any thread; it then goes to that thread's cache. A thread's
+// cache is freed when the thread ends (at most block_cache_bytes); blocks freed after that go straight to the allocator. Under
+// AddressSanitizer the cache is bypassed (blocks go straight to the allocator, size classes kept), so use after free and
 // leaks of string blocks stay visible to it.
 constexpr bool block_cache_on=!heap::under_address_sanitizer;
 constexpr std::size_t block_class_step=16;
 constexpr std::size_t block_cache_limit=256;
 constexpr std::size_t block_classes=block_cache_limit/block_class_step;
 constexpr std::uint32_t block_cache_depth=32;
+// The largest cached block. ZODIAC_STRING_BLOCK_CACHE_TOP is the bench study's override (tests/bench's ZODIAC_BENCH_STRING_CACHE_TOP);
+// no preset sets it.
+#if defined(ZODIAC_STRING_BLOCK_CACHE_TOP)
+constexpr std::size_t block_cache_top=ZODIAC_STRING_BLOCK_CACHE_TOP;
+#else
+constexpr std::size_t block_cache_top=256;
+#endif
+static_assert(block_cache_top==block_cache_limit||(std::has_single_bit(block_cache_top)&&block_cache_top>block_cache_limit&&block_cache_top<=65536),
+"the top of String's block cache is 256 or a power of two from 512 to 65536");
+// Power-of-two classes above block_cache_limit: class j holds blocks of 2*block_cache_limit << j.
+constexpr std::size_t block_large_classes=static_cast<std::size_t>(std::bit_width(block_cache_top)-std::bit_width(block_cache_limit));
+constexpr std::uint32_t block_large_depth=8;
+// What one thread's cache can hold at most (the small classes full, then every large class full).
+constexpr std::size_t block_cache_bytes=[]{
+std::size_t bytes=0;
+for(std::size_t k=0;k<block_classes;++k)bytes+=block_cache_depth*(k+1)*block_class_step;
+for(std::size_t j=0;j<block_large_classes;++j)bytes+=block_large_depth*((2*block_cache_limit)<<j);
+return bytes;
+}();
 struct FreeBlock {
 FreeBlock* next;
 };
 struct BlockCache {
-FreeBlock* heads[block_classes];
-std::uint32_t counts[block_classes];
+FreeBlock* heads[block_classes+block_large_classes];
+std::uint32_t counts[block_classes+block_large_classes];
 ~BlockCache();
 };
 // Trivially destructible, so it stays usable after the cache is destroyed (strings freed by later destructors).
@@ -584,19 +606,30 @@ head=next;
 }
 }
 }
-// The size class of a block of bytes bytes (bytes <= block_cache_limit): class k holds blocks of (k+1)*block_class_step.
+static_assert(block_cache_bytes<=1024*1024,"one thread's String block cache stays under 1 MB");
+// The size class of a block of bytes bytes (bytes <= block_cache_top): class k < block_classes holds blocks of
+// (k+1)*block_class_step bytes, class block_classes+j blocks of 2*block_cache_limit << j.
 inline std::size_t block_class(std::size_t bytes) noexcept
 {
-return (bytes-1)/block_class_step;
+if(bytes<=block_cache_limit)return (bytes-1)/block_class_step;
+return block_classes+static_cast<std::size_t>(std::bit_width(bytes-1)-std::bit_width(block_cache_limit));
+}
+inline std::size_t class_bytes(std::size_t k) noexcept
+{
+return k<block_classes?(k+1)*block_class_step:(2*block_cache_limit)<<(k-block_classes);
+}
+inline std::uint32_t class_depth(std::size_t k) noexcept
+{
+return k<block_classes?block_cache_depth:block_large_depth;
 }
 // A block for capacity bytes and the NUL; capacity is raised to all the block holds.
 char* allocate_block(std::uint32_t& capacity)
 {
 std::size_t bytes=sizeof(HeapHeader)+std::size_t{capacity}+1;
 void* block=nullptr;
-if(bytes<=block_cache_limit){
+if(bytes<=block_cache_top){
 const std::size_t k=block_class(bytes);
-bytes=(k+1)*block_class_step;
+bytes=class_bytes(k);
 capacity=static_cast<std::uint32_t>(bytes-sizeof(HeapHeader)-1);
 if(block_cache_on&&!block_cache_closed){
 BlockCache& cache=block_cache;
@@ -615,15 +648,16 @@ inline HeapHeader* header_of(char* ptr) noexcept
 {
 return reinterpret_cast<HeapHeader*>(ptr)-1;
 }
-// Frees the block of ptr, allocated for capacity bytes (its index, if any, already freed or moved to another block).
+// Frees the block of ptr, allocated for capacity bytes (its index, if any, already freed or moved to another block). A cached size's
+// capacity was raised to its class's size, so bytes is that size exactly.
 void free_block(char* ptr,std::uint32_t capacity) noexcept
 {
 void* block=header_of(ptr);
 const std::size_t bytes=sizeof(HeapHeader)+std::size_t{capacity}+1;
-if(block_cache_on&&bytes<=block_cache_limit&&!block_cache_closed){
+if(block_cache_on&&bytes<=block_cache_top&&!block_cache_closed){
 BlockCache& cache=block_cache;
 const std::size_t k=block_class(bytes);
-if(cache.counts[k]<block_cache_depth){
+if(cache.counts[k]<class_depth(k)){
 cache.heads[k]=::new(block) FreeBlock{cache.heads[k]};
 ++cache.counts[k];
 return;

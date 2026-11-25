@@ -46,7 +46,8 @@
 //   prints per-second medians instead of one line per operation's whole run (see soak_lines); --game-loop SECONDS runs a script game's
 //   frame loop instead of any operation and prints its frame-time percentiles (see game_loop); --with-gate-heap first builds and
 //   calibrates every gated operation's engines and keeps them alive, so either runs on the heap of a gate process (millions of live
-//   blocks); --heap-state prints the heap's state before the first and after the last timed run (see print_heap_state). Every run prints the heap kind and, on Windows, the image base
+//   blocks); --heap-state prints the heap's state before the first and after the last timed run (see print_heap_state).
+//   --slowdown OP:PERCENT makes OP's Zodiac side PERCENT % slower (a spin inside each timed run), to show the regression gate catches it. Every run prints the heap kind and, on Windows, the image base
 //   to stderr. In a tree of the allocator experiment (ZODIAC_BENCH_ALLOCATOR) the heap is the Segment Heap or mimalloc (core/types/heap.hpp).
 // - Exit codes: 0 measured, 1 bad arguments, 2 a snippet did not build or run, 3 the two sides disagree on a checksum.
 // Not a ctest test (spec 8.4): CI runs it on release presets, and Task 7 reuses it to compare compiler flags.
@@ -677,6 +678,10 @@ return engine;
 //   own address), and the medians span all those placements, the same way on both sides.
 constexpr int kEngines=4;
 constexpr int kContexts=4;
+// --slowdown OP:PERCENT (the regression gate's sensitivity test, Task 5c fix round 2; never the gate itself): every timed run of OP's
+// Zodiac side spins until it has taken PERCENT % longer than its script did, a stand-in for a real slowdown of Zodiac's code.
+std::string g_slow_op;
+int g_slow_percent=0;
 // --diagnostic: count the page faults of every timed run (read outside the timed span).
 bool g_count_faults=false;
 // The process's page faults so far: PageFaultCount on Windows (soft and hard), minor plus major faults elsewhere.
@@ -695,7 +700,7 @@ return static_cast<std::uint64_t>(usage.ru_minflt)+static_cast<std::uint64_t>(us
 class Side {
 public:
 // Builds job's snippet on kEngines new engines and runs its setup() on each (untimed).
-Side(bool zodiac_types,const Job& job,std::string_view prelude,const std::string& snippet):name_(job.name+(zodiac_types?" (zodiac)":" (add-on)"))
+Side(bool zodiac_types,const Job& job,std::string_view prelude,const std::string& snippet):name_(job.name+(zodiac_types?" (zodiac)":" (add-on)")),slow_percent_(zodiac_types&&job.name==g_slow_op?g_slow_percent:0)
 {
 std::string source(kCommonPrelude);
 source.append(prelude).append("const int ITEMS=").append(std::to_string(job.items)).append(";\n").append(snippet);
@@ -744,7 +749,11 @@ const zodiac::testing::StringArraySteps steps_before=zodiac::testing::string_arr
 #endif
 const auto start=std::chrono::steady_clock::now();
 const int result=context_->Execute();
-const auto stop=std::chrono::steady_clock::now();
+auto stop=std::chrono::steady_clock::now();
+if(slow_percent_>0){
+const auto until=stop+(stop-start)*slow_percent_/100;
+while(stop<until)stop=std::chrono::steady_clock::now();
+}
 if(g_count_faults)faults+=page_faults()-faults_before;
 #if defined(ZODIAC_TEST_HOOKS)
 add_steps(steps_before);
@@ -797,6 +806,7 @@ const char* text=context_->GetExceptionString();
 return std::string(": ")+(text?text:"");
 }
 std::string name_;
+int slow_percent_=0;
 Instance instances_[kEngines];
 asIScriptContext* context_=nullptr;
 int next_engine_=0;
@@ -1559,6 +1569,13 @@ if(!parse_int(argv[++i],game_seconds)||game_seconds<1)fail(1,"--game-loop needs 
 }
 else if(arg=="--heap-state")heap_state=true;
 else if(arg=="--with-gate-heap")with_gate_heap=true;
+else if(arg=="--slowdown"&&has_value){
+const std::string_view value=argv[++i];
+const std::size_t colon=value.find(':');
+if(colon==std::string_view::npos||!parse_int(value.substr(colon+1),g_slow_percent)||g_slow_percent<1||g_slow_percent>1000)fail(1,"--slowdown takes OP:PERCENT, PERCENT from 1 to 1000");
+g_slow_op=std::string(value.substr(0,colon));
+if(std::none_of(jobs.begin(),jobs.end(),[](const Job& job){return job.name==g_slow_op;}))fail(1,"unknown operation "+g_slow_op+" (--list prints them)");
+}
 else if(arg=="--prewarm-heap")prewarm=true;
 else if(arg=="--zodiac-only")g_only=OnlySide::zodiac;
 else if(arg=="--reference-only")g_only=OnlySide::reference;
@@ -1568,7 +1585,7 @@ else if(arg=="--detail")detail=true;
 else if(arg=="--layout")layout=true;
 else if(arg=="--faults")faults=true;
 else if(arg=="--diagnostic"){}
-else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--soak SECONDS] [--game-loop SECONDS] [--with-gate-heap] [--heap-state] [--list]");
+else fail(1,"usage: bench_types [--rounds N] [--calibrate time|count] [--window-ms N] [--reps N] [--pin-reps FILE] [--op NAME]... [--also NAME]... [--out PATH] [--detail] [--layout] [--faults] [--prewarm-heap] [--zodiac-only|--reference-only] [--diagnostic] [--soak SECONDS] [--game-loop SECONDS] [--with-gate-heap] [--heap-state] [--slowdown OP:PERCENT] [--list]");
 }
 if(soak_seconds>0&&(only.empty()||g_only!=OnlySide::both))fail(1,"--soak needs the operations named with --op, and both sides");
 if(game_seconds>0&&(soak_seconds>0||!only.empty()))fail(1,"--game-loop runs alone, without --soak or --op");

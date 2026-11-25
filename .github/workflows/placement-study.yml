@@ -25,6 +25,15 @@ on:
       variants:
         description: "builds, separated by spaces: label=cmake options separated by commas (on top of every study option reset)"
         default: "aslr= fixed=-DZODIAC_BENCH_FIXED_BASE=ON"
+      game:
+        description: "seconds of one script game loop per copy (0: none)"
+        default: "0"
+      windows_jobs:
+        description: "the Windows jobs, as a JSON list"
+        default: "[1, 2, 3, 4, 5, 6, 7, 8]"
+      linux:
+        description: "true: also one Linux job with the same variants (commit variants are Windows only)"
+        default: "false"
 
 permissions:
   contents: read
@@ -35,16 +44,17 @@ env:
   ROUNDS: ${{ inputs.rounds || '101' }}
   OPS: ${{ inputs.ops }}
   VARIANTS: ${{ inputs.variants || 'aslr= fixed=-DZODIAC_BENCH_FIXED_BASE=ON' }}
+  GAME: ${{ inputs.game || '0' }}
 
 jobs:
   windows:
     strategy:
       fail-fast: false
       matrix:
-        job: [1, 2, 3, 4, 5, 6, 7, 8]
+        job: ${{ fromJSON(inputs.windows_jobs || '[1, 2, 3, 4, 5, 6, 7, 8]') }}
     runs-on: windows-latest
-    # One release build and a relink per further variant (about 5 to 15 minutes), then the bench processes.
-    timeout-minutes: 90
+    # A release build per variant whose compile flags differ (a full rebuild), a relink per other variant, then the bench processes.
+    timeout-minutes: 240
     defaults:
       run:
         shell: bash
@@ -92,7 +102,7 @@ jobs:
               cp "build/$label/tests/bench/bench_types.exe" "build/$label/tests/bench/bench_types.exe.map" "builds/$label/"
             else
               # Every study option back to its default first, then this variant's (commas between options).
-              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR=)
+              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR= -DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN= -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
               IFS=, read -r -a extra <<< "$spec"
               options+=("${extra[@]}")
               echo "== $label: ${options[*]}"
@@ -112,12 +122,88 @@ jobs:
           for variant in "${variants[@]}"; do label=${variant%%=*}; args+=(--variant "$label=builds/$label/bench_types.exe"); done
           if [ -z "$OPS" ] || [ "$OPS" = all ]; then mapfile -t names < <("builds/${variants[0]%%=*}/bench_types.exe" --list | tr -d '\r'); else read -r -a names <<< "$OPS"; fi
           for op in "${names[@]}"; do args+=(--op "$op"); done
-          python -I tools/bench_placement.py "${args[@]}" --bench-arg=--calibrate --bench-arg=time --out-dir placement
+          python -I tools/bench_placement.py "${args[@]}" --game "$GAME" --bench-arg=--calibrate --bench-arg=time --out-dir placement
       - name: Upload the runs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: placement-study-${{ matrix.job }}
+          path: |
+            placement/*.json
+            placement/*.txt
+            placement/runs.jsonl
+          if-no-files-found: ignore
+
+  linux:
+    if: inputs.linux == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-linux-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Install and select clang 18 with libc++, lld and the LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev lld-18 llvm-18
+          echo "CC=clang-18" >> "$GITHUB_ENV"
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build the variants
+        run: |
+          read -r -a variants <<< "$VARIANTS"
+          for variant in "${variants[@]}"; do
+            label=${variant%%=*}
+            spec=${variant#*=}
+            if [ "${spec:0:1}" = "@" ]; then echo "== $label: a commit variant, Windows only"; continue; fi
+            options=(-DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN= -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
+            IFS=, read -r -a extra <<< "$spec"
+            options+=("${extra[@]}")
+            echo "== $label: ${options[*]}"
+            .tools/cmake/bin/cmake --preset linux-release "${options[@]}" > /dev/null
+            .tools/cmake/bin/cmake --build --preset linux-release --target bench_types
+            mkdir -p "builds/$label"
+            cp build/linux-release/tests/bench/bench_types build/linux-release/tests/bench/bench_types.map "builds/$label/"
+          done
+      - name: Show the CPU
+        run: lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)|MHz|cache'
+      - name: Study
+        run: |
+          args=(--copies "$COPIES" --runs "$RUNS" --rounds "$ROUNDS")
+          read -r -a variants <<< "$VARIANTS"
+          first=""
+          for variant in "${variants[@]}"; do
+            label=${variant%%=*}
+            spec=${variant#*=}
+            if [ "${spec:0:1}" = "@" ]; then continue; fi
+            [ -n "$first" ] || first=$label
+            args+=(--variant "$label=builds/$label/bench_types")
+          done
+          if [ -z "$OPS" ] || [ "$OPS" = all ]; then mapfile -t names < <("builds/$first/bench_types" --list); else read -r -a names <<< "$OPS"; fi
+          for op in "${names[@]}"; do args+=(--op "$op"); done
+          python -I tools/bench_placement.py "${args[@]}" --game "$GAME" --bench-arg=--calibrate --bench-arg=time --out-dir placement
+      - name: Upload the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: placement-study-linux
           path: |
             placement/*.json
             placement/*.txt

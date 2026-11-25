@@ -1,15 +1,31 @@
 # Gate replica (Task 5b fix rounds 4 and 5, Task 5c), report-only: the Windows gate as ci.yml runs it (3 bench processes with --calibrate
 # time, each from its own copy of the build, gated on the median ratio per operation, and the regression gate on each side's best process
 # in alternating processes, tools/check_bench.py) on 8 runners at once, with a second build of the same commit standing in for main (an
-# A/A' run of the regression gate, whose head/main values are the samples of tools/bench_regression_limits.json). Trigger:
-#   gh workflow run gate-replica.yml --ref <branch>
+# A/A' run of the regression gate, whose head/main values are the samples of tools/bench_regression_limits.json). With pads=true (Task 5c
+# fix round 2) head and main are built with different no-op relink pads (ZODIAC_BENCH_PAD, ZODIAC_BENCH_CORE_PAD; job n takes pair n of
+# PADS for head and pair n+1 for main), so the samples hold the layout shift a code change elsewhere causes too. slowdown=OP:PERCENT makes
+# head's OP that much slower (bench_types --slowdown), to show the gate catches a real slowdown. Trigger:
+#   gh workflow run gate-replica.yml --ref <branch> [-f pads=true] [-f slowdown=string_find_ascii:10]
 name: gate-replica
 
 on:
   workflow_dispatch:
+    inputs:
+      pads:
+        description: "true: head and main built with different relink pads"
+        default: "false"
+      slowdown:
+        description: "OP:PERCENT, head's OP made that much slower (empty: none)"
+        default: ""
 
 permissions:
   contents: read
+
+env:
+  PADDED: ${{ inputs.pads || 'false' }}
+  SLOWDOWN: ${{ inputs.slowdown || '' }}
+  # bench pad_core pad (bytes), as bench-reference.yml's: the bench pad moves everything after it, the core pad the code behind byte_at.
+  PADS: "0_0 16_0 0_16 48_32 80_8 112_48 32_64 96_24 0_0"
 
 jobs:
   gate:
@@ -44,9 +60,22 @@ jobs:
           key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
       - name: Bootstrap
         run: python bootstrap.py
+      - name: Choose the pads
+        env:
+          JOB: ${{ matrix.job }}
+        run: |
+          read -r -a pads <<< "$PADS"
+          head=0_0
+          main=0_0
+          if [ "$PADDED" = true ]; then head=${pads[$((JOB-1))]}; main=${pads[$JOB]}; fi
+          echo "HEAD_BENCH_PAD=${head%_*}" >> "$GITHUB_ENV"
+          echo "HEAD_CORE_PAD=${head#*_}" >> "$GITHUB_ENV"
+          echo "MAIN_BENCH_PAD=${main%_*}" >> "$GITHUB_ENV"
+          echo "MAIN_CORE_PAD=${main#*_}" >> "$GITHUB_ENV"
+          echo "head pads $head, main pads $main"
       - name: Build the benchmark on the release preset
         run: |
-          .tools/cmake/bin/cmake --preset windows-release
+          .tools/cmake/bin/cmake --preset windows-release "-DZODIAC_BENCH_PAD=$HEAD_BENCH_PAD" "-DZODIAC_BENCH_CORE_PAD=$HEAD_CORE_PAD"
           .tools/cmake/bin/cmake --build --preset windows-release --target bench_types
       # A second build of the same commit in a worktree stands in for main: the regression gate then compares two builds of the same
       # sources (A/A'), so any failure of it is a false one, and its per-op head/main values are A/A' samples for the limits file.
@@ -58,7 +87,7 @@ jobs:
           New-Item -ItemType Junction -Path again-src/.tools -Target (Resolve-Path .tools) | Out-Null
           $deps = "$PWD/.deps/windows-release"
           Push-Location again-src
-          ../.tools/cmake/bin/cmake --preset windows-release -B ../build/again "-DFETCHCONTENT_BASE_DIR=$PWD/../build/again/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src"
+          ../.tools/cmake/bin/cmake --preset windows-release -B ../build/again "-DFETCHCONTENT_BASE_DIR=$PWD/../build/again/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src" "-DZODIAC_BENCH_PAD=$env:MAIN_BENCH_PAD" "-DZODIAC_BENCH_CORE_PAD=$env:MAIN_CORE_PAD"
           if ($LASTEXITCODE -ne 0) { throw "configure failed" }
           Pop-Location
           .tools/cmake/bin/cmake --build build/again --target bench_types
@@ -71,7 +100,15 @@ jobs:
           # As the gate: each process runs from its own copy of its build (Windows draws an image base per file, Task 5c).
           mkdir -p copies
           for i in 1 2 3; do cp "$bench" "copies/bench-$i.exe"; cp "$again" "copies/main-$i.exe"; done
-          run() { "copies/$1.exe" --detail --faults --layout --calibrate time --out "$1.json" 2> "$1-stderr.txt"; grep -m1 "image base" "$1-stderr.txt" || true; }
+          # Head's processes alone get the deliberate slowdown, when one is asked for.
+          slow=()
+          if [ -n "$SLOWDOWN" ]; then slow=(--slowdown "$SLOWDOWN"); fi
+          run() {
+            extra=()
+            case "$1" in bench-*) extra=("${slow[@]}");; esac
+            "copies/$1.exe" --detail --faults --layout --calibrate time "${extra[@]}" --out "$1.json" 2> "$1-stderr.txt"
+            grep -m1 "image base" "$1-stderr.txt" || true
+          }
           # The gate's order: main, head, head, main, main, head.
           run main-1; run bench-1; run bench-2; run main-2; run main-3; run bench-3
           status=0
@@ -79,8 +116,9 @@ jobs:
           cat check-bench.txt check-bench-stderr.txt
           echo "check_bench exit code $status (report-only)"
           # The CPU and the result in the run's summary too, so they are recorded even when the artifact is not.
-          echo "job $JOB: $(grep -m1 '^machine:' check-bench.txt), $(grep -m1 'heap kind' bench-1-stderr.txt | tr -d '\r'), check_bench exit code $status" >> "$GITHUB_STEP_SUMMARY"
+          echo "job $JOB: $(grep -m1 '^machine:' check-bench.txt), $(grep -m1 'heap kind' bench-1-stderr.txt | tr -d '\r'), pads head ${HEAD_BENCH_PAD}_${HEAD_CORE_PAD} main ${MAIN_BENCH_PAD}_${MAIN_CORE_PAD}, slowdown '${SLOWDOWN}', check_bench exit code $status" >> "$GITHUB_STEP_SUMMARY"
           grep -E "^  [a-z_0-9]+: (ratio|head/main)" check-bench-stderr.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo "head ${HEAD_BENCH_PAD}_${HEAD_CORE_PAD} main ${MAIN_BENCH_PAD}_${MAIN_CORE_PAD} slowdown ${SLOWDOWN}" > check-bench-pads.txt
         env:
           JOB: ${{ matrix.job }}
       - name: Upload the runs

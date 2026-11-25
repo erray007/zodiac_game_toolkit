@@ -10,8 +10,10 @@
 #include <cstdlib>
 #include <iterator>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace {
 // The allocation (counted from 1) of this thread that throws, 0 when none is armed; failed counts the throws.
@@ -103,68 +105,83 @@ threw=true;
 fail_at=0;
 return threw;
 }
-// A heap string of count characters whose sparse index is built (a read past index_step characters builds it).
-String indexed_text(std::size_t count,int reserve,std::string& bytes,std::u32string& model)
+// One append under an armed failure, and what it left. The failure is injected at the heap (the replaced operator new above is what
+// zodiac::heap::new_block calls) and the whole scenario runs on a thread of its own: String's per-thread block cache starts empty
+// there, so every block the scenario asks for comes from the heap and is counted, whatever sizes the cache holds (Task 5c fix round 2:
+// before, the tests relied on blocks above the cache's 256-byte limit). The test macros run afterwards, on the test's thread.
+struct Appended {
+std::string bytes;
+std::string more;
+std::u32string model;
+std::optional<String> text;
+// The text was built as asked (its characters counted, its sparse index built).
+bool built=false;
+std::size_t capacity_before=0;
+bool threw=false;
+int failures=0;
+};
+// A heap string of 100 characters with its sparse index built (a read past index_step characters builds it), with reserve bytes
+// reserved first, then an append of 70 more whose allocation-th allocation fails; model gets the 70 only when with_more.
+Appended append_on_fresh_thread(int reserve,int allocation,bool with_more)
 {
-make_text(0,count,bytes,model);
+Appended out;
+std::thread worker([&out,reserve,allocation,with_more]{
+make_text(0,100,out.bytes,out.model);
 String text;
 text.reserve(reserve);
-text.append(std::string_view(bytes));
-REQUIRE(text.length()==static_cast<int>(count));
-REQUIRE(text.code_at(static_cast<int>(count-1)).has_value());
-return text;
+text.append(std::string_view(out.bytes));
+out.built=text.length()==100&&text.code_at(99).has_value();
+std::u32string more_model;
+make_text(100,70,out.more,more_model);
+if(with_more)out.model+=more_model;
+out.capacity_before=static_cast<std::size_t>(text.capacity());
+out.threw=append_failing(text,out.more,allocation);
+out.failures=failed;
+out.text.emplace(std::move(text));
+});
+worker.join();
+return out;
 }
 }
 
 TEST_CASE("an append whose sparse index cannot grow keeps an index covering the whole text (bytes fit the block)")
 {
-std::string bytes;
-std::u32string model;
 // 100 characters have an index of 4 entries; 70 more need 6, so the extension has to grow the index block, and that
 // allocation is the only one the append makes (the reserved block holds all the bytes).
-String text=indexed_text(100,4096,bytes,model);
-std::string more;
-make_text(100,70,more,model);
-const String tail(more);
-REQUIRE(tail.length()==70);
-CHECK_FALSE(append_failing(text,tail.bytes(),1));
-CHECK(failed==1);
-CHECK(text.bytes()==bytes+more);
-check_every_character(text,model);
+Appended run=append_on_fresh_thread(4096,1,true);
+REQUIRE(run.built);
+REQUIRE(run.capacity_before>=run.bytes.size()+run.more.size());
+CHECK_FALSE(run.threw);
+CHECK(run.failures==1);
+String& text=*run.text;
+CHECK(text.bytes()==run.bytes+run.more);
+check_every_character(text,run.model);
 // The index dropped by the failure is rebuilt, and later appends extend it as usual.
 std::string again;
-make_text(170,90,again,model);
+make_text(170,90,again,run.model);
 text.append(std::string_view(again));
-CHECK(text.bytes()==bytes+more+again);
-check_every_character(text,model);
+CHECK(text.bytes()==run.bytes+run.more+again);
+check_every_character(text,run.model);
 }
 
 TEST_CASE("an append whose sparse index cannot grow keeps an index covering the whole text (block reallocated)")
 {
-std::string bytes;
-std::u32string model;
-// No spare room: the append reallocates the block (the first allocation, more than the block cache's 256 bytes) and then
-// grows the index (the second), which fails.
-String text=indexed_text(100,0,bytes,model);
-std::string more;
-make_text(100,70,more,model);
-REQUIRE(static_cast<std::size_t>(text.capacity())<bytes.size()+more.size());
-CHECK_FALSE(append_failing(text,more,2));
-CHECK(failed==1);
-CHECK(text.bytes()==bytes+more);
-check_every_character(text,model);
+// No spare room: the append reallocates the block (the first allocation) and then grows the index (the second), which fails.
+Appended run=append_on_fresh_thread(0,2,true);
+REQUIRE(run.built);
+REQUIRE(run.capacity_before<run.bytes.size()+run.more.size());
+CHECK_FALSE(run.threw);
+CHECK(run.failures==1);
+CHECK(run.text->bytes()==run.bytes+run.more);
+check_every_character(*run.text,run.model);
 }
 
 TEST_CASE("an append whose new block cannot be allocated throws and changes nothing")
 {
-std::string bytes;
-std::u32string model;
-String text=indexed_text(100,0,bytes,model);
-std::string more;
-std::u32string unused;
-make_text(100,70,more,unused);
-CHECK(append_failing(text,more,1));
-CHECK(failed==1);
-CHECK(text.bytes()==bytes);
-check_every_character(text,model);
+Appended run=append_on_fresh_thread(0,1,false);
+REQUIRE(run.built);
+CHECK(run.threw);
+CHECK(run.failures==1);
+CHECK(run.text->bytes()==run.bytes);
+check_every_character(*run.text,run.model);
 }
