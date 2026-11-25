@@ -3,12 +3,20 @@
 //
 // Resolution: a path is served by the mounts of its mount ("" or "data:") whose mount point is the path or one of its folders, compared
 // by fold_name segment by segment; the part below the mount point, spelled as given, goes to the source. Mounts are tried newest
-// first: stat, open_read and remove take the first mount that has the entry (a mount that lacks it, or meets a file where a folder
-// should be, passes the request on); open_write, create_directory and delete_directory go to the newest writable mount; rename,
-// copy and move take both (see rename). When only
-// read-only mounts cover a write, it fails with read_only_pack. list merges every covering mount's entries and the folders that
-// lead to deeper mount points. A path that only leads to a mount point is a directory. "host:" paths (only parsed when host paths
-// are on) go to the HostSource, which opens them exactly as given.
+// first, so every mount made after the start-up folders is in front of them: stat, open_read, remove and delete_directory take
+// the first mount that has the entry (a mount that lacks it, or meets a file where a folder should be, passes the request on).
+// A deletion marker (EntryKind::deleted, a patch pack's) found first means the name is gone: stat and open_read fail with
+// not_found, remove and delete_directory too, and the older mounts are not asked; list leaves the name out of every older
+// mount. rename, copy and move take both sides (see rename).
+// Writes (open_write, write_file, the to side of rename, copy and move, host_file for writing) go, newest first, to the first
+// writable mount, unless a read-only mount before it provides the name: then they fail with read_only_pack (a file there; a
+// folder is is_directory), since the write would be hidden under it; a deletion marker before it provides nothing. When only
+// read-only mounts cover a write, it fails with read_only_pack. Opening "a" or "r+" on a name the mount written lacks but an
+// older mount provides starts the new file with the older one's bytes, so the file continues what the path read. A write
+// target of a source without host files (a pack) stores its bytes only at commit. create_directory goes to the newest writable
+// mount. list merges every covering mount's entries and the folders that lead to deeper mount points by fold: each name once, as
+// the newest mount that has it spells it (every spelling that mount has). A path that only leads to a mount point is a
+// directory. "host:" paths (only parsed when host paths are on) go to the HostSource, which opens them exactly as given.
 //
 // Failures: Failure::code is the FileError; Failure::message is set for the failures with a text of their own:
 // - the path rules (bad_path): `"<path>" leaves its mount`, `"<path>" is a host path; set [files] host_paths = true to use it`,
@@ -67,7 +75,7 @@ enum class FileError:int{not_found=1,access_denied,damaged,is_directory,not_a_di
 // "file not found", "access denied", "damaged data", "is a directory", "not a directory", "in a read-only pack", "invalid path",
 // "ambiguous name", "input/output error", "directory not empty", "disk full".
 std::string_view reason_text(FileError error) noexcept;
-// deleted is a deletion marker (a patch pack hiding an older entry, Task 8): stat reports it, list leaves it out.
+// deleted is a deletion marker (a patch pack hiding an older entry): a Source's stat and list report it; the Vfs never does.
 enum class EntryKind{none,file,directory,deleted};
 struct EntryInfo{
 EntryKind kind=EntryKind::none;
@@ -113,15 +121,18 @@ FileError code=FileError::io;
 bool to=false;
 };
 // Something mounted: relative paths are '/'-joined valid names (parse_path's relative), "" for the source's own root folder.
-// Every function may be called from several threads at once.
+// Every function may be called from several threads at once. A source with deletion markers gives EntryKind::deleted from stat,
+// a null reader from open_read and appends them (kind deleted) in list; the Vfs hides the name in older mounts for them.
 class Source{
 public:
 virtual ~Source()=default;
 virtual std::expected<EntryInfo,FileError> stat(std::string_view relative)=0;
+// A null reader for a deletion marker.
 virtual std::expected<std::shared_ptr<Reader>,FileError> open_read(std::string_view relative)=0;
 // truncate creates or empties the file, append creates it or keeps its bytes, update needs an existing file. The folder it is in must exist.
 virtual std::expected<std::unique_ptr<WriteTarget>,FileError> open_write(std::string_view relative,WriteMode mode)=0;
-// Appends the entries of folder relative (names, kinds; sizes and times may be 0).
+// Appends the entries of folder relative (names, kinds; sizes and times may be 0). Deletion markers are appended too, even
+// when the listing then fails with not_found (a folder that holds only markers): they still hide older names.
 virtual std::expected<void,FileError> list(std::string_view relative,std::vector<EntryInfo>& out)=0;
 virtual std::expected<void,FileError> remove(std::string_view relative)=0;
 // Creates one folder; succeeds when it already exists. Its parent must exist.
@@ -273,7 +284,17 @@ Source* source=nullptr;
 const Mount* mount=nullptr;
 std::string_view sub;
 };
+// Where a write of a path goes (see Writes above), and whether a deletion marker above that mount hides the name.
+struct Route{
+Target target;
+bool hidden=false;
+};
 std::shared_ptr<const Table> snapshot() const;
+std::expected<Route,Failure> writing_route(const Table& table,std::string_view path,const VfsPath& p) const;
+// The reader of p in the first mount older than newer that has it: null when none has it or a deletion marker hides it.
+std::expected<std::shared_ptr<Reader>,Failure> older_reader(const Table& table,std::string_view path,const VfsPath& p,const Mount* newer) const;
+// Writes every byte of in into out from offset 0 on, in 256 KiB pieces; MoveError::to false for a failed read, true for a write.
+static std::expected<void,MoveError> fill(Reader& in,WriteTarget& out);
 // from's side, found as open_read finds it (as remove does when removing: a read-only mount then fails with read_only_pack), and
 // to's side, found as open_write finds it. Both view p.
 std::expected<End,Failure> reading_end(const Table& table,std::string_view path,const VfsPath& p,bool removing) const;

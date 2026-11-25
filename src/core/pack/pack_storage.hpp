@@ -75,10 +75,25 @@
 //   the replace removes the temporary file and changes nothing; a failure of the folder's flush after it is reported, with the
 //   new file already in use. A chunk that fails authentication fails it with damaged.
 // - close flushes, stops every lookup (stat and open_reader fail with not_found, list is empty), lets go of the file (its lock
-//   goes with the last reader still reading it) and leaves the registry; its
-//   flush's failure is returned. The last holder's release closes the storage too, sending a failure to the log (set_log).
-// Lookups: names are compared by fold_name, as VFS paths are. stat gives the entry (EntryInfo::name its last segment as asked);
-// list gives the names of the files sorted by bytes; count is the number of files. open_reader takes, at open, the current
+//   is released at once, even while readers keep the file open) and leaves the registry; its flush's failure is returned. The
+//   last holder's release closes the storage too, sending a failure to the log (set_log).
+// - rename moves a file entry to another name (a file there is replaced, its stored bytes wasted) without touching its chunks:
+//   they keep their id, so no nonce is used again. from missing (or a marker) is not_found (MoveError::to false); to a folder
+//   of the pack is is_directory, an invalid to is bad_path (to true).
+// - remove_folder removes every file entry below a folder (markers stay) and returns how many; none is not_found.
+// Lookups: names are compared by fold_name, as VFS paths are. stat gives the entry (EntryInfo::name its last segment as asked),
+// or a directory for a folder of the pack: a name that some file entry's name continues with '/' (folders hold no markers of
+// their own, and a folder holding only markers is none). list gives the names of the files sorted by bytes; count is the
+// number of files. For a mount (pack_source.hpp):
+// - open_mounted is open_reader that gives a null reader for a deletion marker (the name is hidden below it) and is_directory
+//   for a folder; the reader holds holder (the storage, so a mounted file keeps it) for its life.
+// - stored_name is a file entry's name as stored.
+// - list_folder appends the entries directly in a folder ("" the root): files and markers (EntryKind::deleted) with their
+//   stored last segment, size and time, and each folder below with files once, spelled as the smallest (by bytes) of its
+//   spellings, every one with its fold. A folder holding only markers gets them appended and then not_found; a file is
+//   not_a_directory, anything else not_found. It reads every entry (lists are rare; lookups are what is fast).
+// - Folders are counted per fold, so stat and open_mounted find one in one hash lookup, kept current by every change.
+// open_reader takes, at open, the current
 // file, the entry's id, size and offset, the chunk size and the file key, and never looks at the storage again: a compact or a
 // replacement cannot change what it reads. It reads only the chunks a read touches, verifying each, and keeps one decrypted
 // chunk; a chunk that fails authentication (or is cut short) is damaged, and no unauthenticated byte is ever returned. Readers
@@ -152,6 +167,11 @@ std::vector<std::string> list() const;
 std::size_t count() const;
 std::uint64_t wasted_bytes() const;
 std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> open_reader(std::string_view name) const;
+std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> open_mounted(std::string_view name,std::shared_ptr<const void> holder) const;
+std::optional<std::string> stored_name(std::string_view name) const;
+std::expected<void,vfs::FileError> list_folder(std::string_view folder,std::vector<vfs::EntryInfo>& out) const;
+std::expected<void,vfs::MoveError> rename(std::string_view from,std::string_view to);
+std::expected<std::size_t,vfs::FileError> remove_folder(std::string_view folder);
 std::expected<void,vfs::FileError> flush();
 std::expected<void,vfs::FileError> compact();
 std::string metadata() const;
@@ -168,6 +188,18 @@ IndexEntry record;
 // Bytes on disk (stored_size), 0 for a marker.
 std::uint64_t stored=0;
 };
+// The file entries and markers below a folder, at any depth.
+struct FolderCount{
+std::size_t files=0;
+std::size_t markers=0;
+};
+struct FoldHash{
+using is_transparent=void;
+std::size_t operator()(std::string_view fold) const noexcept{return std::hash<std::string_view>{}(fold);}
+};
+// By the folder's fold ("a" and "a/b" for an entry "a/b/c"), looked up by string_view without allocating.
+using Folders=std::unordered_map<std::string,FolderCount,FoldHash,std::equal_to<>>;
+using FolderNodes=std::vector<Folders::node_type>;
 PackStorage()=default;
 static std::expected<std::unique_ptr<PackStorage>,PackError> load(const std::filesystem::path& host,const KeySource& key,bool create,const PackOptions& options,std::optional<PackLocation> window);
 static std::shared_ptr<PackStorage> share(std::unique_ptr<PackStorage> storage);
@@ -186,6 +218,16 @@ template<class Fill>
 std::expected<IndexEntry,vfs::MoveError> append_entry(std::uint64_t size,Fill&& fill);
 // Publishes record under fold (the shared mutex taken exclusively inside).
 void insert_writing(std::string fold,IndexEntry record);
+// The folders of fold that folders_ lacks, made as nodes before the shared mutex is taken, so that publishing them (after a
+// reserve) allocates nothing and cannot fail halfway.
+FolderNodes new_folders_writing(std::string_view fold) const;
+// With the shared mutex held exclusively (or before the storage is shared): adds the nodes (folders_ reserved for them first,
+// so nothing below throws), then counts an entry of fold in (or out of) each of its folders; a folder counted down to nothing goes.
+void add_folders_locked(FolderNodes& nodes) noexcept;
+void count_locked(std::string_view fold,bool marker) noexcept;
+void uncount_locked(std::string_view fold,bool marker) noexcept;
+// The kind (file, deleted, directory) of fold, or none; with the shared mutex held.
+vfs::EntryKind kind_locked(const std::string& fold,const Entry** entry) const;
 std::expected<void,vfs::FileError> flush_writing();
 std::expected<void,vfs::FileError> compact_writing();
 // Writes the index of generation, wasted and entries and its footer at offset at of file, durable as the Durability rule says.
@@ -225,6 +267,7 @@ mutable std::shared_mutex mutex_;
 std::shared_ptr<platform::File> file_;
 // By fold_name.
 std::unordered_map<std::string,Entry> entries_;
+Folders folders_;
 std::size_t files_=0;
 std::uint64_t wasted_=0;
 std::string metadata_;

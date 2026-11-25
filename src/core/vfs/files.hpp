@@ -78,8 +78,9 @@
 //   "<path>": <reason>`, a pack another program has open for writing with `"<path>" is in use by another program`. An open
 //   pack is closed first. A pack found through a read-only mount, or a file the system will not
 //   let it write, is read only: its changes fail with `cannot write "<path>": access denied`.
-// - void close() (also on release): flushes (a failure sets error), removes the mounts this object made (Task 8) and drops this
-//   object's hold on the storage; other pack objects, mounts and readers of the file keep it open until the last one goes.
+// - void close() (also on release and before a new open): flushes (a failure sets error), removes the mounts this object made
+//   and drops this object's hold on the storage; other pack objects, their mounts and files opened through any mount keep it
+//   open until the last one goes.
 //   bool is_open, string error: the last failure's text, cleared by every success.
 // - bool exists(name) (a file entry; deletion markers and invalid names are not), array<string>@ list() (the file entries'
 //   names sorted by bytes), int count, int64 size(name) (-1 when there is no such file).
@@ -93,6 +94,12 @@
 // - bool compact(), bool flush(), int64 wasted_bytes.
 // - On a pack that is not open: read throws and the changes fail with `pack is not open`; exists is false, list empty, count
 //   and wasted_bytes 0, size -1.
+// - bool mount_pack(pack@ p, const string &in at = "/", bool writable = false): mounts p's pack at VFS folder at (any folder,
+//   data:/ and its subfolders included; never a host path), in front of everything mounted before it there (pack_source.hpp,
+//   the resolution and write rules of vfs.hpp): entry names are paths below at. false with p.error set: `pack is not open`,
+//   the path rule's text, `cannot write "<path>": access denied` (writable on a pack p cannot change), `already mounted
+//   there` (p has a mount at that folder already). void unmount_pack(pack@ p) removes every mount p made; lookups through
+//   them stop at once, while files already open read on. A null handle throws `Null pointer access`.
 // The pack object is not internally synchronized (one thread at a time); the storage under it is.
 #pragma once
 

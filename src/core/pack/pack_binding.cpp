@@ -5,9 +5,13 @@
 //   the Vfs without a global.
 // - Each object holds one shared_ptr to the storage: close drops only that one (after flushing), so other pack objects, mounts
 //   and readers of the file keep it open, and the last holder closes it.
+// - mount_pack mounts a pack source (pack_source.hpp) with the object as the mount's owner, so unmount_pack, close, a new open
+//   and the object's release remove exactly its mounts (Vfs::unmount).
 #include <core/vfs/files.hpp>
 #include <core/pack/pack_format.hpp>
+#include <core/pack/pack_source.hpp>
 #include <core/pack/pack_storage.hpp>
+#include <core/vfs/path.hpp>
 #include <core/text.hpp>
 #include <core/types/array.hpp>
 #include <core/types/script_guard.hpp>
@@ -35,6 +39,8 @@ using vfs::FileAction;
 using vfs::FileError;
 
 constexpr char kNotOpen[]="pack is not open";
+constexpr char kAlreadyMounted[]="already mounted there";
+constexpr char kNullPack[]="Null pointer access";
 constexpr char kOutOfMemory[]="out of memory";
 constexpr asPWORD packs_slot=0x5A50414B;
 constexpr std::uint64_t kMaxText=static_cast<std::uint64_t>(String::max_byte_length);
@@ -90,6 +96,8 @@ bool extract(std::string_view name,std::string_view to);
 bool compact();
 bool flush();
 std::int64_t wasted_bytes() const;
+bool mount(std::string_view at,bool writable);
+void unmount() noexcept{vfs_->unmount(this);}
 private:
 bool fail(std::string text) noexcept
 {
@@ -326,6 +334,17 @@ const std::uint64_t wasted=storage_->wasted_bytes();
 return wasted>static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())?std::numeric_limits<std::int64_t>::max():static_cast<std::int64_t>(wasted);
 }
 
+bool ScriptPack::mount(std::string_view at,bool writable)
+{
+if(!storage_)return fail(kNotOpen);
+// The rules Vfs::mount applies (a folder path of the VFS, never a host path), with their text.
+if(auto point=vfs::parse_path(at,false);!point)return fail(std::move(point.error()));
+// A pack this object cannot change takes no writes through a mount either: the same failure as its own changes.
+if(writable&&!writable_)return write_failed(FileError::access_denied);
+if(!vfs_->mount(at,pack::make_pack_source(storage_,writable),writable,this))return fail(kAlreadyMounted);
+return succeeded();
+}
+
 bool pack_open(ScriptPack& pack,const String& path,const String& key,bool create)
 {
 return pack.open(path.bytes(),key.bytes(),create);
@@ -389,6 +408,29 @@ return pack.flush();
 std::int64_t pack_wasted_bytes(const ScriptPack& pack)
 {
 return pack.wasted_bytes();
+}
+// The pack@ handle a script passes comes with a reference for the callee, released here.
+struct HandleRelease{
+ScriptPack* pack;
+~HandleRelease(){if(pack)pack->release();}
+};
+bool mount_pack(ScriptPack* pack,const String& at,bool writable)
+{
+const HandleRelease release{pack};
+if(!pack){
+raise_script_exception(kNullPack);
+return false;
+}
+return pack->mount(at.bytes(),writable);
+}
+void unmount_pack(ScriptPack* pack) noexcept
+{
+const HandleRelease release{pack};
+if(!pack){
+raise_script_exception(kNullPack);
+return;
+}
+pack->unmount();
 }
 void pack_add_ref(ScriptPack& pack) noexcept
 {
@@ -458,5 +500,7 @@ method(engine,"bool extract(const string &in name, const string &in vfs_path)",a
 method(engine,"bool compact()",asFUNCTION(guarded<&pack_compact>::call));
 method(engine,"bool flush()",asFUNCTION(guarded<&pack_flush>::call));
 method(engine,"int64 get_wasted_bytes() const property",asFUNCTION(guarded<&pack_wasted_bytes>::call));
+check(engine->RegisterGlobalFunction("bool mount_pack(pack@ p, const string &in at = \"/\", bool writable = false)",asFUNCTION(guarded<&mount_pack>::call),asCALL_CDECL),"mount_pack");
+check(engine->RegisterGlobalFunction("void unmount_pack(pack@ p)",asFUNCTION(unmount_pack),asCALL_CDECL),"unmount_pack");
 }
 }

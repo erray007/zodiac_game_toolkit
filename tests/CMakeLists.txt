@@ -131,6 +131,7 @@ zodiac_add_test(test_crypto SOURCES test_crypto.cpp LIBRARIES zodiac_core)
 target_compile_definitions(test_crypto PRIVATE "ZODIAC_TEST_CRYPTO_VECTORS=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crypto/rfc8439.txt\"")
 # The nonce stress test inside needs a ZODIAC_TEST_HOOKS tree; CI builds test_pack in one too (ci.yml).
 zodiac_add_test(test_pack SOURCES test_pack.cpp script_fixture.hpp LIBRARIES zodiac_core)
+zodiac_add_test(test_pack_mount SOURCES test_pack_mount.cpp script_fixture.hpp LIBRARIES zodiac_core)
 zodiac_add_test(test_script_literals SOURCES test_script_literals.cpp script_fixture.hpp LIBRARIES zodiac_core angelscript_literal_scanner)
 zodiac_add_test(test_module_registry SOURCES test_module_registry.cpp script_fixture.hpp LIBRARIES zodiac_core)
 target_compile_definitions(test_module_registry PRIVATE

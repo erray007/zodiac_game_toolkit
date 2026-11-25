@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <tuple>
 
 namespace zodiac::vfs {
 namespace {
@@ -590,8 +591,12 @@ Target found;
 const bool stopped=visit_covering(*table,*p,[&](const Target& target){
 auto info=target.mount->source->stat(target.sub);
 if(info){
+// A deletion marker: the name is gone from every older mount.
+if(info->kind==EntryKind::deleted)result=failed(FileError::not_found);
+else{
 result=std::move(*info);
 found=target;
+}
 return true;
 }
 if(fall_through(info.error()))return false;
@@ -605,6 +610,7 @@ check_spelling(path,*p,found);
 }
 return result;
 }
+// Nothing covering has it (or nothing covers it): a path leading to deeper mount points is a folder.
 if(leads_to_mount(*table,*p)){
 EntryInfo info;
 info.kind=EntryKind::directory;
@@ -633,8 +639,12 @@ Target found;
 const bool stopped=visit_covering(*table,*p,[&](const Target& target){
 auto reader=target.mount->source->open_read(target.sub);
 if(reader){
+// A null reader is a deletion marker: the name is gone from every older mount.
+if(!*reader)result=failed(FileError::not_found);
+else{
 result=std::move(*reader);
 found=target;
+}
 return true;
 }
 if(fall_through(reader.error()))return false;
@@ -662,31 +672,111 @@ if(!target)return failed(target.error());
 return std::move(*target);
 }
 const std::shared_ptr<const Table> table=snapshot();
-std::expected<std::unique_ptr<WriteTarget>,Failure> result=failed(FileError::not_found);
-bool covered=false;
-Target found;
-const bool stopped=visit_covering(*table,*p,[&](const Target& target){
-covered=true;
-if(!target.mount->writable)return false;
-auto writer=target.mount->source->open_write(target.sub,mode);
-if(writer){
-result=std::move(*writer);
-found=target;
+const auto route=writing_route(*table,path,*p);
+if(!route)return std::unexpected(route.error());
+const Target& target=route->target;
+Source& source=*target.mount->source;
+const auto fail=[&](FileError error)->std::unexpected<Failure>{
+return std::unexpected(error==FileError::ambiguous?ambiguous_failure(path,target):Failure{error,{}});
+};
+std::unique_ptr<WriteTarget> writer;
+if(mode!=WriteMode::truncate&&!route->hidden){
+// "a" and "r+" continue the file the path reads: when the mount written lacks it, that is an older mount's, whose bytes
+// start the new one (a pack written over the game folder appends to the folder's log, not to nothing).
+const auto info=source.stat(target.sub);
+if(!info&&!fall_through(info.error()))return fail(info.error());
+if(!info){
+auto seed=older_reader(*table,path,*p,target.mount);
+if(!seed)return std::unexpected(std::move(seed.error()));
+if(*seed){
+auto made=source.open_write(target.sub,WriteMode::truncate);
+if(!made)return fail(made.error());
+writer=std::move(*made);
+if(auto copied=fill(**seed,*writer);!copied)return failed(copied.error().code);
 }
-else result=std::unexpected(writer.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{writer.error(),{}});
+}
+}
+if(!writer){
+auto made=source.open_write(target.sub,mode);
+if(!made)return fail(made.error());
+writer=std::move(*made);
+}
+check_release_pack(path,*p);
+check_spelling(path,*p,target);
+return writer;
+});
+}
+
+std::expected<Vfs::Route,Failure> Vfs::writing_route(const Table& table,std::string_view path,const VfsPath& p) const
+{
+bool covered=false;
+bool hidden=false;
+std::optional<Failure> failure;
+Route found;
+visit_covering(table,p,[&](const Target& target){
+covered=true;
+if(target.mount->writable){
+found=Route{target,hidden};
+return true;
+}
+// A read-only mount above the one written decides when it provides the name: the write would be hidden under it.
+if(hidden)return false;
+const auto info=target.mount->source->stat(target.sub);
+if(!info){
+if(fall_through(info.error()))return false;
+failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}};
+return true;
+}
+if(info->kind==EntryKind::deleted){
+// Older mounts no longer provide it.
+hidden=true;
+return false;
+}
+failure=info->kind==EntryKind::directory?Failure{FileError::is_directory,{}}:Failure{FileError::read_only_pack,read_only_text(path)};
 return true;
 });
-if(!stopped){
-if(leads_to_mount(*table,*p))return failed(FileError::is_directory);
+if(failure)return std::unexpected(std::move(*failure));
+if(found.target.mount)return found;
+if(leads_to_mount(table,p))return failed(FileError::is_directory);
 if(covered)return std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
-return result;
+return failed(FileError::not_found);
 }
-if(result){
-check_release_pack(path,*p);
-check_spelling(path,*p,found);
+
+std::expected<std::shared_ptr<Reader>,Failure> Vfs::older_reader(const Table& table,std::string_view path,const VfsPath& p,const Mount* newer) const
+{
+bool past=false;
+std::expected<std::shared_ptr<Reader>,Failure> result=std::shared_ptr<Reader>();
+visit_covering(table,p,[&](const Target& target){
+if(!past){
+past=target.mount==newer;
+return false;
 }
-return result;
+auto reader=target.mount->source->open_read(target.sub);
+if(reader){
+// A file, or (null) a deletion marker hiding everything older: either way the search ends.
+result=std::move(*reader);
+return true;
+}
+if(fall_through(reader.error()))return false;
+result=std::unexpected(reader.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{reader.error(),{}});
+return true;
 });
+return result;
+}
+
+std::expected<void,MoveError> Vfs::fill(Reader& in,WriteTarget& out)
+{
+const std::uint64_t size=in.size();
+std::byte* const buffer=size?copy_buffer():nullptr;
+for(std::uint64_t done=0;done<size;){
+const auto wanted=static_cast<std::size_t>(std::min<std::uint64_t>(copy_chunk,size-done));
+const std::int64_t got=in.read_at(done,{buffer,wanted});
+if(got<0)return std::unexpected(MoveError{read_error(got),false});
+if(got==0)break;
+if(auto put=out.write_at(done,{buffer,static_cast<std::size_t>(got)});!put)return std::unexpected(MoveError{put.error(),true});
+done+=static_cast<std::size_t>(got);
+}
+return {};
 }
 
 std::expected<void,Failure> Vfs::remove(std::string_view path)
@@ -703,18 +793,23 @@ const std::shared_ptr<const Table> table=snapshot();
 std::expected<void,Failure> result=failed(FileError::not_found);
 const bool stopped=visit_covering(*table,*p,[&](const Target& target){
 Source& source=*target.mount->source;
-if(!target.mount->writable){
+// The first mount that has the name decides; a deletion marker means it is gone from every older one too.
 const auto info=source.stat(target.sub);
-if(info&&info->kind!=EntryKind::deleted){
-result=std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
-return true;
-}
-if(info||fall_through(info.error()))return false;
+if(!info){
+if(fall_through(info.error()))return false;
 result=std::unexpected(info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}});
 return true;
 }
+if(info->kind==EntryKind::deleted){
+result=failed(FileError::not_found);
+return true;
+}
+if(!target.mount->writable){
+result=std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
+return true;
+}
 // The spelling is checked before the entry is gone (dev mode only).
-if(dev_mode()&&source.stat(target.sub))check_spelling(path,*p,target);
+check_spelling(path,*p,target);
 auto removed=source.remove(target.sub);
 if(removed){
 result={};
@@ -741,8 +836,8 @@ if(fall_through(info.error()))return false;
 failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}};
 return true;
 }
-if(info->kind==EntryKind::deleted)return false;
-if(info->kind==EntryKind::directory)failure=Failure{FileError::is_directory,{}};
+if(info->kind==EntryKind::deleted)failure=Failure{FileError::not_found,{}};
+else if(info->kind==EntryKind::directory)failure=Failure{FileError::is_directory,{}};
 else if(removing&&!target.mount->writable)failure=Failure{FileError::read_only_pack,read_only_text(path)};
 else found=End{target.mount->source.get(),target.mount,target.sub};
 return true;
@@ -755,18 +850,9 @@ return found;
 std::expected<Vfs::End,Failure> Vfs::writing_end(const Table& table,std::string_view path,const VfsPath& p) const
 {
 if(p.mount=="host:")return End{host_.get(),nullptr,p.relative};
-bool covered=false;
-End found;
-const bool writable=visit_covering(table,p,[&](const Target& target){
-covered=true;
-if(!target.mount->writable)return false;
-found=End{target.mount->source.get(),target.mount,target.sub};
-return true;
-});
-if(writable)return found;
-if(leads_to_mount(table,p))return failed(FileError::is_directory);
-if(covered)return std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
-return failed(FileError::not_found);
+const auto route=writing_route(table,path,p);
+if(!route)return std::unexpected(route.error());
+return End{route->target.mount->source.get(),route->target.mount,route->target.sub};
 }
 
 Failure Vfs::end_failure(std::string_view path,const End& end,FileError code) const
@@ -907,17 +993,7 @@ return false;
 
 std::expected<void,MoveFailure> Vfs::pump(Reader& in,WriteTarget& out,bool sync)
 {
-const std::uint64_t size=in.size();
-std::byte* const buffer=size?copy_buffer():nullptr;
-std::uint64_t done=0;
-while(done<size){
-const auto wanted=static_cast<std::size_t>(std::min<std::uint64_t>(copy_chunk,size-done));
-const std::int64_t got=in.read_at(done,{buffer,wanted});
-if(got<0)return move_failed(Failure{read_error(got),{}},false);
-if(got==0)break;
-if(auto put=out.write_at(done,{buffer,static_cast<std::size_t>(got)});!put)return move_failed(Failure{put.error(),{}},true);
-done+=static_cast<std::uint64_t>(got);
-}
+if(auto filled=fill(in,out);!filled)return move_failed(Failure{filled.error().code,{}},filled.error().to);
 if(auto committed=out.commit();!committed)return move_failed(Failure{committed.error(),{}},true);
 if(sync)if(auto synced=out.sync();!synced)return move_failed(Failure{synced.error(),{}},true);
 return {};
@@ -1046,6 +1122,9 @@ return guarded(*this,"list",path,[&]()->std::expected<std::vector<std::string>,F
 const auto p=parse_failure(path);
 if(!p)return std::unexpected(p.error());
 std::vector<EntryInfo> entries;
+// ranks[i] is how many mounts listed before entries[i]'s (0 the newest): the newest one with a name decides it.
+std::vector<std::uint32_t> ranks;
+std::uint32_t rank=0;
 bool found_any=false;
 // A mount that has a file where the folder should be: when no mount has the folder, the answer is not_a_directory.
 bool met_file=false;
@@ -1058,6 +1137,8 @@ const std::shared_ptr<const Table> table=snapshot();
 std::optional<Failure> failure;
 visit_covering(*table,*p,[&](const Target& target){
 auto listed=target.mount->source->list(target.sub,entries);
+// What it appended (a failed listing may have appended deletion markers, which still hide older names).
+ranks.resize(entries.size(),rank++);
 if(listed){
 if(!found_any)check_spelling(path,*p,target);
 found_any=true;
@@ -1083,28 +1164,52 @@ const std::size_t end=prefix_end(mount.at,count+1);
 EntryInfo& info=entries.emplace_back();
 info.kind=EntryKind::directory;
 info.name=mount.at.substr(start,end-start);
+// After every mount's own listing.
+ranks.push_back(rank);
 found_any=true;
 }
 }
 if(!found_any)return failed(met_file?FileError::not_a_directory:FileError::not_found);
+if(ranks.size()<entries.size())ranks.resize(entries.size(),0);
 const EntryKind wanted=kind==ListKind::files?EntryKind::file:EntryKind::directory;
+// Markers hide files (a file listing); a folder listing ignores them.
+const bool markers=kind==ListKind::files;
 const bool every=pattern=="*";
 const std::string pattern_fold=every?std::string():fold_name(pattern);
-std::vector<std::pair<std::string,std::string>> names;
+struct Named{
+std::string fold;
+std::uint32_t rank;
+std::string name;
+bool marker;
+};
+std::vector<Named> names;
 names.reserve(entries.size());
-for(EntryInfo& entry:entries){
-if(entry.kind!=wanted)continue;
+for(std::size_t i=0;i<entries.size();++i){
+EntryInfo& entry=entries[i];
+const bool marker=entry.kind==EntryKind::deleted;
+if(entry.kind!=wanted&&!(marker&&markers))continue;
 // A FolderSource listing carries the folds its cache already holds.
 std::string fold=entry.fold.empty()?fold_name(entry.name):std::move(entry.fold);
 if(!every&&!glob_match(pattern_fold,fold))continue;
-names.emplace_back(std::move(fold),std::move(entry.name));
+names.push_back(Named{std::move(fold),ranks[i],std::move(entry.name),marker});
 }
-std::ranges::sort(names);
-const auto [first,last]=std::ranges::unique(names,{},[](const auto& name)->const std::string&{return name.second;});
-names.erase(first,last);
+std::ranges::sort(names,{},[](const Named& named){return std::tie(named.fold,named.rank,named.name);});
 std::vector<std::string> result;
 result.reserve(names.size());
-for(auto& name:names)result.push_back(std::move(name.second));
+// One name per fold across mounts: the newest mount's (every spelling it has, so a folder holding two is shown whole), none
+// when that is a marker.
+for(std::size_t i=0;i<names.size();){
+std::size_t end=i+1;
+while(end<names.size()&&names[end].fold==names[i].fold)++end;
+const std::uint32_t newest=names[i].rank;
+std::size_t last=i;
+while(last<end&&names[last].rank==newest)++last;
+const bool hidden=std::any_of(names.begin()+static_cast<std::ptrdiff_t>(i),names.begin()+static_cast<std::ptrdiff_t>(last),[](const Named& named){return named.marker;});
+if(!hidden){
+for(std::size_t j=i;j<last;++j)if(j==i||names[j].name!=result.back())result.push_back(std::move(names[j].name));
+}
+i=end;
+}
 return result;
 });
 }
@@ -1170,7 +1275,7 @@ return true;
 };
 const auto info=source.stat(target.sub);
 if(!info)return fall_through(info.error())?false:fail(info.error());
-if(info->kind!=EntryKind::directory)return info->kind==EntryKind::deleted?false:fail(FileError::not_a_directory);
+if(info->kind!=EntryKind::directory)return fail(info->kind==EntryKind::deleted?FileError::not_found:FileError::not_a_directory);
 if(!target.mount->writable){
 result=std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
 return true;

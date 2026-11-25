@@ -1,0 +1,644 @@
+// Packs mounted into the VFS (src/core/pack/pack_source.hpp, the mount rules of src/core/vfs/vfs.hpp, mount_pack and unmount_pack of
+// src/core/vfs/files.hpp; spec 8.3 and 9 of the library-and-packs design):
+// - newest-first lookup in front of the folder, mount points below a mount's root, case-insensitive names and "..";
+// - write routing: a read-only pack's exact text, a writable pack taking new and existing names, an append seeded from the folder
+//   below it, and paths no pack covers landing in the folder;
+// - deletion markers hiding older packs and the folder, and a newer pack showing the name again; listings merged by fold;
+// - unmount while a read is open, concurrent reads through a mount, and Review Focus 4: a pack changed while it is mounted and
+//   read, a second pack object on one file, and compact under an open file object.
+// Packs are made with 64 KiB, 1 pass Argon2id or raw keys for speed.
+#include "script_fixture.hpp"
+#include <core/pack/pack_source.hpp>
+#include <core/pack/pack_storage.hpp>
+#include <core/vfs/folder_source.hpp>
+#include <core/vfs/vfs.hpp>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <random>
+#include <span>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace pack=zodiac::pack;
+namespace crypto=zodiac::crypto;
+namespace fs=std::filesystem;
+using zodiac::vfs::EntryKind;
+using zodiac::vfs::FileError;
+using zodiac::vfs::FolderSource;
+using zodiac::vfs::ListKind;
+using zodiac::vfs::Vfs;
+using zodiac::vfs::WriteMode;
+using zodiac_test::ScriptFixture;
+
+namespace {
+const pack::PackOptions kFast{64,1,16};
+
+struct TempDir{
+fs::path path;
+TempDir():path(zodiac_test::unique_temp_folder())
+{
+fs::create_directories(path);
+}
+~TempDir()
+{
+std::error_code error;
+fs::remove_all(path,error);
+}
+TempDir(const TempDir&)=delete;
+TempDir& operator=(const TempDir&)=delete;
+};
+
+crypto::Key test_key(std::uint8_t seed)
+{
+crypto::Key key;
+for(std::size_t i=0;i<key.size();++i)key[i]=static_cast<std::uint8_t>(seed+i*7);
+return key;
+}
+std::span<const std::byte> span_of(std::string_view text)
+{
+return {reinterpret_cast<const std::byte*>(text.data()),text.size()};
+}
+// size pseudo-random bytes of a seed; printable ones (for a script string compared as text) with text.
+std::string data_of(std::size_t size,std::uint64_t seed,bool text=false)
+{
+std::mt19937_64 random(seed);
+std::string bytes(size,'\0');
+for(char& c:bytes)c=text?static_cast<char>('a'+random()%26):static_cast<char>(random()>>56);
+return bytes;
+}
+std::string file_bytes(const fs::path& path)
+{
+std::ifstream in(path,std::ios::binary);
+REQUIRE(in.good());
+return std::string(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
+}
+void put_bytes(const fs::path& path,std::string_view bytes)
+{
+fs::create_directories(path.parent_path());
+std::ofstream out(path,std::ios::binary|std::ios::trunc);
+out.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));
+REQUIRE(out.good());
+}
+std::shared_ptr<pack::PackStorage> make(const fs::path& path,const pack::KeySource& key)
+{
+fs::create_directories(path.parent_path());
+auto storage=pack::PackStorage::open(path,key,true,kFast);
+if(!storage)INFO(storage.error().failure.message);
+REQUIRE(storage);
+return std::move(*storage);
+}
+std::shared_ptr<pack::PackStorage> reopen(const fs::path& path,const pack::KeySource& key)
+{
+auto storage=pack::PackStorage::open(path,key,false);
+REQUIRE(storage);
+return std::move(*storage);
+}
+void add(pack::PackStorage& storage,std::string_view name,std::string_view bytes)
+{
+REQUIRE(storage.add(name,span_of(bytes),0));
+}
+// A pack at path holding the given entries, flushed.
+std::shared_ptr<pack::PackStorage> pack_of(const fs::path& path,std::uint8_t seed,const std::vector<std::pair<std::string,std::string>>& entries)
+{
+auto storage=make(path,test_key(seed));
+for(const auto& [name,bytes]:entries)add(*storage,name,bytes);
+REQUIRE(storage->flush());
+return storage;
+}
+// Every byte of reader, or the FileError of the first failed read.
+std::expected<std::string,FileError> read_all(zodiac::vfs::Reader& reader)
+{
+std::string bytes(static_cast<std::size_t>(reader.size()),'\0');
+std::size_t done=0;
+while(done<bytes.size()){
+const std::int64_t got=reader.read_at(done,{reinterpret_cast<std::byte*>(bytes.data()+done),bytes.size()-done});
+if(got<0)return std::unexpected(zodiac::vfs::read_error(got));
+if(got==0)break;
+done+=static_cast<std::size_t>(got);
+}
+bytes.resize(done);
+return bytes;
+}
+// The bytes of path through vfs, or the FileError of the open or a read.
+std::expected<std::string,FileError> vfs_read(Vfs& vfs,std::string_view path)
+{
+const auto reader=vfs.open_read(path);
+if(!reader)return std::unexpected(reader.error().code);
+return read_all(**reader);
+}
+std::string read_ok(Vfs& vfs,std::string_view path)
+{
+INFO(path);
+const auto bytes=vfs_read(vfs,path);
+REQUIRE(bytes);
+return *bytes;
+}
+std::string joined(const std::vector<std::string>& names)
+{
+std::string out;
+for(const std::string& name:names){
+if(!out.empty())out.push_back(',');
+out.append(name);
+}
+return out;
+}
+std::string listed(Vfs& vfs,std::string_view path,ListKind kind=ListKind::files)
+{
+const auto names=vfs.list(path,kind);
+REQUIRE(names);
+return joined(*names);
+}
+// A Vfs with folder root (writable) at "/" and folder data (writable) at "data:/".
+struct Mounted{
+TempDir dir;
+Vfs vfs;
+Mounted()
+{
+REQUIRE(vfs.mount("/",std::make_shared<FolderSource>(root(),false,true),true,nullptr));
+REQUIRE(vfs.mount("data:/",std::make_shared<FolderSource>(data(),false,true),true,nullptr));
+}
+fs::path root() const{return dir.path/"root";}
+fs::path data() const{return dir.path/"data";}
+fs::path packs() const{return dir.path/"packs";}
+};
+// Owners for mounts made from C++.
+int owner_a=0;
+int owner_b=0;
+int owner_c=0;
+
+std::string text_of(ScriptFixture& fixture,std::string_view body)
+{
+const std::string source="string main(){"+std::string(body)+"}";
+INFO(source);
+const int result=fixture.run(source.c_str(),"string main()");
+INFO(fixture.exception_string());
+REQUIRE(result==asEXECUTION_FINISHED);
+return fixture.returned_string();
+}
+// A module whose global variables live across several calls.
+struct Steps{
+ScriptFixture& fixture;
+asIScriptModule* module=nullptr;
+Steps(ScriptFixture& owner,const std::string& source):fixture(owner)
+{
+module=fixture.engine->GetModule("steps",asGM_ALWAYS_CREATE);
+REQUIRE(module!=nullptr);
+REQUIRE(module->AddScriptSection("steps",source.c_str())>=0);
+INFO(fixture.messages);
+REQUIRE(module->Build()>=0);
+}
+~Steps()
+{
+module->Discard();
+}
+Steps(const Steps&)=delete;
+Steps& operator=(const Steps&)=delete;
+std::string call(const char* declaration)
+{
+asIScriptFunction* function=module->GetFunctionByDecl(declaration);
+REQUIRE(function!=nullptr);
+asIScriptContext* context=fixture.engine->CreateContext();
+REQUIRE(context!=nullptr);
+REQUIRE(context->Prepare(function)>=0);
+const int result=context->Execute();
+const char* exception=context->GetExceptionString();
+INFO(declaration<<": "<<(exception?exception:""));
+std::string text;
+if(result==asEXECUTION_FINISHED)text=static_cast<const zodiac::String*>(context->GetAddressOfReturnValue())->bytes();
+context->Release();
+REQUIRE(result==asEXECUTION_FINISHED);
+return text;
+}
+};
+}
+
+TEST_CASE("packs at one point are searched newest first, all in front of the folder, and listings merge by fold")
+{
+Mounted m;
+put_bytes(m.root()/"a.txt","folder");
+put_bytes(m.root()/"b.txt","folder b");
+put_bytes(m.root()/"only.txt","folder only");
+auto first=pack_of(m.packs()/"1.zpk",1,{{"a.txt","one"},{"b.txt","one b"},{"one.txt","1"}});
+auto second=pack_of(m.packs()/"2.zpk",2,{{"a.txt","two"},{"B.TXT","two b"},{"sub/c.txt","c"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(first,false),false,&owner_a));
+CHECK(read_ok(m.vfs,"a.txt")=="one");
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(second,false),false,&owner_b));
+CHECK(read_ok(m.vfs,"a.txt")=="two");
+CHECK(read_ok(m.vfs,"A.TXT")=="two");
+CHECK(read_ok(m.vfs,"b.txt")=="two b");
+CHECK(read_ok(m.vfs,"one.txt")=="1");
+CHECK(read_ok(m.vfs,"only.txt")=="folder only");
+CHECK(read_ok(m.vfs,"SUB/C.txt")=="c");
+const auto info=m.vfs.stat("a.txt");
+REQUIRE(info);
+CHECK(info->kind==EntryKind::file);
+CHECK(info->size==3);
+const auto folder=m.vfs.stat("Sub");
+REQUIRE(folder);
+CHECK(folder->kind==EntryKind::directory);
+CHECK(m.vfs.open_read("sub").error().code==FileError::is_directory);
+// One name per fold across the sources, spelled as the newest has it.
+CHECK(listed(m.vfs,"/")=="a.txt,B.TXT,one.txt,only.txt");
+CHECK(listed(m.vfs,"/",ListKind::directories)=="sub");
+CHECK(listed(m.vfs,"sub")=="c.txt");
+CHECK(m.vfs.unmount(&owner_b)==1);
+CHECK(read_ok(m.vfs,"a.txt")=="one");
+CHECK(listed(m.vfs,"/")=="a.txt,b.txt,one.txt,only.txt");
+CHECK(m.vfs.unmount(&owner_a)==1);
+CHECK(read_ok(m.vfs,"a.txt")=="folder");
+CHECK(m.vfs.open_read("one.txt").error().code==FileError::not_found);
+}
+
+TEST_CASE("a pack mounted at data:/maps serves its names below the mount point, case-insensitively, and .. leaves it")
+{
+Mounted m;
+put_bytes(m.data()/"x","folder x");
+auto maps=pack_of(m.packs()/"maps.zpk",3,{{"x","pack x"},{"deep/y","pack y"}});
+REQUIRE(m.vfs.mount("data:/maps",pack::make_pack_source(maps,false),false,&owner_a));
+CHECK(read_ok(m.vfs,"data:/maps/x")=="pack x");
+CHECK(read_ok(m.vfs,"data:/MAPS/X")=="pack x");
+CHECK(read_ok(m.vfs,"DATA:/Maps/Deep/Y")=="pack y");
+CHECK(read_ok(m.vfs,"data:/maps/../x")=="folder x");
+CHECK(read_ok(m.vfs,"data:/x")=="folder x");
+CHECK(m.vfs.stat("data:/maps")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"data:/",ListKind::directories)=="maps");
+CHECK(listed(m.vfs,"data:/maps")=="x");
+CHECK(listed(m.vfs,"data:/maps",ListKind::directories)=="deep");
+CHECK(m.vfs.open_read("maps/x").error().code==FileError::not_found);
+}
+
+TEST_CASE("a write to a name only a read-only pack has fails with the exact text, and other paths land in the folder")
+{
+Mounted m;
+auto shipped=pack_of(m.packs()/"ro.zpk",4,{{"r.txt","shipped"},{"defaults/settings.ini","x=1"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(shipped,false),false,&owner_a));
+const std::string text="\"R.txt\" is in a read-only pack; save files in data:/ instead";
+const auto opened=m.vfs.open_write("R.txt",WriteMode::truncate);
+REQUIRE_FALSE(opened);
+CHECK(opened.error().code==FileError::read_only_pack);
+CHECK(opened.error().message==text);
+const auto written=m.vfs.write_file("R.txt",span_of("mine"));
+REQUIRE_FALSE(written);
+CHECK(zodiac::vfs::write_failure_text("R.txt",written.error())==text);
+CHECK(m.vfs.remove("r.txt").error().code==FileError::read_only_pack);
+CHECK(m.vfs.write_file("defaults/settings.ini",span_of("x=2")).error().message=="\"defaults/settings.ini\" is in a read-only pack; save files in data:/ instead");
+CHECK(read_ok(m.vfs,"r.txt")=="shipped");
+REQUIRE(m.vfs.write_file("u.txt",span_of("unrelated")));
+CHECK(file_bytes(m.root()/"u.txt")=="unrelated");
+REQUIRE(m.vfs.write_file("data:/save.txt",span_of("saved")));
+CHECK(file_bytes(m.data()/"save.txt")=="saved");
+}
+
+TEST_CASE("a writable pack mount receives new and existing names, which persist after flush and reopen")
+{
+Mounted m;
+put_bytes(m.root()/"log.txt","ab");
+put_bytes(m.root()/"under.txt","folder");
+const fs::path file=m.packs()/"rw.zpk";
+{
+auto storage=pack_of(file,5,{{"old.txt","old bytes"},{"keep.txt","kept"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+}
+REQUIRE(m.vfs.write_file("new.txt",span_of("brand new")));
+REQUIRE(m.vfs.write_file("Old.txt",span_of("replaced")));
+{
+auto target=m.vfs.open_write("dir/stream.bin",WriteMode::truncate);
+REQUIRE(target);
+REQUIRE((*target)->write_at(0,span_of("0123456789")));
+REQUIRE((*target)->write_at(20,span_of("tail")));
+CHECK((*target)->size()==24);
+REQUIRE((*target)->truncate(22));
+// Nothing is stored before commit.
+CHECK(m.vfs.open_read("dir/stream.bin").error().code==FileError::not_found);
+REQUIRE((*target)->commit());
+}
+{
+// "a" on a name only the folder below has starts from the folder's bytes; the folder keeps its file.
+auto target=m.vfs.open_write("log.txt",WriteMode::append);
+REQUIRE(target);
+CHECK((*target)->size()==2);
+REQUIRE((*target)->write_at(2,span_of("cd")));
+REQUIRE((*target)->commit());
+REQUIRE((*target)->sync());
+}
+{
+auto target=m.vfs.open_write("keep.txt",WriteMode::update);
+REQUIRE(target);
+REQUIRE((*target)->write_at(0,span_of("K")));
+REQUIRE((*target)->commit());
+}
+CHECK(m.vfs.open_write("none.txt",WriteMode::update).error().code==FileError::not_found);
+CHECK(read_ok(m.vfs,"new.txt")=="brand new");
+CHECK(read_ok(m.vfs,"old.txt")=="replaced");
+CHECK(read_ok(m.vfs,"log.txt")=="abcd");
+CHECK(read_ok(m.vfs,"keep.txt")=="Kept");
+CHECK(read_ok(m.vfs,"under.txt")=="folder");
+CHECK(file_bytes(m.root()/"log.txt")=="ab");
+CHECK_FALSE(fs::exists(m.root()/"new.txt"));
+// A rename inside the pack moves the entry; a recursive delete of a pack folder removes its files.
+REQUIRE(m.vfs.move("new.txt","moved/new.txt"));
+CHECK(m.vfs.open_read("new.txt").error().code==FileError::not_found);
+CHECK(read_ok(m.vfs,"moved/new.txt")=="brand new");
+REQUIRE(m.vfs.write_file("gone/a.txt",span_of("a")));
+REQUIRE(m.vfs.write_file("gone/b/c.txt",span_of("c")));
+CHECK(m.vfs.delete_directory("gone",false).error().code==FileError::not_empty);
+REQUIRE(m.vfs.delete_directory("gone",true));
+CHECK(m.vfs.stat("gone").error().code==FileError::not_found);
+// Paths the pack does not cover still land in the folder.
+REQUIRE(m.vfs.write_file("data:/u.txt",span_of("unrelated")));
+CHECK(file_bytes(m.data()/"u.txt")=="unrelated");
+CHECK(m.vfs.unmount(&owner_a)==1);
+CHECK(m.vfs.open_read("new.txt").error().code==FileError::not_found);
+// The mount held the last reference: the storage flushed and closed when it went.
+const auto storage=reopen(file,test_key(5));
+CHECK(storage->list()==std::vector<std::string>{"dir/stream.bin","keep.txt","log.txt","moved/new.txt","old.txt"});
+Vfs fresh;
+REQUIRE(fresh.mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+CHECK(read_ok(fresh,"old.txt")=="replaced");
+CHECK(read_ok(fresh,"Moved/New.txt")=="brand new");
+CHECK(read_ok(fresh,"log.txt")=="abcd");
+CHECK(read_ok(fresh,"dir/stream.bin")==std::string("0123456789\0\0\0\0\0\0\0\0\0\0ta",22));
+}
+
+TEST_CASE("a newer read-only pack over a writable one refuses writes to the names it provides")
+{
+Mounted m;
+auto base=pack_of(m.packs()/"base.zpk",6,{{"s.txt","base"}});
+auto patch=pack_of(m.packs()/"patch.zpk",7,{{"s.txt","patched"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(base,true),true,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(patch,false),false,&owner_b));
+CHECK(m.vfs.write_file("s.txt",span_of("lost")).error().code==FileError::read_only_pack);
+REQUIRE(m.vfs.write_file("t.txt",span_of("into base")));
+CHECK(base->stat("t.txt")->kind==EntryKind::file);
+CHECK(read_ok(m.vfs,"s.txt")=="patched");
+}
+
+TEST_CASE("a deletion marker hides the older packs' and the folder's file, and a newer pack shows it again")
+{
+Mounted m;
+put_bytes(m.root()/"m.txt","folder m");
+put_bytes(m.root()/"f.txt","folder f");
+put_bytes(m.root()/"kept.txt","folder kept");
+auto first=pack_of(m.packs()/"1.zpk",8,{{"m.txt","one"},{"sub/x.txt","x"}});
+auto patch=make(m.packs()/"patch.zpk",test_key(9));
+REQUIRE(patch->add_deletion_marker("M.TXT"));
+REQUIRE(patch->add_deletion_marker("f.txt"));
+REQUIRE(patch->add_deletion_marker("sub/x.txt"));
+REQUIRE(patch->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(first,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(patch,false),false,&owner_b));
+CHECK(m.vfs.stat("m.txt").error().code==FileError::not_found);
+CHECK(m.vfs.stat("F.txt").error().code==FileError::not_found);
+const auto opened=m.vfs.open_read("m.txt");
+REQUIRE_FALSE(opened);
+CHECK(zodiac::vfs::read_failure_text("m.txt",opened.error())=="cannot read \"m.txt\": file not found");
+CHECK(m.vfs.open_read("sub/x.txt").error().code==FileError::not_found);
+CHECK(listed(m.vfs,"/")=="kept.txt");
+CHECK(listed(m.vfs,"sub").empty());
+CHECK(m.vfs.remove("f.txt").error().code==FileError::not_found);
+CHECK(file_bytes(m.root()/"f.txt")=="folder f");
+CHECK(m.vfs.copy("m.txt","data:/c.txt").error().failure.code==FileError::not_found);
+// A write of a hidden name goes to the folder, where it stays hidden while the marker is mounted.
+REQUIRE(m.vfs.write_file("f.txt",span_of("new f")));
+CHECK(file_bytes(m.root()/"f.txt")=="new f");
+auto third=pack_of(m.packs()/"3.zpk",10,{{"m.txt","three"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(third,false),false,&owner_c));
+CHECK(read_ok(m.vfs,"m.txt")=="three");
+CHECK(m.vfs.stat("f.txt").error().code==FileError::not_found);
+CHECK(listed(m.vfs,"/")=="kept.txt,m.txt");
+CHECK(m.vfs.unmount(&owner_b)==1);
+CHECK(read_ok(m.vfs,"f.txt")=="new f");
+CHECK(read_ok(m.vfs,"sub/x.txt")=="x");
+}
+
+TEST_CASE("a file object reads on after unmount_pack and close, and the storage goes when the file closes")
+{
+ScriptFixture fixture;
+const std::string big=data_of(200000,11,true);
+{
+auto storage=make(fixture.root()/"s.zpk",std::string("k"));
+add(*storage,"big.txt",big);
+REQUIRE(storage->flush());
+}
+Steps steps(fixture,
+"pack p; file f;"
+"string open(){ if(!p.open(\"s.zpk\", \"k\"))return p.error; if(!mount_pack(p))return p.error; if(!f.open(\"big.txt\", \"rb\"))return f.error; return f.read(70000); }"
+"string drop(){ unmount_pack(p); string s=file_exists(\"big.txt\")+\",\"; p.close(); return s+f.read(); }"
+"string close(){ f.close(); file g; return g.open(\"big.txt\", \"rb\")+\",\"+g.error; }");
+CHECK(steps.call("string open()")==big.substr(0,70000));
+std::weak_ptr<pack::PackStorage> weak;
+{
+auto shared=pack::PackStorage::open(fixture.root()/"s.zpk",std::string("k"),false);
+REQUIRE(shared);
+weak=*shared;
+}
+const std::string rest=steps.call("string drop()");
+CHECK(rest=="false,"+big.substr(70000));
+// Only the file object holds it now.
+CHECK_FALSE(weak.expired());
+CHECK(steps.call("string close()")=="false,cannot read \"big.txt\": file not found");
+CHECK(weak.expired());
+}
+
+TEST_CASE("concurrent random reads through a mount give the source's bytes while readers open and close")
+{
+TempDir dir;
+const std::vector<std::pair<std::string,std::string>> entries{{"sounds/a.ogg",data_of(3*65536+7,21)},{"sounds/b.ogg",data_of(1000003,22)},{"c.bin",data_of(65536,23)}};
+auto storage=pack_of(dir.path/"c.zpk",12,entries);
+Vfs vfs;
+REQUIRE(vfs.mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+storage.reset();
+const auto started=std::chrono::steady_clock::now();
+std::atomic<std::uint64_t> wrong{0};
+std::atomic<std::uint64_t> failed{0};
+std::atomic<bool> done{false};
+std::atomic<std::uint64_t> opened{0};
+std::thread opener([&]{
+std::mt19937_64 random(99);
+while(!done.load()){
+const auto& [name,bytes]=entries[random()%entries.size()];
+const auto reader=vfs.open_read(name);
+if(!reader||(*reader)->size()!=bytes.size()){
+failed.fetch_add(1);
+continue;
+}
+std::byte first{};
+if((*reader)->read_at(0,{&first,1})!=1||first!=static_cast<std::byte>(bytes[0]))wrong.fetch_add(1);
+opened.fetch_add(1);
+}
+});
+std::vector<std::thread> workers;
+for(int t=0;t<8;++t){
+workers.emplace_back([&,t]{
+std::mt19937_64 random(static_cast<std::uint64_t>(t)*7919+1);
+std::vector<std::shared_ptr<zodiac::vfs::Reader>> readers;
+for(const auto& [name,bytes]:entries){
+auto reader=vfs.open_read(name);
+if(!reader){
+failed.fetch_add(1);
+return;
+}
+readers.push_back(std::move(*reader));
+}
+std::vector<std::byte> buffer(200000);
+for(int i=0;i<2000;++i){
+const std::size_t which=random()%entries.size();
+const std::string& bytes=entries[which].second;
+const std::uint64_t offset=random()%bytes.size();
+const std::size_t length=1+static_cast<std::size_t>(random()%200000);
+const std::size_t expected=static_cast<std::size_t>(std::min<std::uint64_t>(length,bytes.size()-offset));
+const std::int64_t got=readers[which]->read_at(offset,{buffer.data(),length});
+if(got!=static_cast<std::int64_t>(expected)||std::memcmp(buffer.data(),bytes.data()+offset,expected)!=0)wrong.fetch_add(1);
+}
+});
+}
+for(std::thread& worker:workers)worker.join();
+done.store(true);
+opener.join();
+const auto elapsed=std::chrono::steady_clock::now()-started;
+MESSAGE("16000 reads and "<<opened.load()<<" opens took "<<std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()<<" ms");
+CHECK(wrong.load()==0);
+CHECK(failed.load()==0);
+CHECK(opened.load()>0);
+CHECK(elapsed<std::chrono::seconds(30));
+}
+
+TEST_CASE("entries added to a mounted pack while threads read through the mount are visible at once, and every read is right")
+{
+TempDir dir;
+const std::vector<std::pair<std::string,std::string>> entries{{"a",data_of(300000,31)},{"b",data_of(65537,32)},{"c",data_of(5,33)}};
+auto storage=pack_of(dir.path/"live.zpk",13,entries);
+Vfs vfs;
+REQUIRE(vfs.mount("/",pack::make_pack_source(storage,false),false,&owner_a));
+std::atomic<std::uint64_t> wrong{0};
+std::atomic<std::uint64_t> reads{0};
+std::atomic<bool> done{false};
+std::vector<std::thread> readers;
+for(int t=0;t<4;++t){
+readers.emplace_back([&,t]{
+std::mt19937_64 random(static_cast<std::uint64_t>(t)+500);
+std::vector<std::byte> buffer(100000);
+while(!done.load()){
+const auto& [name,bytes]=entries[random()%entries.size()];
+const auto reader=vfs.open_read(name);
+if(!reader){
+wrong.fetch_add(1);
+continue;
+}
+const std::uint64_t offset=random()%bytes.size();
+const std::size_t length=1+static_cast<std::size_t>(random()%buffer.size());
+const std::size_t expected=static_cast<std::size_t>(std::min<std::uint64_t>(length,bytes.size()-offset));
+const std::int64_t got=(*reader)->read_at(offset,{buffer.data(),length});
+if(got!=static_cast<std::int64_t>(expected)||std::memcmp(buffer.data(),bytes.data()+offset,expected)!=0)wrong.fetch_add(1);
+reads.fetch_add(1);
+}
+});
+}
+int invisible=0;
+int flush_failures=0;
+for(int i=0;i<200;++i){
+const std::string name="new/"+std::to_string(i)+".bin";
+const std::string bytes=data_of(1000+static_cast<std::size_t>(i)*997,1000+static_cast<std::uint64_t>(i));
+if(!storage->add(name,span_of(bytes),0)){
+++invisible;
+continue;
+}
+const auto seen=vfs_read(vfs,name);
+if(!seen||*seen!=bytes)++invisible;
+if(i%50==49&&!storage->flush())++flush_failures;
+}
+done.store(true);
+for(std::thread& reader:readers)reader.join();
+CHECK(invisible==0);
+CHECK(flush_failures==0);
+CHECK(wrong.load()==0);
+CHECK(reads.load()>0);
+CHECK(listed(vfs,"new").size()>0);
+CHECK(vfs.list("new",ListKind::files)->size()==200);
+}
+
+TEST_CASE("a second pack object shares the storage, and closing it leaves the first one's mount serving files")
+{
+ScriptFixture fixture;
+{
+auto storage=make(fixture.root()/"two.zpk",std::string("k"));
+add(*storage,"base.txt","base");
+REQUIRE(storage->flush());
+}
+CHECK(text_of(fixture,
+"pack p; if(!p.open(\"two.zpk\", \"k\"))return p.error;"
+"pack q; if(!q.open(\"TWO.zpk\", \"k\"))return q.error;"
+"if(!q.add(\"n.txt\", \"new\"))return q.error;"
+"string s=p.exists(\"n.txt\")+\",\";"
+"if(!mount_pack(p))return p.error;"
+"q.close();"
+"s+=file_exists(\"n.txt\")+\",\"+read_file(\"N.TXT\")+\",\"+read_file(\"base.txt\")+\",\";"
+"p.close();"
+"s+=file_exists(\"n.txt\")+\",\"+file_exists(\"base.txt\")+\",\";"
+"pack r; if(!r.open(\"two.zpk\", \"k\"))return r.error;"
+"return s+r.read(\"n.txt\")+\",\"+r.count;")=="true,true,new,base,false,false,new,2");
+}
+
+TEST_CASE("compact under a file object reading a mounted entry: the reader finishes, and a new open reads the compacted file")
+{
+ScriptFixture fixture;
+const std::string big=data_of(300000,41,true);
+{
+auto storage=make(fixture.root()/"cmp.zpk",std::string("k"));
+add(*storage,"waste.txt",data_of(100000,42));
+add(*storage,"big.txt",big);
+REQUIRE(storage->remove("waste.txt"));
+REQUIRE(storage->flush());
+}
+Steps steps(fixture,
+"pack p; file f;"
+"string first(){ if(!p.open(\"cmp.zpk\", \"k\"))return p.error; if(!mount_pack(p, \"/assets\"))return p.error; if(!f.open(\"assets/big.txt\", \"rb\"))return f.error; return f.read(100000); }"
+"string compact(){ string before=p.wasted_bytes>0?\"wasted\":\"clean\"; if(!p.compact())return p.error; return before+\",\"+p.wasted_bytes; }"
+"string rest(){ return f.read(); }"
+"string again(){ return read_file(\"assets/big.txt\"); }");
+CHECK(steps.call("string first()")==big.substr(0,100000));
+CHECK(steps.call("string compact()")=="wasted,0");
+CHECK(steps.call("string rest()")==big.substr(100000));
+CHECK(steps.call("string again()")==big);
+// The compacted file holds big.txt alone: shorter than the old one by at least the removed entry.
+CHECK(fs::file_size(fixture.root()/"cmp.zpk")<big.size()+60000);
+}
+
+TEST_CASE("mount_pack and unmount_pack from script: failures have exact texts, and writes follow the mount's writability")
+{
+ScriptFixture fixture;
+{
+auto storage=make(fixture.root()/"g.zpk",std::string("k"));
+add(*storage,"shipped.txt","shipped");
+REQUIRE(storage->flush());
+}
+CHECK(text_of(fixture,
+"pack p; string s=mount_pack(p)+\",\"+p.error+\"|\";"
+"if(!p.open(\"g.zpk\", \"k\"))return p.error;"
+"s+=mount_pack(p, \"../up\")+\",\"+p.error+\"|\";"
+"s+=mount_pack(p, \"data:/a/b\")+\",\"+p.error+\"|\";"
+"s+=mount_pack(p, \"data:/A/B/\")+\",\"+p.error+\"|\";"
+"s+=read_file(\"data:/a/b/shipped.txt\")+\",\";"
+"s+=mount_pack(p)+\",\"+p.error+\"|\";"
+"s+=write_file(\"shipped.txt\", \"mine\")+\",\"+last_file_error()+\"|\";"
+"unmount_pack(p);"
+"s+=file_exists(\"shipped.txt\")+\",\"+file_exists(\"data:/a/b/shipped.txt\")+\"|\";"
+"if(!mount_pack(p, \"/\", true))return p.error;"
+"file f; if(!f.open(\"saved.txt\", \"w\"))return f.error; f.write(\"saved\"); f.close();"
+"s+=p.exists(\"saved.txt\")+\",\"+p.read(\"saved.txt\")+\",\"+write_file(\"shipped.txt\", \"mine\")+\",\"+p.read(\"shipped.txt\");"
+"return s;")==
+"false,pack is not open|false,\"../up\" leaves its mount|true,|false,already mounted there|shipped,true,|false,\"shipped.txt\" is in a read-only pack; save files in data:/ instead|false,false|true,saved,true,mine");
+CHECK_FALSE(fs::exists(fixture.root()/"saved.txt"));
+}
