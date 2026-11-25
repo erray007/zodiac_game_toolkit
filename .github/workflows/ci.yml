@@ -69,9 +69,10 @@ jobs:
       #   windows per side (--calibrate time), gated on the median of their ratios per operation (at most 1.05). One file's placement
       #   moves a ratio by several percent (Task 5b fix rounds 3 and 4, Task 5c), so no single placement decides, and there is no retry.
       # - Zodiac against main's Zodiac on this same runner: main's bench (cached per main commit, built when the cache misses) runs
-      #   in alternation with this one (main, head, head, main, main, head), each process from its own copy too, and head's best
-      #   process over main's best (machine-speed corrected) must stay within the regression limits per operation and in geometric
-      #   mean. On main itself both sides are this build (an A/A run).
+      #   in alternation with this one (main, head, head, main, main, head), each process from its own copy too. Each process's time
+      #   is corrected by its machine-speed factor (its add-on side against its own side's other processes); per operation head's best
+      #   process over main's median process must stay within that operation's regression limit, and the geometric mean over
+      #   operations of head's best over main's best within its limit. On main itself both sides are this build (an A/A run).
       # Each run's table and --detail lines are in the log and, on failure, in the bench artifact.
       - name: Build the benchmark on the release preset
         run: |
@@ -421,6 +422,14 @@ jobs:
             dist/zodiac-*-windows-x86_64.zip
             dist/zodiac-setup-*.exe
           if-no-files-found: error
+      # The heap probe (tests/fixtures/tools/heap_kind_probe.cpp), for kit-clean-machine to check the kit's zodiac.exe and a built game at run
+      # time. A separate artifact, so the release job never attaches it.
+      - name: Upload the heap probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: zodiac-heap-probe
+          path: build/windows-release/tests/heap_kind_probe.exe
+          if-no-files-found: error
       # A separate artifact, so the release job (which publishes every file of zodiac-kit) can never attach it.
       - name: Upload the old-named setup for the upgrade test
         uses: actions/upload-artifact@v4
@@ -456,6 +465,11 @@ jobs:
         with:
           name: zodiac-old-setup
           path: ${{ runner.temp }}/zodiac-old-setup
+      - name: Download the heap probe
+        uses: actions/download-artifact@v4
+        with:
+          name: zodiac-heap-probe
+          path: ${{ runner.temp }}/zodiac-heap-probe
       - name: Portable zip in a folder with a space and a non-English letter
         run: |
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
@@ -482,6 +496,18 @@ jobs:
           if (-not $bytes.Contains('zodiac-dictionary 1')) { throw "hello.exe does not hold the core's text 'zodiac-dictionary 1', so the scan below proves nothing" }
           if ($bytes.Contains('ZODIAC_TABLE_HASH_SEED')) { throw "hello.exe holds ZODIAC_TABLE_HASH_SEED, a test hook" }
           "hello.exe holds no test hook."
+          # mimalloc (the allocator experiment's, ZODIAC_BENCH_ALLOCATOR) never ships: no kit executable or game holds its name.
+          foreach ($file in @($hello, $zodiac, (Join-Path $root 'Zodiac\bin\zodiacw.exe'))) {
+            if ([IO.File]::ReadAllText($file, [Text.Encoding]::Latin1).Contains('mimalloc')) { throw "$file holds the text 'mimalloc'" }
+          }
+          "No kit executable and no game holds mimalloc."
+          # The application manifest at run time: the kit's zodiac.exe and the built game run on the Segment Heap (Windows 10 2004 and later;
+          # report-only on older Windows, which ignores heapType and keeps the NT heap).
+          $probe = Join-Path $env:RUNNER_TEMP 'zodiac-heap-probe\heap_kind_probe.exe'
+          & $probe --require-segment $hello
+          if ($LASTEXITCODE -ne 0) { throw "hello.exe does not run on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
+          & $probe --require-segment $zodiac --version
+          if ($LASTEXITCODE -ne 0) { throw "zodiac.exe does not run on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
       # Two rounds. Round 1: .zs already belongs to another program (a fake ProgID); every option is installed, then uninstall must give .zs back and
       # remove everything else it added. Round 2: the user PATH already holds the kit's bin folder; uninstall must leave that entry, which it did not add.
       - name: Setup wizard, silent install and uninstall

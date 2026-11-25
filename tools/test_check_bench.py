@@ -246,7 +246,20 @@ class CheckBenchTests(unittest.TestCase):
         # Each operation's best times, its head/main, the pair median (information) and its limit are printed.
         code, out, _ = self.run_files(heads, ["a", "b", "c"], mains)
         self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.010\s+1\.010\s+1\.04")
-        self.assertIn("process speed factors (the add-on side's median over operations): head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
+        self.assertIn("process speed factors (the add-on side's median over operations, within each side): head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
+
+    def test_a_uniformly_slower_head_build_fails_although_its_add_on_side_slows_too(self):
+        # Head's whole build 8 % slower on both its sides (a dropped optimization, a changed AngelScript patch, a harness change): the
+        # factors are taken within each side, so the slowdown is not divided away and every operation and the geometric mean fail.
+        ops = ["a", "b", "c", "d", "e"]
+        def process(scale):
+            return "".join(line(op, 0.5, new_ns=10.0 * scale, addon_ns=20.0 * scale) + "\n" for op in ops)
+        code, out, err = self.run_files([process(1.08)] * 3, ops, [process(1.0)] * 3)
+        self.assertEqual(code, 1, out)
+        self.assertIn("head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
+        for op in ops:
+            self.assertIn(f"{op}: head/main 1.080", err)
+        self.assertIn("geometric mean 1.0800", err)
 
     def test_the_regression_gate_takes_each_side_s_best_process(self):
         mains = [line("a", 0.5, new_ns=10.0) + "\n" + line("b", 0.5, new_ns=10.0) + "\n"] * 3

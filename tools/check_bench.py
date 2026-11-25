@@ -28,11 +28,13 @@ the geometric mean of head's best over main's best is at most the geometric-mean
   the limits the other 95 give, best over median 0.
 - The geometric mean takes best over best: over every operation one operation's outlier barely moves it, and it stays the sensitive
   check for a slowdown spread over everything.
-- The speed factor is the median over the compared operations of that process's addon_ns over the operation's median addon_ns across all
-  processes of both sides. The add-on side is the same third-party code in both benches, so the factor follows the machine (a runner that
-  gets faster or slower for a whole process, as in one gate replica where one process ran every operation 10 % faster on both sides) and,
-  as a median over operations, not one operation's slow mode or placement. Without it a minimum would read such a fast process as a
-  speed-up of everything on its side, or the reverse as a regression.
+- The speed factor is the median over the compared operations of that process's addon_ns over the operation's median addon_ns across the
+  processes of its own side (head's or main's, never both: Task 5c fix round 1). Within a side the add-on code is one build, so the factor
+  follows the machine (a runner that gets faster or slower for a whole process, as in one gate replica where one process ran every operation
+  10 % faster on both sides) and, as a median over operations, not one operation's slow mode or placement; without it a minimum would read
+  such a process as a change of everything on its side. Taken within each side, it never divides away a difference between the two
+  builds: a head whose whole build is slower (a dropped optimization, a changed AngelScript patch, a harness change), on both its sides,
+  keeps factors near 1 and fails.
 The factors are printed, and so is each operation's limit and the median over the pairs of head's raw new_ns over main's, for information.
 Operations main does not have are listed, not compared; a time of 0 on either side fails with the operation named (exit 2). The comparison
 is report-only, with a REGRESSION GATE REPORT-ONLY warning on stdout and stderr (and, under GitHub Actions, a ::warning:: annotation on
@@ -297,10 +299,11 @@ def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
             raise BenchFormatError(f"the baseline gives {op} a time of 0 ns, so head cannot be compared with it")
         if any(head[op][0] <= 0 for head in heads):
             raise BenchFormatError(f"head gives {op} a time of 0 ns, so it cannot be compared with main")
-    factors = speed_factors([{op: side[op][1] for op in compared} for side in heads + baselines], compared)
-    head_factors, main_factors = factors[:len(heads)], factors[len(heads):]
+    # Within each side, so a difference between the two builds (both of head's sides slower, say) is never divided away.
+    head_factors = speed_factors([{op: side[op][1] for op in compared} for side in heads], compared)
+    main_factors = speed_factors([{op: side[op][1] for op in compared} for side in baselines], compared)
     width = max(len("op"), max(len(op) for op in ops))
-    lines = [f"process speed factors (the add-on side's median over operations): head {' '.join(f'{f:.3f}' for f in head_factors)}, main {' '.join(f'{f:.3f}' for f in main_factors)}"]
+    lines = [f"process speed factors (the add-on side's median over operations, within each side): head {' '.join(f'{f:.3f}' for f in head_factors)}, main {' '.join(f'{f:.3f}' for f in main_factors)}"]
     lines.append(f"{'op':<{width}}  {'main median':>12}  {'head best':>12}  {'head/main':>9}  {'best/best':>9}  {'pair med':>8}  {'limit':>6}")
     changes = []
     best_changes = []
