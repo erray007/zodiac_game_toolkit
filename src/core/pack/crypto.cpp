@@ -22,6 +22,13 @@ const std::uintptr_t o=reinterpret_cast<std::uintptr_t>(out);
 const std::uintptr_t i=reinterpret_cast<std::uintptr_t>(in);
 return size!=0&&o!=i&&o<i+size&&i<o+size;
 }
+// Whether out (out_size bytes) and in (in_size bytes) share any byte at all.
+bool share_bytes(const void* out,std::size_t out_size,const void* in,std::size_t in_size) noexcept
+{
+const std::uintptr_t o=reinterpret_cast<std::uintptr_t>(out);
+const std::uintptr_t i=reinterpret_cast<std::uintptr_t>(in);
+return out_size!=0&&in_size!=0&&o<i+in_size&&i<o+out_size;
+}
 void store64(std::uint8_t* out,std::uint64_t value) noexcept
 {
 for(int i=0;i<8;++i)out[i]=static_cast<std::uint8_t>(value>>(8*i));
@@ -104,11 +111,13 @@ bool open_with(const Keystream& stream,const Key& key,const Nonce& nonce,std::sp
 {
 const std::size_t size=cipher.size();
 std::uint8_t* out=reinterpret_cast<std::uint8_t*>(plain.data());
+const std::uint8_t* in=bytes_of(cipher);
 if(plain.size()!=size||size>kMaxSealBytes)[[unlikely]]{
-if(!plain.empty())clear(out,plain.size());
+// Zeroed only when plain shares no byte with cipher: a caller bug that also overlaps the two (in place included) must never
+// have its const cipher overwritten.
+if(!plain.empty()&&!share_bytes(out,plain.size(),in,size))clear(out,plain.size());
 return false;
 }
-const std::uint8_t* in=bytes_of(cipher);
 // A partial overlap: nothing is written, since zeroing plain would destroy part of cipher; plain still holds only the caller's
 // own bytes, none of them decrypted.
 if(partial_overlap(out,in,size))[[unlikely]]return false;

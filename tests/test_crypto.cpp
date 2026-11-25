@@ -391,6 +391,53 @@ CHECK(shifted==unchanged);
 }
 }
 
+// A size mismatch that also overlaps (a caller bug twice over): refused, and the cipher it shares bytes with is never zeroed,
+// whichever of the two is longer and wherever the output starts (in place included). A disjoint mismatch is still zeroed.
+TEST_CASE("open refuses a size mismatch without writing into a cipher the output overlaps")
+{
+for(const Vector* v:vectors_of("aead")){
+INFO(v->name);
+const crypto::Key key=array_of<crypto::Key>((*v)["key"]);
+const crypto::Nonce nonce=array_of<crypto::Nonce>((*v)["nonce"]);
+const crypto::Tag good_tag=array_of<crypto::Tag>((*v)["tag"]);
+const Bytes& aad=(*v)["aad"];
+const Bytes& cipher=(*v)["cipher"];
+const std::size_t size=cipher.size();
+REQUIRE(size>=17);
+for(const crypto::detail::Keystream* stream:keystreams()){
+INFO(stream->name);
+for(const std::size_t shift:{std::size_t{0},std::size_t{1},std::size_t{16},size-1}){
+for(const std::size_t plain_size:{size-1,size+1,size+64}){
+INFO("shift "<<shift<<", output size "<<plain_size);
+// The output starts shift bytes into the cipher.
+Bytes after(size+shift+plain_size,0x5C);
+std::copy(cipher.begin(),cipher.end(),after.begin());
+const Bytes after_before=after;
+CHECK_FALSE(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(after).first(size),good_tag,as_writable(after).subspan(shift,plain_size)));
+CHECK(after==after_before);
+// The cipher starts shift bytes into the output (shift 0 is in place).
+if(shift>=plain_size)continue;
+Bytes before(shift+size+plain_size,0x5C);
+std::copy(cipher.begin(),cipher.end(),before.begin()+static_cast<std::ptrdiff_t>(shift));
+const Bytes before_before=before;
+CHECK_FALSE(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(before).subspan(shift,size),good_tag,as_writable(before).first(plain_size)));
+CHECK(before==before_before);
+}
+}
+// Disjoint and of the wrong size: zeroed.
+Bytes disjoint(size+1,0xAA);
+CHECK_FALSE(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(cipher),good_tag,as_writable(disjoint)));
+CHECK(std::all_of(disjoint.begin(),disjoint.end(),[](std::uint8_t b){return b==0;}));
+}
+// The public open keeps the cipher too.
+Bytes shared(2*size+1,0x5C);
+std::copy(cipher.begin(),cipher.end(),shared.begin());
+const Bytes unchanged=shared;
+CHECK_FALSE(crypto::open(key,nonce,as_bytes(aad),as_bytes(shared).first(size),good_tag,as_writable(shared).subspan(1,size+1)));
+CHECK(shared==unchanged);
+}
+}
+
 #if defined(ZODIAC_CRYPTO_SIMD)
 TEST_CASE("the vectorized ChaCha20 gives the reference keystream and seal on random buffers")
 {

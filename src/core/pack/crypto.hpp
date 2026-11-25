@@ -11,7 +11,9 @@
 //   authenticates but holds wrong data.
 // - open checks the tag over aad and cipher in constant time before it decrypts anything. On success it writes the plaintext
 //   and returns true. On failure it returns false and nothing unauthenticated is ever readable:
-//   - a wrong key, nonce, aad, cipher or tag, plain.size() != cipher.size(), or more than kMaxSealBytes: plain is zeroed;
+//   - a wrong key, nonce, aad, cipher or tag: plain is zeroed;
+//   - plain.size() != cipher.size(), or more than kMaxSealBytes: plain is zeroed when it shares no byte with cipher, and
+//     nothing is written otherwise (exactly in place included), so the caller's const cipher is never overwritten;
 //   - plain partially overlapping cipher (sharing bytes without being exactly cipher): nothing is written at all, since zeroing
 //     plain would destroy part of cipher; plain keeps the caller's own bytes, none of them decrypted.
 //   Exactly in-place (plain is cipher) and disjoint buffers are both allowed.
