@@ -8,6 +8,9 @@
 // A tail shorter than a whole batch is computed into a stack buffer, which is wiped: up to 64 bytes by Monocypher's scalar
 // block (cheaper than any batch), up to 256 by one SSE2 batch, else by one AVX2 batch. The copy of the key in the state is
 // wiped too.
+// Kept by measurement (Task 6 Step 4, bench_files --op crypto_chunk, one 64 KiB seal plus open, paired A B B A against Monocypher's
+// scalar keystream in one process, CI run 45651126939): AVX2 0.4405 of the reference's time on an AMD EPYC 7763 (Windows) and 0.4815
+// on an AMD EPYC 9V45 (Linux); SSE2 0.5994 and 0.6991. The bar was at least 10 % faster on both.
 #include <core/pack/crypto.hpp>
 #include <monocypher.h>
 #include <immintrin.h>
