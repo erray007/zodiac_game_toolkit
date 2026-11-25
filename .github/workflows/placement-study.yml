@@ -104,7 +104,7 @@ jobs:
             else
               # Every study option back to its default first (the release code alignment's is blocks), then this variant's (commas between
               # options; -DZODIAC_RELEASE_CODE_ALIGN= for none).
-              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR= -DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN=blocks -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0)
+              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR= -DZODIAC_BENCH_STRING_CACHE_TOP= -DZODIAC_RELEASE_CODE_ALIGN=blocks -DZODIAC_BENCH_PAD=0 -DZODIAC_BENCH_CORE_PAD=0 -DZODIAC_BENCH_LENGTH_CALL_OBJLAST=OFF)
               IFS=, read -r -a extra <<< "$spec"
               options+=("${extra[@]}")
               echo "== $label: ${options[*]}"

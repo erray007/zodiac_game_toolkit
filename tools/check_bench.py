@@ -16,8 +16,8 @@ The add-on gate: per operation, the median over the files of their ratios is at 
 runs 3) are needed because one process's code and heap placement moves a ratio by several percent (Task 5b fix rounds 3 and 4).
 
 The regression gate (--baseline, one file per process of main's bench on the same machine, as many as results files; the gate runs them
-in alternation) is one-sided: it fails when head is slower. Each process's time is its new_ns divided by its machine-speed factor. Per
-operation both have, head's best (minimum over its processes) over main's median is at most that operation's limit; over all of them,
+in alternation) is one-sided: it fails when head is slower. Per operation both have, head's best new_ns (minimum over its processes) over
+main's median is at most that operation's limit; over all of them,
 the geometric mean of head's best over main's best is at most the geometric-mean limit; both from --limits
 (tools/bench_regression_limits.json; the file says how they were derived). Why these (Task 5c, 96 gate-replica A/A' jobs):
 - Head's best: the slow modes seen (the Windows NT heap's per-process slow request sizes) only slow a process down, and in up to 2 of 3
@@ -28,14 +28,12 @@ the geometric mean of head's best over main's best is at most the geometric-mean
   the limits the other 95 give, best over median 0.
 - The geometric mean takes best over best: over every operation one operation's outlier barely moves it, and it stays the sensitive
   check for a slowdown spread over everything.
-- The speed factor is the median over the compared operations of that process's addon_ns over the operation's median addon_ns across the
-  processes of its own side (head's or main's, never both: Task 5c fix round 1). Within a side the add-on code is one build, so the factor
-  follows the machine (a runner that gets faster or slower for a whole process, as in one gate replica where one process ran every operation
-  10 % faster on both sides) and, as a median over operations, not one operation's slow mode or placement; without it a minimum would read
-  such a process as a change of everything on its side. Taken within each side, it never divides away a difference between the two
-  builds: a head whose whole build is slower (a dropped optimization, a changed AngelScript patch, a harness change), on both its sides,
-  keeps factors near 1 and fails.
-The factors are printed, and so is each operation's limit, the median over the pairs of head's raw new_ns over main's, and the add-on
+- No time is normalized by the add-on side (Task 5c fix round 2). A machine-speed factor taken from it was tried and dropped: each process
+  runs from its own copy of its build, so the add-on side's speed moves with that copy's placement as well as with the machine, and in
+  the relinked gate replicas the factor turned a raw best-over-best geometric mean of 1.006 into a false 1.040; without it, held out one
+  job at a time over 64 relinked jobs, the geometric mean never failed (samples 0.982-1.018). A head whose whole build is slower (a
+  dropped optimization, a changed AngelScript patch, a harness change) fails, on its add-on side too or not.
+Each operation's limit is printed, the median over the pairs of head's raw new_ns over main's, and the add-on
 normalized change (head's median new_ns/addon_ns over main's), for information only: it cancels a shift both sides share, a layout shift
 of the shared VM as much as a real slowdown of shared code, so it is never gated.
 Operations main does not have are listed, not compared; a time of 0 on either side fails with the operation named (exit 2). The comparison
@@ -276,20 +274,9 @@ def gate_table(runs: list) -> tuple:
     return "\n".join(lines), gated
 
 
-def speed_factors(addon: list, ops: list) -> list:
-    """Each process's machine-speed factor: the median over ops of its addon_ns over that op's median addon_ns across all the processes
-    (addon is one {op: addon_ns} per process). Ops whose add-on time is 0 in every process are left out; with none left, every factor is
-    1."""
-    usable = [op for op in ops if median([process[op] for process in addon]) > 0]
-    if not usable:
-        return [1.0] * len(addon)
-    typical = {op: median([process[op] for process in addon]) for op in usable}
-    return [median([process[op] / typical[op] for op in usable]) for process in addon]
-
-
 def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
-    """Zodiac against the baseline (main): per op head's best over main's median (of new_ns over the process's speed factor, see the
-    module text) against that op's limit, and the geometric mean over ops of head's best over main's best. Returns (text,
+    """Zodiac against the baseline (main): per op head's best new_ns over main's median against that op's limit, and the geometric mean
+    over ops of head's best over main's best. Returns (text,
     [(op, change, limit)], geomean, ops that main does not have). Raises BenchFormatError naming an op that has a time of 0 ns on either
     side (no ratio can be taken)."""
     heads = [{op: (new_ns, addon_ns) for op, new_ns, addon_ns, _ in results} for results in runs]
@@ -301,17 +288,13 @@ def regression_table(runs: list, baselines: list, limits: dict) -> tuple:
             raise BenchFormatError(f"the baseline gives {op} a time of 0 ns, so head cannot be compared with it")
         if any(head[op][0] <= 0 for head in heads):
             raise BenchFormatError(f"head gives {op} a time of 0 ns, so it cannot be compared with main")
-    # Within each side, so a difference between the two builds (both of head's sides slower, say) is never divided away.
-    head_factors = speed_factors([{op: side[op][1] for op in compared} for side in heads], compared)
-    main_factors = speed_factors([{op: side[op][1] for op in compared} for side in baselines], compared)
     width = max(len("op"), max(len(op) for op in ops))
-    lines = [f"process speed factors (the add-on side's median over operations, within each side): head {' '.join(f'{f:.3f}' for f in head_factors)}, main {' '.join(f'{f:.3f}' for f in main_factors)}"]
-    lines.append(f"{'op':<{width}}  {'main median':>12}  {'head best':>12}  {'head/main':>9}  {'best/best':>9}  {'pair med':>8}  {'add-on':>7}  {'limit':>6}")
+    lines = [f"{'op':<{width}}  {'main median':>12}  {'head best':>12}  {'head/main':>9}  {'best/best':>9}  {'pair med':>8}  {'add-on':>7}  {'limit':>6}"]
     changes = []
     best_changes = []
     for op in compared:
-        head_ns = [head[op][0] / factor for head, factor in zip(heads, head_factors)]
-        main_ns = [base[op][0] / factor for base, factor in zip(baselines, main_factors)]
+        head_ns = [head[op][0] for head in heads]
+        main_ns = [base[op][0] for base in baselines]
         head_best = min(head_ns)
         main_typical = median(main_ns)
         change = head_best / main_typical

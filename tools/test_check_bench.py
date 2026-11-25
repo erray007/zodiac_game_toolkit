@@ -246,17 +246,16 @@ class CheckBenchTests(unittest.TestCase):
         # Each operation's best times, its head/main, the pair median (information) and its limit are printed.
         code, out, _ = self.run_files(heads, ["a", "b", "c"], mains)
         self.assertRegex(out, r"a\s+10\.00\s+10\.10\s+1\.010\s+1\.010\s+1\.010\s+1\.010\s+1\.04")
-        self.assertIn("process speed factors (the add-on side's median over operations, within each side): head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
+        self.assertNotIn("speed factor", out)
 
     def test_a_uniformly_slower_head_build_fails_although_its_add_on_side_slows_too(self):
         # Head's whole build 8 % slower on both its sides (a dropped optimization, a changed AngelScript patch, a harness change): the
-        # factors are taken within each side, so the slowdown is not divided away and every operation and the geometric mean fail.
+        # gate never normalizes by the add-on side, so the slowdown is not divided away and every operation and the geometric mean fail.
         ops = ["a", "b", "c", "d", "e"]
         def process(scale):
             return "".join(line(op, 0.5, new_ns=10.0 * scale, addon_ns=20.0 * scale) + "\n" for op in ops)
         code, out, err = self.run_files([process(1.08)] * 3, ops, [process(1.0)] * 3)
         self.assertEqual(code, 1, out)
-        self.assertIn("head 1.000 1.000 1.000, main 1.000 1.000 1.000", out)
         for op in ops:
             self.assertIn(f"{op}: head/main 1.080", err)
         self.assertIn("geometric mean 1.0800", err)
@@ -282,23 +281,18 @@ class CheckBenchTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("a: head/main 1.100", err)
 
-    def test_a_process_the_machine_ran_faster_is_corrected_by_the_add_on_side(self):
+    def test_a_main_process_the_machine_ran_faster_passes_every_operation_and_moves_only_the_geometric_mean(self):
+        # main's last process ran everything 10 % faster on both sides (the machine, not the code). Per operation head's best is compared
+        # with main's median, so no operation fails; the geometric mean compares best with best and reads it (the gate's one known blind
+        # spot, kept for the geometric mean's sensitivity; in 64 relinked gate replicas no process did this, Task 5c fix round 2).
         ops = ["a", "b", "c", "d", "e"]
-        def process(scale, a_ns=10.0):
-            return "".join(line(op, 0.5, new_ns=(a_ns if op == "a" else 10.0) * scale, addon_ns=20.0 * scale) + "\n" for op in ops)
-        heads = [process(1.0)] * 3
-        # main's last process ran everything 10 % faster on both sides (the machine, not the code): uncorrected, its best would make
-        # head read 1.11 slower on every operation.
-        mains = [process(1.0), process(1.0), process(0.9)]
-        code, out, err = self.run_files(heads, ops, mains)
-        self.assertEqual(code, 0, err)
-        self.assertIn("main 1.000 1.000 0.900", out)
-        self.assertIn("geometric mean of best/best: 1.0000", out)
-        # One operation's own add-on slow mode does not move the factor (a median over operations).
-        odd = "".join(line(op, 0.5, new_ns=10.0, addon_ns=60.0 if op == "b" else 20.0) + "\n" for op in ops)
-        code, out, err = self.run_files([odd, process(1.0), process(1.0)], ops, [process(1.0)] * 3)
-        self.assertEqual(code, 0, err)
-        self.assertIn("head 1.000 1.000 1.000", out)
+        def process(scale):
+            return "".join(line(op, 0.5, new_ns=10.0 * scale, addon_ns=20.0 * scale) + "\n" for op in ops)
+        code, out, err = self.run_files([process(1.0)] * 3, ops, [process(1.0), process(1.0), process(0.9)])
+        self.assertEqual(code, 1)
+        self.assertIn("0 operation(s) above their limits", err)
+        self.assertRegex(out, r"a\s+10\.00\s+10\.00\s+1\.000\s+1\.111")
+        self.assertIn("geometric mean 1.1111", err)
 
     def test_a_zero_head_time_names_the_op(self):
         mains = [line("a", 0.5) + "\n" + line("b", 0.5) + "\n"] * 3
