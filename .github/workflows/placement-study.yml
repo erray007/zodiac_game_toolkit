@@ -139,6 +139,14 @@ jobs:
             placement/*.txt
             placement/runs.jsonl
           if-no-files-found: ignore
+      # The builds themselves (each variant's bench_types.exe and its map), from the first job only, for reading their code offline.
+      - name: Upload the builds
+        if: always() && matrix.job == 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: placement-study-builds
+          path: builds/
+          if-no-files-found: ignore
 
   linux:
     if: inputs.linux == 'true'
