@@ -227,10 +227,6 @@ String& add_assign_value(String& self,T value)
 {
 return self.append(value);
 }
-String add(const String& self,const String& other)
-{
-return self+other;
-}
 template<class T>
 String add_value(const String& self,T value)
 {
@@ -329,6 +325,17 @@ return -1;
 raise_string_error(StringError::index_out_of_range,*this);
 return zero_byte;
 }
+[[gnu::noinline]] String* String::script_add_any(String* out,const String& a,const String& b)
+{
+try{
+::new(static_cast<void*>(out)) String(a+b);
+}
+catch(...){
+::new(static_cast<void*>(out)) String();
+raise_current_exception();
+}
+return out;
+}
 #if defined(ZODIAC_CORE_PLACEMENT_PAD)&&ZODIAC_CORE_PLACEMENT_PAD>0
 // Bench placement studies only (bench-reference.yml sets ZODIAC_CORE_PLACEMENT_PAD through tests/bench's ZODIAC_BENCH_CORE_PAD; no preset
 // does): an unused function of that many nop bytes just before the byte_at leaf (StringBindingAccess below), so a no-op relink moves
@@ -392,6 +399,7 @@ const int length=self.length();
 if(length==self.byte_length()&&static_cast<unsigned>(start)<=static_cast<unsigned>(length))return self.find_simple(needle.data(),static_cast<std::size_t>(needle.byte_length()),start);
 return find_any(self,needle,start);
 }
+static constexpr String* (*add)(String*,const String&,const String&)=&String::script_add;
 };
 
 namespace {
@@ -653,7 +661,8 @@ r.behaviour(asBEHAVE_CONSTRUCT,"void f(const string &in)",asFUNCTION(copy_constr
 r.behaviour(asBEHAVE_DESTRUCT,"void f()",asFUNCTION(destruct),asCALL_CDECL_OBJLAST);
 r.method("string &opAssign(const string &in)",asFUNCTION(guarded<&assign>::call));
 r.method("string &opAddAssign(const string &in)",asFUNCTION(guarded<&add_assign>::call));
-r.method("string opAdd(const string &in) const",asFUNCTION(guarded<&add>::call));
+// OBJFIRST like the other methods: a frameless leaf for an inline result, a tail call to the general path otherwise (String::script_add).
+r.method("string opAdd(const string &in) const",asFUNCTION(StringBindingAccess::add));
 r.method("bool opEquals(const string &in) const",asFUNCTION(equals));
 r.method("int opCmp(const string &in) const",asFUNCTION(compare));
 // s[i] is read-only (spec 8.1): a get-only index accessor, so an assignment to s[i] is a compile error rather than a write

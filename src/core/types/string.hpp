@@ -474,6 +474,9 @@ rep_.storage.buffer[1]='\0';
 rep_.size=1;
 rep_.meta=1|meta_ascii;
 }
+// A string whose fields the caller writes next, every one of them (script_add): nothing is stored twice.
+struct Unset {};
+explicit String(Unset) noexcept {}
 bool is_heap() const noexcept
 {
 return (rep_.size&heap_bit)!=0;
@@ -505,9 +508,12 @@ void init(const char* bytes,std::size_t size,std::uint32_t meta);
 // copy and destroy entry points (string_binding.cpp): with full LTO their default 16-byte placement shifts with the size of
 // unrelated code, and on the measured machines that alone moved copying a heap string from a literal by up to 8 %.
 [[gnu::aligned(64)]] void copy_heap(const String& other);
-[[gnu::aligned(64)]] void release() noexcept;
+// release() and scan() are the slow paths of ~String() and length(), and stay out of line (Task 5c fix round 3): Win64 code gets no
+// shrink-wrapping, so a slow path inlined into a leaf gives the leaf's fast path its stack frame (pushes, sub/add rsp) on every call.
+// The script destructor and length() measured 3-5 % slower than the add-on's on the EPYC 9V45 that way.
+[[gnu::noinline,gnu::aligned(64)]] void release() noexcept;
 void free_index() noexcept;
-int scan() const noexcept;
+[[gnu::noinline]] int scan() const noexcept;
 bool settle_ascii() const noexcept;
 // Computes table_hash() of heap text and caches it.
 std::uint64_t cache_hash() const noexcept;
@@ -545,6 +551,14 @@ friend struct StringBindingAccess;
 // The script byte_at's out-of-range path (defined in string_binding.cpp, whose StringBindingAccess holds the leaf): raises the
 // exception and returns a byte. Not noexcept, so the leaf can leave by a musttail call (nothing in it can throw).
 const std::uint8_t& script_byte_out_of_range(int index) const;
+// The script opAdd (StringBindingAccess registers it). The engine returns a string in memory: it passes the address of the result's
+// uninitialized storage first, as the ABI passes a hidden return pointer, so the binding takes it as out and returns it. Two inline
+// operands with an inline result take a frameless leaf that builds the result in out; everything else takes a forced tail call to
+// script_add_any (defined in string_binding.cpp: the general concatenation, which may allocate, inside the script exception
+// boundary). A String return would not do: clang makes no musttail call that returns a non-trivial type, and without it Win64 code
+// saves registers for the slow path on every call. Neither is noexcept, so the leaf can leave by a musttail call; it cannot throw.
+static String* script_add(String* out,const String& a,const String& b);
+static String* script_add_any(String* out,const String& a,const String& b);
 std::uint32_t char_to_byte(std::uint32_t index) const;
 std::uint32_t byte_to_char(std::uint32_t offset) const;
 // The meta of a part of this string with length characters (known whenever this string's count is known).

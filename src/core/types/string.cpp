@@ -1422,6 +1422,42 @@ if(!out.empty())out.rep_.meta=a.empty()?b_meta:joined_meta(a_meta,b_meta,b);
 return out;
 }
 
+// The raw sizes keep the heap bit, so their 64-bit sum is at most inline_capacity only when both operands are inline and the result
+// fits. Then every copy has a fixed width: a's whole 24-byte buffer, and 8, 16 or 24 bytes of b's buffer at a's end, which stay
+// inside out's 32 bytes (a's size plus the width is at most 31, since the two sizes add up to at most 23) and inside b's buffer.
+// Bytes past the text land in out's unused buffer or in its size and meta fields, which are written last. Nothing here calls out.
+String* String::script_add(String* out,const String& a,const String& b)
+{
+const std::uint32_t a_size=a.rep_.size;
+const std::uint32_t b_size=b.rep_.size;
+const std::uint64_t size=std::uint64_t{a_size}+b_size;
+if(size<=static_cast<std::uint64_t>(inline_capacity))[[likely]]{
+const char* const s=b.rep_.storage.buffer;
+char* const d=reinterpret_cast<char*>(::new(static_cast<void*>(out)) String(Unset{}));
+std::memcpy(d,a.rep_.storage.buffer,sizeof(Storage));
+const std::uint32_t a_meta=a.load_meta();
+const std::uint32_t b_meta=b.load_meta();
+if(b_size<=8){
+std::memcpy(d+a_size,s,8);
+}else if(b_size<=16){
+std::memcpy(d+a_size,s,16);
+}else{
+std::memcpy(d+a_size,s,16);
+std::memcpy(d+a_size+16,s+16,8);
+}
+// joined_meta without branches, once the copies are done, so the operands' registers serve it (Win64 has seven volatile ones; one more
+// would make the leaf save registers on every call). d[a_size] is b's first byte, or its NUL when b is empty, so it is a continuation
+// byte only when b starts with one. An empty operand's meta is meta_ascii (count 0), so the empty cases need no test of their own (an
+// empty a before a b that starts with a continuation byte gives meta_unknown, which is always valid: the count is rescanned on use).
+const bool unknown=a_meta==meta_unknown||b_meta==meta_unknown||is_continuation(static_cast<byte>(d[a_size]));
+d[size]='\0';
+out->rep_.size=static_cast<std::uint32_t>(size);
+out->rep_.meta=unknown?meta_unknown:((a_meta&meta_length)+(b_meta&meta_length))|(a_meta&b_meta&meta_ascii);
+return out;
+}
+[[clang::musttail]] return script_add_any(out,a,b);
+}
+
 String String::with_size(std::size_t size)
 {
 String out;

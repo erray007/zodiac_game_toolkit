@@ -319,6 +319,29 @@ REQUIRE(fixture.run("string main(){string s;s=7;string t;t=2.5;string u;u=false;
 CHECK(fixture.returned_string()=="72.5false");
 }
 
+TEST_CASE("string + string gives the right bytes and count at every size around the inline limit")
+{
+ScriptFixture fixture;
+// Every pair of sizes from 0 to 26 (inline and heap operands, inline and heap results): the bytes, the byte length and the character
+// count (the count of a result is carried over from the operands, so a wrong one shows here), for ASCII and for Turkish text.
+REQUIRE(fixture.run("bool main(){string low=\"abcdefghijklmnopqrstuvwxyz\";string high=\"ABCDEFGHIJKLMNOPQRSTUVWXYZ\";"
+"for(int i=0;i<=26;++i)for(int j=0;j<=26;++j){string a=low.substr(0,i);string b=high.substr(0,j);string c=a+b;"
+"if(c.byte_length()!=i+j||c.length()!=i+j||c.substr(0,i)!=a||c.substr(i)!=b)return false;"
+"for(int k=0;k<i+j;++k)if(c.byte_at(k)!=(k<i?a.byte_at(k):b.byte_at(k-i)))return false;}"
+"for(int i=0;i<=11;++i)for(int j=0;j<=11;++j){string a=\"\xC5\x9F\".repeat(i);string b=\"\xC4\xB1\".repeat(j);string c=a+b;"
+"if(c.byte_length()!=2*(i+j)||c.length()!=i+j||c.substr(0,i)!=a||c.substr(i)!=b)return false;}"
+"return true;}","bool main()")==asEXECUTION_FINISHED);
+CHECK(fixture.context->GetReturnByte()!=0);
+// A lead byte at a's end completed by b's first byte: one character across the join, so the count is not the sum (3, not 4); an empty
+// a before such a b; a heap operand holding short text (assigned over long text); a result that just fits inline and one that does not.
+CHECK(holds(fixture,"(\"x\\xC5\"+\"\\x9Fy\").length()==3&&(\"x\\xC5\"+\"\\x9Fy\")==\"x\xC5\x9Fy\""));
+CHECK(holds(fixture,"(\"\"+\"\\x9Fy\").length()==2&&(\"\\x9Fy\"+\"\").length()==2&&(\"\"+\"\").empty()"));
+REQUIRE(fixture.run("bool main(){string h=\"a text long enough to live on the heap\";h=\"ab\";string c=h+\"cd\";string d=\"cd\"+h;"
+"string e=\"0123456789012\"+\"3456789012\";string f=\"0123456789012\"+\"34567890123\";"
+"return c==\"abcd\"&&c.length()==4&&d==\"cdab\"&&e.length()==23&&e==\"01234567890123456789012\"&&f.length()==24&&f.byte_at(23)==0x33;}","bool main()")==asEXECUTION_FINISHED);
+CHECK(fixture.context->GetReturnByte()!=0);
+}
+
 TEST_CASE("comparison is byte order and works with the array")
 {
 ScriptFixture fixture;
