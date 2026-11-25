@@ -4,12 +4,17 @@
 // Contract:
 // - seal encrypts plain into cipher and writes the 16-byte tag: the Poly1305 key is the first 32 bytes of the ChaCha20 block at
 //   counter 0, the data is ChaCha20 from counter 1, and the tag covers aad, zero padding to 16 bytes, cipher, zero padding,
-//   then the two lengths as little-endian 64-bit numbers (RFC 8439 2.8). cipher.size() must equal plain.size() and be at most
-//   kMaxSealBytes; anything else is a bug in the caller, and seal aborts the process.
+//   then the two lengths as little-endian 64-bit numbers (RFC 8439 2.8).
+//   Preconditions of seal, which the caller guarantees (Task 7's pack writer relies on them): cipher.size() == plain.size(),
+//   at most kMaxSealBytes, and cipher either exactly plain (in-place) or not overlapping it at all. Breaking one is a bug in
+//   Zodiac's own code, and seal then aborts the process before it writes anything, so it never produces a record that
+//   authenticates but holds wrong data.
 // - open checks the tag over aad and cipher in constant time before it decrypts anything. On success it writes the plaintext
-//   and returns true. On failure (a wrong key, nonce, aad, cipher or tag, plain.size() != cipher.size(), or more than
-//   kMaxSealBytes) it zeroes plain and returns false, so nothing unauthenticated is ever readable.
-// - In both, the output may be the input itself (in-place) or not overlap it at all; a partial overlap is not allowed.
+//   and returns true. On failure it returns false and nothing unauthenticated is ever readable:
+//   - a wrong key, nonce, aad, cipher or tag, plain.size() != cipher.size(), or more than kMaxSealBytes: plain is zeroed;
+//   - plain partially overlapping cipher (sharing bytes without being exactly cipher): nothing is written at all, since zeroing
+//     plain would destroy part of cipher; plain keeps the caller's own bytes, none of them decrypted.
+//   Exactly in-place (plain is cipher) and disjoint buffers are both allowed.
 // - derive_password_key is Argon2id (version 0x13) with one lane, kib KiB of memory and passes passes, the password as the
 //   Argon2 password and the salt as its salt, giving 32 bytes. kib must be from kMinKdfKib to kMaxKdfKib and passes from 1 to
 //   kMaxKdfPasses, and the password at most 4 GiB - 1 bytes; otherwise it throws std::invalid_argument. It allocates kib KiB
@@ -17,8 +22,13 @@
 // - derive_file_key is BLAKE2b-256 keyed with master over "zodiac pack key v1" (18 bytes, no terminator) then the salt.
 // - hash is unkeyed BLAKE2b-256.
 // - random_bytes fills the span from platform::fill_entropy; std::runtime_error("the entropy source failed") when it fails.
-// - Secrets are never logged. Every key, Poly1305 key, keystream block and work area this file creates is wiped before it
-//   goes out of scope; the caller owns and wipes the keys it passes in and gets back (crypto::wipe).
+// - Secrets are never logged. Every key, Poly1305 key, keystream buffer and work area this code creates in memory it names is
+//   wiped before it goes out of scope. Two things are not:
+//   - The caller's own Key copies: the keys it passes in and the ones derive_password_key and derive_file_key return are the
+//     caller's to wipe (crypto::wipe) when it is done with them.
+//   - Registers and compiler spills: the vectorized rounds (batch4, batch8) hold key-derived state words in vector registers,
+//     and the compiler may spill some of them to the stack; no portable code can wipe those slots (Monocypher's scalar code has
+//     the same limit).
 // - Everything is thread-safe: no function keeps state between calls except the ChaCha20 dispatch, chosen once.
 // The detail namespace is the keystream behind seal and open, for test_crypto and bench_files:
 // - A keystream function XORs size bytes of in (zeros when in is null) with the ChaCha20 keystream of key and nonce from block

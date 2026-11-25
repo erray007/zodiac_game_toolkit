@@ -11,6 +11,7 @@
 // Kept by measurement (Task 6 Step 4, bench_files --op crypto_chunk, one 64 KiB seal plus open, paired A B B A against Monocypher's
 // scalar keystream in one process, CI run 45651126939): AVX2 0.4405 of the reference's time on an AMD EPYC 7763 (Windows) and 0.4815
 // on an AMD EPYC 9V45 (Linux); SSE2 0.5994 and 0.6991. The bar was at least 10 % faster on both.
+#include <core/pack/clear.hpp>
 #include <core/pack/crypto.hpp>
 #include <monocypher.h>
 #include <immintrin.h>
@@ -42,11 +43,6 @@ state.word[13]=0;
 state.word[14]=load32(nonce+4);
 state.word[15]=load32(nonce+8);
 state.counter=counter+(std::uint64_t{load32(nonce)}<<32);
-}
-void clear(void* secret,std::size_t size) noexcept
-{
-std::memset(secret,0,size);
-asm volatile(""::"r"(secret):"memory");
 }
 void xor_bytes(std::uint8_t* out,const std::uint8_t* in,const std::uint8_t* keystream,std::size_t size) noexcept
 {

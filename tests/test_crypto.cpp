@@ -332,6 +332,65 @@ const Bytes aad{1,2,3};
 CHECK_FALSE(crypto::open(key,nonce,as_bytes(aad),{},tag,{}));
 }
 
+// seal's other half of this contract, aborting on a partial overlap (and on a size mismatch), has no test: doctest has no death
+// tests and the abort ends the process.
+TEST_CASE("seal and open take exact in-place and disjoint buffers, and open refuses a partial overlap without writing")
+{
+for(const Vector* v:vectors_of("aead")){
+INFO(v->name);
+const crypto::Key key=array_of<crypto::Key>((*v)["key"]);
+const crypto::Nonce nonce=array_of<crypto::Nonce>((*v)["nonce"]);
+const crypto::Tag good_tag=array_of<crypto::Tag>((*v)["tag"]);
+const Bytes& aad=(*v)["aad"];
+const Bytes& plain=(*v)["plain"];
+const Bytes& cipher=(*v)["cipher"];
+const std::size_t size=cipher.size();
+for(const crypto::detail::Keystream* stream:keystreams()){
+INFO(stream->name);
+// Disjoint, both ways.
+Bytes sealed(size,0xAA);
+crypto::Tag tag{};
+crypto::detail::seal_with(*stream,key,nonce,as_bytes(aad),as_bytes(plain),as_writable(sealed),tag);
+CHECK(sealed==cipher);
+CHECK(tag==good_tag);
+Bytes opened(size,0xAA);
+CHECK(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(cipher),good_tag,as_writable(opened)));
+CHECK(opened==plain);
+// Exactly in place, both ways.
+Bytes in_place=plain;
+crypto::detail::seal_with(*stream,key,nonce,as_bytes(aad),as_bytes(in_place),as_writable(in_place),tag);
+CHECK(in_place==cipher);
+CHECK(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(in_place),tag,as_writable(in_place)));
+CHECK(in_place==plain);
+// Disjoint but adjacent (out right after in, and right before it): no shared byte, so allowed.
+Bytes adjacent(2*size);
+std::copy(cipher.begin(),cipher.end(),adjacent.begin());
+CHECK(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(adjacent).first(size),good_tag,as_writable(adjacent).subspan(size)));
+CHECK(std::equal(plain.begin(),plain.end(),adjacent.begin()+static_cast<std::ptrdiff_t>(size)));
+// Partial overlaps, the output shifted by k bytes after or before the input: refused, and neither range is written.
+for(const std::size_t k:{std::size_t{1},std::size_t{16},std::size_t{63},std::size_t{64},size/2,size-1}){
+INFO("shift "<<k);
+Bytes after(size+k,0x5C);
+std::copy(cipher.begin(),cipher.end(),after.begin());
+const Bytes after_before=after;
+CHECK_FALSE(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(after).first(size),good_tag,as_writable(after).subspan(k,size)));
+CHECK(after==after_before);
+Bytes before(size+k,0x5C);
+std::copy(cipher.begin(),cipher.end(),before.begin()+static_cast<std::ptrdiff_t>(k));
+const Bytes before_before=before;
+CHECK_FALSE(crypto::detail::open_with(*stream,key,nonce,as_bytes(aad),as_bytes(before).subspan(k,size),good_tag,as_writable(before).first(size)));
+CHECK(before==before_before);
+}
+}
+// The public open refuses a partial overlap too.
+Bytes shifted(size+8,0);
+std::copy(cipher.begin(),cipher.end(),shifted.begin());
+const Bytes unchanged=shifted;
+CHECK_FALSE(crypto::open(key,nonce,as_bytes(aad),as_bytes(shifted).first(size),good_tag,as_writable(shifted).subspan(8,size)));
+CHECK(shifted==unchanged);
+}
+}
+
 #if defined(ZODIAC_CRYPTO_SIMD)
 TEST_CASE("the vectorized ChaCha20 gives the reference keystream and seal on random buffers")
 {

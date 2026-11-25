@@ -16,7 +16,7 @@ set(ZODIAC_CORE_SOURCES host.cpp host.hpp project_file.cpp project_file.hpp text
 # The pack cryptography (pack/crypto.hpp) on Monocypher's one source file (cmake/Dependencies.cmake), which compiles without Zodiac's warnings.
 # On x86-64 the vectorized ChaCha20 (pack/chacha20_simd.cpp, SSE2 and AVX2 chosen at run time) is compiled in too, announced to the core's users
 # (test_crypto, bench_files) as ZODIAC_CRYPTO_SIMD.
-list(APPEND ZODIAC_CORE_SOURCES pack/crypto.cpp pack/crypto.hpp "${ZODIAC_MONOCYPHER_DIR}/monocypher.c")
+list(APPEND ZODIAC_CORE_SOURCES pack/crypto.cpp pack/crypto.hpp pack/clear.hpp "${ZODIAC_MONOCYPHER_DIR}/monocypher.c")
 set_source_files_properties("${ZODIAC_MONOCYPHER_DIR}/monocypher.c" PROPERTIES COMPILE_OPTIONS -w)
 set(ZODIAC_CRYPTO_SIMD OFF)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

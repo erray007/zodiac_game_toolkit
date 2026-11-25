@@ -2,22 +2,25 @@
 // chosen keystream (its lead batch gives the Poly1305 key and the first data bytes), Argon2id, BLAKE2b and the entropy source.
 // Small secrets are wiped with crypto_wipe; the lead batch, a refused output and the Argon2 work area, which are large or on the
 // hot path, with memset behind a compiler barrier, which the optimizer cannot remove either and which runs at memset's speed.
+#include <core/pack/clear.hpp>
 #include <core/pack/crypto.hpp>
 #include <platform/entropy.hpp>
 #include <monocypher.h>
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <stdexcept>
 
 namespace zodiac::crypto {
 namespace {
-// memset that is never removed as a dead store: the empty asm may read the bytes through its pointer operand.
-void clear(void* secret,std::size_t size) noexcept
+using detail::clear;
+// Whether out and in, both size bytes, share a byte without being the same range (out == in is in-place and allowed).
+bool partial_overlap(const void* out,const void* in,std::size_t size) noexcept
 {
-std::memset(secret,0,size);
-asm volatile(""::"r"(secret):"memory");
+const std::uintptr_t o=reinterpret_cast<std::uintptr_t>(out);
+const std::uintptr_t i=reinterpret_cast<std::uintptr_t>(in);
+return size!=0&&o!=i&&o<i+size&&i<o+size;
 }
 void store64(std::uint8_t* out,std::uint64_t value) noexcept
 {
@@ -84,9 +87,10 @@ return reference;
 void seal_with(const Keystream& stream,const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::span<const std::byte> plain,std::span<std::byte> cipher,Tag& tag) noexcept
 {
 const std::size_t size=plain.size();
-if(cipher.size()!=size||size>kMaxSealBytes)[[unlikely]]std::abort();
 const std::uint8_t* in=bytes_of(plain);
 std::uint8_t* out=reinterpret_cast<std::uint8_t*>(cipher.data());
+// Preconditions (crypto.hpp): a caller bug otherwise, which must never write a pack that authenticates but holds wrong data.
+if(cipher.size()!=size||size>kMaxSealBytes||partial_overlap(out,in,size))[[unlikely]]std::abort();
 alignas(64) std::uint8_t lead[kMaxLead];
 stream.run(lead,nullptr,stream.lead,key.data(),nonce.data(),0);
 const std::size_t first=std::min(size,stream.lead-64);
@@ -105,6 +109,9 @@ if(!plain.empty())clear(out,plain.size());
 return false;
 }
 const std::uint8_t* in=bytes_of(cipher);
+// A partial overlap: nothing is written, since zeroing plain would destroy part of cipher; plain still holds only the caller's
+// own bytes, none of them decrypted.
+if(partial_overlap(out,in,size))[[unlikely]]return false;
 alignas(64) std::uint8_t lead[kMaxLead];
 stream.run(lead,nullptr,stream.lead,key.data(),nonce.data(),0);
 std::uint8_t expected[16];
