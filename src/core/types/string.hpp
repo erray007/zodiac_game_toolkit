@@ -510,12 +510,10 @@ void init(const char* bytes,std::size_t size,std::uint32_t meta);
 // copy and destroy entry points (string_binding.cpp): with full LTO their default 16-byte placement shifts with the size of
 // unrelated code, and on the measured machines that alone moved copying a heap string from a literal by up to 8 %.
 [[gnu::aligned(64)]] void copy_heap(const String& other);
-// scan() is length()'s slow path and stays out of line, and the script destructor frees heap text through release_out_of_line()
-// (Task 5c fix round 3): Win64 code gets no shrink-wrapping, so a slow path inlined into a leaf gives the leaf's fast path its stack
-// frame (pushes, sub/add rsp) on every call; the script destructor and length() measured 3-5 % slower than the add-on's on the EPYC
-// 9V45 that way. release() itself may still be inlined into C++ callers, where it saves a call per freed block.
-[[gnu::aligned(64)]] void release() noexcept;
-[[gnu::noinline]] void release_out_of_line() noexcept;
+// release() and scan() are the slow paths of ~String() and length(), and stay out of line (Task 5c fix round 3): Win64 code gets no
+// shrink-wrapping, so a slow path inlined into a leaf gives the leaf's fast path its stack frame (pushes, sub/add rsp) on every call.
+// The script destructor and length() measured 3-5 % slower than the add-on's on the EPYC 9V45 that way.
+[[gnu::noinline,gnu::aligned(64)]] void release() noexcept;
 void free_index() noexcept;
 [[gnu::noinline]] int scan() const noexcept;
 bool settle_ascii() const noexcept;
