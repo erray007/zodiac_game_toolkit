@@ -8,6 +8,8 @@
 # - BINARIES (linked executables, native code): the hooks' variable names ZODIAC_TABLE_HASH_SEED and ZODIAC_ARRAY_BLOCK_CACHE, the texts
 #   they read the environment with, are in the file iff HOOKS. Each must also hold "zodiac-dictionary 1" (serialize()'s header, in every core), so a read that found no
 #   text cannot pass.
+# - In every tree: no archive names mimalloc's functions (mi_malloc, mi_free, mi_new...) and no binary holds the text "mimalloc"; only the
+#   allocator experiment's tree (ZODIAC_BENCH_ALLOCATOR=mimalloc, which refuses to install or package) links it.
 # It fails naming each archive or executable that breaks the rule.
 foreach(variable NM HOOKS ARCHIVES BINARIES)
 if(NOT DEFINED ${variable} OR "${${variable}}" STREQUAL "")
@@ -35,6 +37,13 @@ set(hooks test_hook_table_hash_seed string_array_steps)
 if(PRIVATE_HEAP)
 list(APPEND hooks "4heap12private_heap")
 endif()
+# mimalloc (the allocator experiment's, ZODIAC_BENCH_ALLOCATOR=mimalloc) is in no tree but that experiment's, hooks or not: no core
+# archive may name its functions (a hooks tree does not change that, so this is checked in every tree).
+string(REGEX MATCHALL "[^\r\n]* mi_(malloc|calloc|realloc|free|new)[^\r\n]*" mimalloc_found "${symbols}")
+if(mimalloc_found)
+list(JOIN mimalloc_found "\n" shown)
+string(APPEND failures "\n${archive} names mimalloc's functions:\n${shown}")
+endif()
 foreach(hook IN LISTS hooks)
 string(REGEX MATCHALL "[^\r\n]*${hook}[^\r\n]*" found "${symbols}")
 if(HOOKS AND NOT found)
@@ -49,7 +58,10 @@ foreach(binary IN LISTS binaries)
 if(NOT EXISTS "${binary}")
 message(FATAL_ERROR "check_no_test_hooks: ${binary} does not exist")
 endif()
-file(STRINGS "${binary}" texts REGEX "ZODIAC_TABLE_HASH_SEED|ZODIAC_ARRAY_BLOCK_CACHE|zodiac-dictionary 1")
+file(STRINGS "${binary}" texts REGEX "ZODIAC_TABLE_HASH_SEED|ZODIAC_ARRAY_BLOCK_CACHE|zodiac-dictionary 1|mimalloc")
+if(texts MATCHES "mimalloc")
+string(APPEND failures "\n${binary} holds the text mimalloc (only the allocator experiment's tree may)")
+endif()
 if(NOT texts MATCHES "zodiac-dictionary 1")
 message(FATAL_ERROR "check_no_test_hooks: \"zodiac-dictionary 1\" was not found in ${binary}, so its texts were not read")
 endif()

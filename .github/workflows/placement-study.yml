@@ -92,7 +92,7 @@ jobs:
               cp "build/$label/tests/bench/bench_types.exe" "build/$label/tests/bench/bench_types.exe.map" "builds/$label/"
             else
               # Every study option back to its default first, then this variant's (commas between options).
-              options=(-DZODIAC_BENCH_FIXED_BASE=OFF)
+              options=(-DZODIAC_BENCH_FIXED_BASE=OFF -DZODIAC_BENCH_ALLOCATOR=)
               IFS=, read -r -a extra <<< "$spec"
               options+=("${extra[@]}")
               echo "== $label: ${options[*]}"

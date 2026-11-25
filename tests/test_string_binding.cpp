@@ -115,6 +115,13 @@ CHECK(error_of(fixture,"string t=\"abc\";int n=t.length();string s=t[-1];")=="in
 REQUIRE(fixture.run("bool main(){string t=\"a text long enough to live on the heap\";int n=t.length();string c=t[n-1];string d=t[0]+t[2];"
 "return c==\"p\"&&c.length()==1&&c.byte_length()==1&&d==\"at\"&&!t[1].empty()&&t[1]==\" \"&&(t[0]+\"!\")==\"a!\";}","bool main()")==asEXECUTION_FINISHED);
 CHECK(fixture.context->GetReturnByte()!=0);
+// Text whose one byte is not ASCII ("\xFF", not valid UTF-8) takes the fallback, the same character the general path gives; ASCII text
+// that was scanned, then grows by a multibyte character, is indexed by characters again (its meta no longer says ASCII).
+REQUIRE(fixture.run("bool main(){string t=\"\\xFF\";int n=t.length();string c=t[0];"
+"string u=\"abc\";int m=u.length();u+=\"\xC5\x9F\";"
+"return n==1&&c==t.substr(0,1)&&c.byte_length()==1&&m==3&&u.length()==4&&u[3]==\"\xC5\x9F\"&&u[3].byte_length()==2&&u[0]==\"a\"&&u[2]==\"c\";}","bool main()")==asEXECUTION_FINISHED);
+CHECK(fixture.context->GetReturnByte()!=0);
+CHECK(error_of(fixture,"string u=\"abc\";int m=u.length();u+=\"\xC5\x9F\";string c=u[4];")=="index out of range");
 CHECK(error_of(fixture,"uint c=\"abc\".code_at(3);")=="index out of range");
 CHECK(error_of(fixture,"uint8 b=\"\xC5\x9F\".byte_at(2);")=="index out of range");
 }

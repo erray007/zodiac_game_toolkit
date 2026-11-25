@@ -64,14 +64,18 @@ class KitTest(unittest.TestCase):
             self.assertIn(dll, dlls)
         self.assertEqual(sorted(p.name for p in (KIT / "bin").iterdir()), sorted(["zodiac.exe", "zodiacw.exe", "ld.lld.exe"] + dlls))
         release = KIT / "lib" / "release"
-        for name in ("libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "link.txt", "toolchain.txt"):
+        for name in ("libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "zodiac_manifest.obj", "link.txt", "toolchain.txt"):
             self.assertTrue((release / name).is_file(), name)
         # Every toolchain file the link line names is in crt/, and nothing else.
         link = (release / "link.txt").read_text(encoding="utf-8").splitlines()
         wanted = sorted({line.rsplit("/", 1)[1] for line in link if line.startswith("{release_lib}/crt/")})
         self.assertTrue(wanted)
         self.assertEqual(sorted(p.name for p in (release / "crt").iterdir()), wanted)
-        self.assertEqual(sorted(p.name for p in release.iterdir()), sorted(["crt", "libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "link.txt", "toolchain.txt"]))
+        self.assertEqual(sorted(p.name for p in release.iterdir()), sorted(["crt", "libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "zodiac_manifest.obj", "link.txt", "toolchain.txt"]))
+        # The shipped application manifest (the Segment Heap) is in zodiac.exe, zodiacw.exe and the object every game links.
+        heap_type = b'<heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>'
+        for path in (KIT / "bin" / "zodiac.exe", KIT / "bin" / "zodiacw.exe", release / "zodiac_manifest.obj"):
+            self.assertIn(heap_type, path.read_bytes(), path)
         for header in ("plugin.h", "plugin.hpp"):
             self.assertTrue((KIT / "include" / "zodiac" / header).is_file(), header)
         self.assertEqual(sorted(p.name for p in (KIT / "include").iterdir()), ["zodiac"])

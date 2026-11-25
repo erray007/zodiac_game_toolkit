@@ -578,8 +578,10 @@ tmp_path+=".tmp";
 const TemporaryFile tmp(std::move(tmp_path),diagnostics);
 LinkRequest request;
 request.output=tmp.path();
-request.inputs.reserve(libraries.size()+4);
+request.inputs.reserve(libraries.size()+5);
 request.inputs.push_back(object.path());
+// The application manifest every game carries (the Segment Heap on Windows 10 2004 and later; src/platform/windows/application.manifest).
+request.inputs.push_back(kit.release_lib/"zodiac_manifest.obj");
 request.inputs.push_back(kit.release_lib/"libzodiac_release_stub.a");
 for(const StaticLibrary& library:libraries){
 request.inputs.push_back(library.archive);

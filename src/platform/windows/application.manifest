@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- The application manifest of every Windows executable Zodiac ships or builds: zodiac.exe, zodiacw.exe and every game (zodiac build links
+lib/release/zodiac_manifest.obj, compiled from application.rc). Owner decision, Task 5c fix round 1: the process heap, and so the C runtime's
+heap, is the Segment Heap. Windows 10 2004 (build 19041) and later honour heapType; older Windows ignores the element and keeps the NT heap,
+as before. Nothing else is declared, so no other behaviour of the executables changes; a later entry (DPI awareness, the UTF-8 code page,
+supportedOS) goes into this same file, beside heapType. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+<application xmlns="urn:schemas-microsoft-com:asm.v3">
+<windowsSettings>
+<heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
+</windowsSettings>
+</application>
+</assembly>

@@ -75,8 +75,14 @@ jobs:
           # The gate's order: main, head, head, main, main, head.
           run main-1; run bench-1; run bench-2; run main-2; run main-3; run bench-3
           status=0
-          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt --baseline main-1.json main-2.json main-3.json || status=$?
+          python -I tools/check_bench.py bench-1.json bench-2.json bench-3.json --expected bench-ops.txt --baseline main-1.json main-2.json main-3.json > check-bench.txt 2> check-bench-stderr.txt || status=$?
+          cat check-bench.txt check-bench-stderr.txt
           echo "check_bench exit code $status (report-only)"
+          # The CPU and the result in the run's summary too, so they are recorded even when the artifact is not.
+          echo "job $JOB: $(grep -m1 '^machine:' check-bench.txt), $(grep -m1 'heap kind' bench-1-stderr.txt | tr -d '\r'), check_bench exit code $status" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^  [a-z_0-9]+: (ratio|head/main)" check-bench-stderr.txt >> "$GITHUB_STEP_SUMMARY" || true
+        env:
+          JOB: ${{ matrix.job }}
       - name: Upload the runs
         if: always()
         uses: actions/upload-artifact@v4
@@ -86,4 +92,5 @@ jobs:
             bench*.json
             main-*.json
             bench*-stderr.txt
+            check-bench*.txt
           if-no-files-found: ignore

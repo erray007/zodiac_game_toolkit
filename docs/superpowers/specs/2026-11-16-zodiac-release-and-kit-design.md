@@ -120,6 +120,14 @@ Every step reports progress at `verbose` 3 and errors at level 1; `build` never 
 - **My call:** the right-click entry starts `zodiacw.exe build "<file>"`, a GUI-subsystem twin of `zodiac.exe` from the same sources, so no console window flashes up behind the result window. `zodiacw.exe` is in `bin/` next to `zodiac.exe`.
 - The window belongs to the kit's build tool only; games never get it.
 
+### 8.2b Application manifest: the Segment Heap (decided by the owner, 2026-11-25, Task 5c fix round 1)
+
+- `zodiac.exe`, `zodiacw.exe` and every game `zodiac build` makes carry one application manifest, `src/platform/windows/application.manifest`, which declares only `<heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>`. Games get it from `lib/release/zodiac_manifest.obj`, a resource object the kit stages and `zodiac build` links into every game.
+- Windows 10 version 2004 (build 19041) and later then run the program on the Segment Heap. Older Windows (7, 8.1 and Windows 10 before 2004) ignores the element without an error and runs the program on the NT heap, exactly as before.
+- Reason: on the NT heap, a process with millions of live blocks can get one request size (32 or 64 bytes in the measurements) stuck on a path about 50 times slower than the others for the whole session; the Segment Heap showed no such size in 60 processes, and per operation it was as fast or faster (0.93-0.98 of the NT heap's time). Zodiac's own block caches (String's heap blocks, ScriptArray objects) stay. mimalloc was measured too and is not shipped.
+- Any later manifest entry (DPI awareness, the UTF-8 code page, supportedOS) goes into the same file, beside heapType.
+- Verified by `test_segment_heap` and kit-clean-machine's run-time probe (`tests/fixtures/tools/heap_kind_probe.cpp`), which read the process heap's signature of zodiac.exe and of a built game; on Windows older than build 19041 the probe only reports.
+
 ### 8.3 Static module registration
 
 - Building a module with `ZODIAC_MODULE_STATIC` makes `ZODIAC_DEFINE_MODULE` emit a uniquely named registration record (`zodiac_static_module_<name>`) pointing at the module's `zodiac_module_info`, placed in a dedicated linker section.

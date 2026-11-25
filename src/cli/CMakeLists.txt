@@ -21,6 +21,8 @@ set_target_properties(zodiac PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY
 target_link_libraries(zodiac PRIVATE zodiac_cli)
 if(WIN32)
 target_link_options(zodiac PRIVATE -municode)
+# The shipped application manifest (the Segment Heap, src/platform/windows/application.manifest).
+target_sources(zodiac PRIVATE $<TARGET_OBJECTS:zodiac_application_manifest>)
 endif()
 zodiac_target_warnings(zodiac)
 if(WIN32)
@@ -31,6 +33,7 @@ set_target_properties(zodiacw PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINAR
 target_compile_definitions(zodiacw PRIVATE ZODIAC_GUI_ENTRY)
 target_link_libraries(zodiacw PRIVATE zodiac_cli)
 target_link_options(zodiacw PRIVATE -mwindows -municode)
+target_sources(zodiacw PRIVATE $<TARGET_OBJECTS:zodiac_application_manifest>)
 zodiac_target_warnings(zodiacw)
 add_dependencies(zodiacw zodiac)
 # The kit installs both tools into bin/ (the toolchain files that go beside them come from zodiac_kit_stage).

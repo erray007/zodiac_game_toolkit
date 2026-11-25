@@ -18,19 +18,20 @@ if(ZODIAC_TEST_HOOKS)
 message(WARNING "ZODIAC_TEST_HOOKS is ON: this tree is for benches and tests only; it cannot be installed or packaged.")
 install(CODE "message(FATAL_ERROR \"This tree is configured with ZODIAC_TEST_HOOKS=ON, which must never be installed.\")")
 endif()
-# The allocator experiment of Task 5c (heap-study.yml): which heap Zodiac's types and the engine allocate from in bench_types. Empty (the
-# default, every preset, the kit, every game): the C runtime's heap. "segment": bench_types' manifest asks Windows for the Segment Heap
-# (the executable only). "mimalloc": Zodiac's heap calls (core/types/heap.hpp), the engine's (asSetGlobalMemoryFunctions) and bench_types'
-# global operator new and delete use mimalloc (pinned in cmake/Dependencies.cmake). No shipped build changes allocator without the
-# owner's decision: like the test hooks, such a tree refuses to install or package.
-set(ZODIAC_BENCH_ALLOCATOR "" CACHE STRING "Bench allocator experiment: empty (the C runtime's heap), segment or mimalloc (never for a kit or a game)")
-set_property(CACHE ZODIAC_BENCH_ALLOCATOR PROPERTY STRINGS "" segment mimalloc)
+# The allocator experiment of Task 5c (heap-study.yml, placement-study.yml): which heap Zodiac's types and the engine allocate from in
+# bench_types. Empty (the default, every preset, the kit, every game): what ships, the C runtime's heap on the process heap, which the
+# application manifest makes the Segment Heap on Windows 10 2004 and later (owner decision, Task 5c fix round 1). "nt": bench_types without
+# that manifest, the NT heap, for comparison. "mimalloc": Zodiac's heap calls (core/types/heap.hpp), the engine's
+# (asSetGlobalMemoryFunctions) and bench_types' global operator new and delete use mimalloc (pinned in cmake/Dependencies.cmake); the owner
+# decided against shipping it. Like the test hooks, an experiment tree refuses to install or package.
+set(ZODIAC_BENCH_ALLOCATOR "" CACHE STRING "Bench allocator experiment: empty (as shipped), nt or mimalloc (never for a kit or a game)")
+set_property(CACHE ZODIAC_BENCH_ALLOCATOR PROPERTY STRINGS "" nt mimalloc)
 if(NOT ZODIAC_BENCH_ALLOCATOR STREQUAL "")
-if(NOT ZODIAC_BENCH_ALLOCATOR MATCHES "^(segment|mimalloc)$")
-message(FATAL_ERROR "ZODIAC_BENCH_ALLOCATOR is \"${ZODIAC_BENCH_ALLOCATOR}\"; it takes segment, mimalloc or nothing")
+if(NOT ZODIAC_BENCH_ALLOCATOR MATCHES "^(nt|mimalloc)$")
+message(FATAL_ERROR "ZODIAC_BENCH_ALLOCATOR is \"${ZODIAC_BENCH_ALLOCATOR}\"; it takes nt, mimalloc or nothing")
 endif()
-if(ZODIAC_BENCH_ALLOCATOR STREQUAL "segment" AND NOT WIN32)
-message(FATAL_ERROR "ZODIAC_BENCH_ALLOCATOR=segment is a Windows heap; this tree is not Windows")
+if(ZODIAC_BENCH_ALLOCATOR STREQUAL "nt" AND NOT WIN32)
+message(FATAL_ERROR "ZODIAC_BENCH_ALLOCATOR=nt is the Windows NT heap; this tree is not Windows")
 endif()
 message(WARNING "ZODIAC_BENCH_ALLOCATOR is ${ZODIAC_BENCH_ALLOCATOR}: this tree is for the allocator experiment only; it cannot be installed or packaged.")
 install(CODE "message(FATAL_ERROR \"This tree is configured with ZODIAC_BENCH_ALLOCATOR=${ZODIAC_BENCH_ALLOCATOR}, which must never be installed.\")")
@@ -44,6 +45,15 @@ include(cmake/ZodiacKitStage.cmake)
 if(WIN32)
 # The release link line and the toolchain identity for lib/release (the kit's release libraries, staged by zodiac_kit_stage below).
 zodiac_capture_release_link("${CMAKE_BINARY_DIR}/lib/release")
+endif()
+if(WIN32)
+# The application manifest of every Windows executable Zodiac ships or builds (src/platform/windows/application.manifest: the Segment Heap
+# on Windows 10 2004 and later), compiled once: zodiac and zodiacw link these objects, the kit stages them as lib/release/zodiac_manifest.obj
+# for zodiac build to link into every game, and bench_types links them so the gate measures the heap games get.
+enable_language(RC)
+add_library(zodiac_application_manifest OBJECT src/platform/windows/application.rc)
+set_property(SOURCE src/platform/windows/application.rc APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows")
+set_property(SOURCE src/platform/windows/application.rc APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/application.manifest")
 endif()
 add_library(zodiac_plugin_abi INTERFACE)
 target_include_directories(zodiac_plugin_abi INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

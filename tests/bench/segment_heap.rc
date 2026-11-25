@@ -1,3 +1,0 @@
-// bench_types' manifest resource in the Segment Heap arm of the allocator experiment (tests/bench/CMakeLists.txt): resource 1 of type 24
-// (CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST), segment_heap.manifest.
-1 24 "segment_heap.manifest"

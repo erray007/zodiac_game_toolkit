@@ -156,6 +156,12 @@ target_link_options(attach_probe PRIVATE -municode)
 zodiac_target_warnings(attach_probe)
 target_compile_definitions(test_process PRIVATE "ZODIAC_TEST_ATTACH_PROBE=\"$<TARGET_FILE:attach_probe>\"")
 add_dependencies(test_process attach_probe)
+# The shipped application manifest at run time: zodiac.exe's process heap is the Segment Heap on Windows 10 2004 and later (report-only on
+# older Windows). kit-clean-machine runs the same probe on the kit's zodiac.exe and on a built game.
+add_executable(heap_kind_probe fixtures/tools/heap_kind_probe.cpp)
+target_link_options(heap_kind_probe PRIVATE -municode)
+zodiac_target_warnings(heap_kind_probe)
+add_test(NAME test_segment_heap COMMAND heap_kind_probe --require-segment "$<TARGET_FILE:zodiac>" --version)
 endif()
 zodiac_add_test(test_build_report SOURCES test_build_report.cpp LIBRARIES zodiac_cli)
 zodiac_add_test(test_kit_layout SOURCES test_kit_layout.cpp LIBRARIES zodiac_core)

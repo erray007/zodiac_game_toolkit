@@ -24,11 +24,9 @@ option(ZODIAC_BENCH_FIXED_BASE "Link bench_types without ASLR (the placement stu
 if(ZODIAC_BENCH_FIXED_BASE AND WIN32)
 target_link_options(bench_types PRIVATE "-Wl,--disable-dynamicbase")
 endif()
-# The Segment Heap arm of the allocator experiment (top-level ZODIAC_BENCH_ALLOCATOR=segment): bench_types' manifest asks Windows for it,
-# so the process heap and the C runtime's heap on it are segment heaps. The mimalloc arm needs nothing here: the core carries it.
-if(ZODIAC_BENCH_ALLOCATOR STREQUAL "segment")
-enable_language(RC)
-target_sources(bench_types PRIVATE segment_heap.rc)
-set_property(SOURCE segment_heap.rc APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}")
-set_property(SOURCE segment_heap.rc APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/segment_heap.manifest")
+# bench_types carries the shipped application manifest (the Segment Heap; src/platform/windows/application.manifest), so the gate measures
+# the heap every game gets. The allocator experiment's "nt" tree (top-level ZODIAC_BENCH_ALLOCATOR) leaves it out, for the NT heap; its
+# mimalloc tree needs nothing here (the core carries it) and keeps the manifest.
+if(WIN32 AND NOT ZODIAC_BENCH_ALLOCATOR STREQUAL "nt")
+target_sources(bench_types PRIVATE $<TARGET_OBJECTS:zodiac_application_manifest>)
 endif()

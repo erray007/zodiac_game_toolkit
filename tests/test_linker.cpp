@@ -116,6 +116,7 @@ write_file(object,zodiac::write_payload_object(payload));
 zodiac::cli::LinkRequest request;
 request.output=folder/"game.exe";
 request.inputs.push_back(object);
+request.inputs.push_back(kit.release_lib/"zodiac_manifest.obj");
 request.inputs.push_back(kit.release_lib/"libzodiac_release_stub.a");
 for(const std::string& name:static_modules){
 request.inputs.push_back(kit.static_modules/("zodiac_mod_"+name+".a"));
@@ -160,6 +161,7 @@ CHECK(fs::is_regular_file(kit.bin/"ld.lld.exe"));
 CHECK(fs::is_regular_file(kit.release_lib/"libzodiac_release_stub.a"));
 CHECK(fs::is_regular_file(kit.release_lib/"libzodiac_core_release.a"));
 CHECK(fs::is_regular_file(kit.release_lib/"libangelscript.a"));
+CHECK(fs::is_regular_file(kit.release_lib/"zodiac_manifest.obj"));
 CHECK(fs::is_regular_file(kit.release_lib/"crt"/"crt2u.o"));
 CHECK(fs::is_regular_file(kit.static_modules/"zodiac_mod_example.a"));
 std::ifstream toolchain(kit.release_lib/"toolchain.txt",std::ios::binary);
@@ -198,6 +200,12 @@ CHECK(linked.lines.empty());
 CHECK(!fs::exists(folder.dir()/"game.exe.rsp"));
 // -mwindows: a GUI-subsystem executable, so its entry point is the release stub's wWinMain (pulled from the stub archive by the CRT's reference).
 CHECK(pe_subsystem(folder.dir()/"game.exe")==2);
+// The application manifest is linked in (its resource holds the manifest's bytes as written): the Segment Heap.
+{
+std::ifstream in(folder.dir()/"game.exe",std::ios::binary);
+const std::string image((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+CHECK(image.find("<heapType xmlns=\"http://schemas.microsoft.com/SMI/2020/WindowsSettings\">SegmentHeap</heapType>")!=std::string::npos);
+}
 // wWinMain hands [zodiac_payload, zodiac_payload_end) to start_linked: any other end than just past the data is a size mismatch (exit 2).
 const zodiac::platform::ProcessResult ran=run_exe(folder.dir()/"game.exe");
 CHECK(ran.output=="");

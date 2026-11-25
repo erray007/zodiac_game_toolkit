@@ -1,5 +1,5 @@
-# Heap study (Task 5c, Part A), report-only and never part of the gate (tools/bench_heap_study.py): per allocator (the C runtime's NT heap,
-# the Segment Heap through bench_types' manifest, mimalloc; ZODIAC_BENCH_ALLOCATOR) on 4 runners each, a plain and a hooks release bench,
+# Heap study (Task 5c, Part A), report-only and never part of the gate (tools/bench_heap_study.py): per allocator (segment: the default
+# tree, as shipped, the Segment Heap through the application manifest; nt: ZODIAC_BENCH_ALLOCATOR=nt, without it; mimalloc) on 4 runners each, a plain and a hooks release bench,
 # then per process index a 3-minute soak of allocation-heavy operations (the hooks bench, ScriptArray block cache off), a 60-second script
 # game loop and one gate bench run, each a fresh process logging the heap's state. The tables are in each job's log, the runs in the
 # artifact heap-study-<allocator>-<n>. Trigger:
@@ -74,7 +74,8 @@ jobs:
       - name: Build the plain and the hooks bench
         run: |
           choice=$ALLOCATOR
-          if [ "$choice" = nt ]; then choice=""; fi
+          # The default tree is what ships (the Segment Heap through the application manifest); nt and mimalloc are experiment trees.
+          if [ "$choice" = segment ]; then choice=""; fi
           .tools/cmake/bin/cmake --preset windows-release -B build/plain "-DZODIAC_BENCH_ALLOCATOR=$choice"
           .tools/cmake/bin/cmake --build build/plain --target bench_types
           .tools/cmake/bin/cmake --preset windows-release -B build/hooks "-DZODIAC_BENCH_ALLOCATOR=$choice" -DZODIAC_TEST_HOOKS=ON

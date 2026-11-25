@@ -2,8 +2,9 @@
 #
 # Windows only. Creates the target zodiac_kit_stage, which lays the build tree out as a runnable kit around bin/zodiac.exe (see core/kit_layout.hpp),
 # and makes every zodiac build depend on it:
-# - lib/release/: libzodiac_release_stub.a, libzodiac_core_release.a, libangelscript.a, and crt/ with every toolchain file the captured link line
-#   names (ZODIAC_RELEASE_CRT_FILES, from zodiac_capture_release_link, which also writes link.txt and toolchain.txt there; call it first).
+# - lib/release/: libzodiac_release_stub.a, libzodiac_core_release.a, libangelscript.a, zodiac_manifest.obj (the application manifest
+#   resource every game links: the Segment Heap), and crt/ with every toolchain file the captured link line names (ZODIAC_RELEASE_CRT_FILES,
+#   from zodiac_capture_release_link, which also writes link.txt and toolchain.txt there; call it first).
 # - bin/: ld.lld.exe from the toolchain, with the toolchain DLLs it loads (found through llvm-objdump's import tables, transitively), because the
 #   toolchain's ld.lld.exe is not self-contained (it loads libLLVM-<n>.dll and libc++.dll from its own folder).
 # - modules/static/: zodiac_mod_<name>.a for every module zodiac_add_module built with a static variant (renamed from libzodiac_mod_<name>_static.a),
@@ -31,6 +32,11 @@ add_custom_command(OUTPUT "${staged}" COMMAND "${CMAKE_COMMAND}" -E copy "$<TARG
 list(APPEND outputs "${staged}")
 list(APPEND install_lib "${staged}")
 endforeach()
+# The application manifest object (the Segment Heap; src/platform/windows/application.rc), which zodiac build links into every game.
+set(staged "${release_lib}/zodiac_manifest.obj")
+add_custom_command(OUTPUT "${staged}" COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_OBJECTS:zodiac_application_manifest>" "${staged}" DEPENDS zodiac_application_manifest "${CMAKE_SOURCE_DIR}/src/platform/windows/application.manifest" VERBATIM COMMAND_EXPAND_LISTS)
+list(APPEND outputs "${staged}")
+list(APPEND install_lib "${staged}")
 foreach(file IN LISTS ZODIAC_RELEASE_CRT_FILES)
 cmake_path(GET file FILENAME name)
 set(staged "${release_lib}/crt/${name}")

@@ -1,0 +1,4 @@
+// The application manifest resource of every Windows executable Zodiac ships or builds (application.manifest): resource 1 of type 24
+// (CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST). Compiled into zodiac.exe and zodiacw.exe, and into lib/release/zodiac_manifest.obj,
+// which zodiac build links into every game.
+1 24 "application.manifest"

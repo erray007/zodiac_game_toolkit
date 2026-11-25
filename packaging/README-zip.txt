@@ -13,6 +13,10 @@ docs           The manual.
 examples       A small example project, examples\hello.
 LICENSE, THIRD_PARTY_LICENSES   The license of Zodiac and of the software it contains.
 
+Memory and Windows versions
+---------------------------
+Zodiac and every game it builds ask Windows for its Segment Heap, a memory allocator that stays fast in large games. Windows 10 version 2004 and later use it. Older Windows ignores the request and uses its classic heap, so games run there exactly as before.
+
 Adding Zodiac to your PATH
 --------------------------
 To run zodiac from any folder, add the bin folder to your PATH.
