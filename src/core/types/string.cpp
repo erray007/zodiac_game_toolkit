@@ -556,8 +556,8 @@ std::uint32_t* index;
 // that, blocks of up to block_cache_top bytes come in power-of-two classes (512, 1024, ... block_cache_top) recycled the same
 // way, block_large_depth per class (Task 5c fix round 2: text that grows by appends, a line or a message of a few hundred bytes
 // to a few kilobytes, moved through blocks above 256 bytes, which on the Segment Heap cost string_concat_append 2 %; the top was
-// chosen by measurement, see the report), so a live string of 257 to block_cache_top bytes holds up to about twice its size (257 bytes
-take a 512-byte block). A block may be freed on any thread; it then goes to that thread's cache. A thread's
+// chosen by measurement, see the report), so a live string of 257 to block_cache_top bytes holds up to about twice its size (257
+// bytes take a 512-byte block). A block may be freed on any thread; it then goes to that thread's cache. A thread's
 // cache is freed when the thread ends (at most block_cache_bytes); blocks freed after that go straight to the allocator. Under
 // AddressSanitizer the cache is bypassed (blocks go straight to the allocator, size classes kept), so use after free and
 // leaks of string blocks stay visible to it.
