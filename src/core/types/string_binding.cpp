@@ -170,7 +170,7 @@ void construct(void* memory) noexcept
 {
 ::new(memory) String();
 }
-// A copy of heap text allocates and may throw. This, copy_construct and destruct start on a 64-byte boundary (see
+// A copy of heap text allocates and may throw. This, copy_construct and destruct (StringBindingAccess) start on a 64-byte boundary (see
 // String::copy_heap in string.hpp).
 [[gnu::noinline,gnu::aligned(64)]] void copy_construct_heap(const String& other,void* memory) noexcept
 {
@@ -201,10 +201,6 @@ catch(...){
 ::new(memory) String();
 raise_current_exception();
 }
-}
-[[gnu::aligned(64)]] void destruct(String* self) noexcept
-{
-self->~String();
 }
 
 // Operators.
@@ -400,6 +396,12 @@ if(length==self.byte_length()&&static_cast<unsigned>(start)<=static_cast<unsigne
 return find_any(self,needle,start);
 }
 static constexpr String* (*add)(String*,const String&,const String&)=&String::script_add;
+// The script destructor: inline text needs nothing, heap text leaves by a tail call to release_out_of_line, so the leaf has no stack
+// frame (with release() inlined it saved two registers on every call). Starts on a 64-byte boundary, as copy_construct does.
+[[gnu::aligned(64)]] static void destruct(String* self) noexcept
+{
+if(self->is_heap())self->release_out_of_line();
+}
 };
 
 namespace {
@@ -658,7 +660,7 @@ check(engine->RegisterObjectMethod("array<T>",join_declaration,asFUNCTION(guarde
 Registrar r(engine);
 r.behaviour(asBEHAVE_CONSTRUCT,"void f()",asFUNCTION(construct),asCALL_CDECL_OBJLAST);
 r.behaviour(asBEHAVE_CONSTRUCT,"void f(const string &in)",asFUNCTION(copy_construct),asCALL_CDECL_OBJLAST);
-r.behaviour(asBEHAVE_DESTRUCT,"void f()",asFUNCTION(destruct),asCALL_CDECL_OBJLAST);
+r.behaviour(asBEHAVE_DESTRUCT,"void f()",asFUNCTION(StringBindingAccess::destruct),asCALL_CDECL_OBJLAST);
 r.method("string &opAssign(const string &in)",asFUNCTION(guarded<&assign>::call));
 r.method("string &opAddAssign(const string &in)",asFUNCTION(guarded<&add_assign>::call));
 // OBJFIRST like the other methods: a frameless leaf for an inline result, a tail call to the general path otherwise (String::script_add).

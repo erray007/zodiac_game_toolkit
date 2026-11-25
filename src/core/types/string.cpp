@@ -1149,6 +1149,11 @@ if(header->index!=nullptr)heap::delete_block(header->index);
 free_block(rep_.storage.heap.ptr,rep_.storage.heap.capacity);
 }
 
+void String::release_out_of_line() noexcept
+{
+release();
+}
+
 void String::free_index() noexcept
 {
 HeapHeader* header=header_of(rep_.storage.heap.ptr);
