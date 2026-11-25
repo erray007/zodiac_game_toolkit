@@ -38,6 +38,7 @@
   - `"<path>" leaves its mount`; `"<path>" is a host path; set [files] host_paths = true to use it`; `"<path>" is not a valid file name`; `"<path>" matches both "<a>" and "<b>"; rename one of them`; `"<path>" matches more than one name; rename one of them` (an ambiguity whose source cannot name the matches).
   - `cannot read "<path>": <reason>` (reading, `r`, `r+` on a missing file, the from side of copy and move); `cannot write "<path>": <reason>` (`w` and `a`, `r+` otherwise, `file.write`, `file.sync`, the commit in `file.close`, `write_file`, `append_file`, the to side of copy and move); `cannot delete "<path>": <reason>` (`delete_file`, `delete_directory`, the source delete of a move made by copy and delete); `cannot create "<path>": <reason>` (`create_directory`). Reasons `file not found`, `access denied`, `damaged data`, `is a directory`, `directory not empty`, `disk full`.
   - `"<path>" is in a read-only pack; save files in data:/ instead`.
+  - `"<path>" is in use by another program` (a writable pack open while another process holds the pack open for writing).
   - `wrong key or damaged pack`; `integer overflow`; `file is not open`; `file is not open for writing`; `"<mode>" is not a file mode`; `random_choice on an empty array`; `clamp: low is greater than high`; `invalid date`.
 
 ## Review Focus

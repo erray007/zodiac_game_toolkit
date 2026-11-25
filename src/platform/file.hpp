@@ -69,6 +69,12 @@ std::expected<void,std::error_code> truncate(std::uint64_t size) noexcept;
 // The file's identity: the volume and the file's number on it (st_dev and st_ino; the volume serial number and the 128-bit file
 // id of FileIdInfo, or the 64-bit file index where the file system has no 128-bit id).
 std::expected<FileIdentity,std::error_code> identity() const noexcept;
+// Takes an advisory exclusive lock that lasts until this File closes, without waiting: true when taken, false when another open
+// of the file (another File, in this process or another) holds it, the system's error otherwise. POSIX: flock(LOCK_EX|LOCK_NB),
+// which belongs to the open file description, so two Files conflict even in one process. Windows: LockFileEx(exclusive, fail
+// immediately) on the one byte at offset 2^64 - 2, far past any data, so the lock never blocks a read or a write of the file's
+// bytes through any handle (Windows byte-range locks are mandatory for the bytes they cover).
+std::expected<bool,std::error_code> lock_exclusive() noexcept;
 // Flushes the file's data and metadata to the device.
 bool sync() noexcept;
 // Flushes the file's written data (and what reading it back needs) to the device: fdatasync (fsync on macOS, whose fdatasync

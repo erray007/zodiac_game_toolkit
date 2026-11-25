@@ -178,6 +178,14 @@ crypto_blake2b_final(&context,key.data());
 return key;
 }
 
+Key derive_index_key(const Key& file_key) noexcept
+{
+static constexpr char label[]="zodiac pack index v1";
+Key key;
+crypto_blake2b_keyed(key.data(),key.size(),file_key.data(),file_key.size(),reinterpret_cast<const std::uint8_t*>(label),sizeof label-1);
+return key;
+}
+
 std::array<std::uint8_t,32> hash(std::span<const std::byte> data) noexcept
 {
 std::array<std::uint8_t,32> digest;

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef __linux__
@@ -146,6 +147,17 @@ std::expected<FileIdentity,std::error_code> File::identity() const noexcept
 struct stat info;
 if(::fstat(static_cast<int>(handle_),&info)!=0)return std::unexpected(errno_code(errno));
 return identity_of(info);
+}
+
+std::expected<bool,std::error_code> File::lock_exclusive() noexcept
+{
+int result;
+do{
+result=::flock(static_cast<int>(handle_),LOCK_EX|LOCK_NB);
+}while(result!=0&&errno==EINTR);
+if(result==0)return true;
+if(errno==EWOULDBLOCK)return false;
+return std::unexpected(errno_code(errno));
 }
 
 bool File::sync() noexcept

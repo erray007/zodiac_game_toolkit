@@ -600,6 +600,10 @@ const crypto::Key file_key=crypto::derive_file_key(master,salt);
 CHECK(Bytes(file_key.begin(),file_key.end())==from_hex("51a988cf5de401a222689a04fde7dd95d86de6d9e3efd8a227a072615a9a0159"));
 salt[0]^=1;
 CHECK(crypto::derive_file_key(master,salt)!=file_key);
+// hashlib.blake2b(b"zodiac pack index v1", key=bytes(range(32)), digest_size=32).
+const crypto::Key index_key=crypto::derive_index_key(master);
+CHECK(Bytes(index_key.begin(),index_key.end())==from_hex("823f6d585dbfdd2f4b6386a809766caa2beec7b2b34184f5937226dcbbaba86a"));
+CHECK(index_key!=master);
 }
 
 TEST_CASE("random_bytes fills from the entropy source")

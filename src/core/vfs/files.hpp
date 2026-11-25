@@ -75,7 +75,8 @@
 //   be a plain file`. create makes the pack when nothing is there (in the newest writable mount covering path); without it a
 //   missing file fails with `cannot read "<path>": file not found`. A wrong key or a damaged pack fails with `wrong key or
 //   damaged pack`, a pack of a newer format with `unsupported pack (newer format)`, a system failure with `cannot read|write
-//   "<path>": <reason>`. An open pack is closed first. A pack found through a read-only mount, or a file the system will not
+//   "<path>": <reason>`, a pack another program has open for writing with `"<path>" is in use by another program`. An open
+//   pack is closed first. A pack found through a read-only mount, or a file the system will not
 //   let it write, is read only: its changes fail with `cannot write "<path>": access denied`.
 // - void close() (also on release): flushes (a failure sets error), removes the mounts this object made (Task 8) and drops this
 //   object's hold on the storage; other pack objects, mounts and readers of the file keep it open until the last one goes.
@@ -85,7 +86,7 @@
 // - bool add_file(vfs_path, name) (the file's bytes, read in batches, and its modification time), bool add(name, data) (any
 //   bytes, now as its time), bool remove(name): false and error set on failure: `"<name>" is not a valid entry name`,
 //   `cannot read "<vfs_path>": <reason>`, `cannot write "<path>": <reason>`, `cannot delete "<name>" from the pack: file not
-//   found`.
+//   found` (remove of a name with no file entry, a deletion marker included: exists is false for it too).
 // - string read(name): throws `cannot read "<name>" from the pack: <reason>` (file not found, damaged data, ...) or
 //   `"<name>" is not a valid entry name`. bool extract(name, vfs_path): Vfs::write_from, so vfs_path is its old file or the
 //   whole entry; false with that read text, or `cannot write "<vfs_path>": <reason>`.

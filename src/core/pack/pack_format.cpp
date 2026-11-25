@@ -61,7 +61,7 @@ constexpr std::size_t kZerosAt=44;
 // Footer offsets.
 constexpr std::size_t kNonceAt=16;
 constexpr std::size_t kCrcAt=28;
-constexpr std::size_t kFooterMagicAt=32;
+constexpr std::size_t kFooterMagicAt=kFooterMagicOffset;
 }
 
 HeaderBytes encode_header(const Header& header) noexcept
@@ -255,13 +255,11 @@ return out;
 FooterState inspect_footer(std::span<const std::byte,kFooterSize> bytes,std::uint64_t footer_offset,Footer& footer) noexcept
 {
 const std::byte* in=bytes.data();
-const bool magic=std::memcmp(in+kFooterMagicAt,kFooterMagic.data(),kFooterMagic.size())==0;
-const bool crc=crc_of(in,kCrcAt)==get32(in+kCrcAt);
-if(!magic&&!crc)return FooterState::none;
+if(std::memcmp(in+kFooterMagicAt,kFooterMagic.data(),kFooterMagic.size())!=0)return FooterState::none;
 const std::uint64_t offset=get64(in);
 const std::uint64_t length=get64(in+8);
 const bool placed=offset>=kHeaderSize&&length>=kMinIndexLength&&offset<=footer_offset&&length==footer_offset-offset;
-if(!magic||!crc||!placed)return FooterState::marked;
+if(crc_of(in,kCrcAt)!=get32(in+kCrcAt)||!placed)return FooterState::marked;
 footer.index_offset=offset;
 footer.index_length=length;
 std::memcpy(footer.nonce.data(),in+kNonceAt,footer.nonce.size());

@@ -17,6 +17,7 @@
 #include <core/vfs/vfs.hpp>
 #include <platform/file.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -160,7 +163,7 @@ pack::Index index_of(const std::string& file,const crypto::Key& key)
 REQUIRE(file.size()>=pack::kHeaderSize+pack::kMinIndexLength+pack::kFooterSize);
 const auto header=pack::decode_header(header_span(file));
 REQUIRE(header);
-crypto::Key file_key=crypto::derive_file_key(key,header->salt);
+const crypto::Key file_key=crypto::derive_index_key(crypto::derive_file_key(key,header->salt));
 pack::Footer footer;
 REQUIRE(pack::inspect_footer(footer_span(file,file.size()-pack::kFooterSize),file.size()-pack::kFooterSize,footer)==pack::FooterState::complete);
 std::string plain=file.substr(static_cast<std::size_t>(footer.index_offset),static_cast<std::size_t>(footer.index_length-pack::kTagSize));
@@ -306,7 +309,9 @@ CHECK(open_error(dir.path/"missing.zpk",test_key(1))=="file not found");
 // Every byte of a flushed two-entry pack flipped in turn: the open fails with the wrong key text (a version byte reads as a
 // newer format), or every entry reads exactly its bytes or fails with damaged data; a byte of the header, of the live entries,
 // index or footer always gives one of the failures, so the pack never opens at an older generation. Only the superseded empty
-// index and footer of the creation are dead bytes.
+// index and footer of the creation are dead bytes. The one exception is the newest footer's magic: a broken magic is exactly what
+// a flush leaves when the crash comes before its magic reached the device (the Durability rule), so the pack opens at its
+// previous flush (here the creation's empty state), as spec 8.3 asks of an unfinished flush.
 TEST_CASE("flipping any byte of a flushed pack is refused and never returns other bytes")
 {
 TempDir dir;
@@ -338,6 +343,11 @@ CAPTURE(at);
 // A window of the whole file: the same open, read only (so no system scans a file opened for writing each time).
 auto storage=pack::PackStorage::open(path,key,false,{},pack::PackLocation{0,good.size()});
 const bool dead=at>=dead_begin&&at<dead_end;
+if(at>=good.size()-pack::kFooterMagic.size()){
+REQUIRE(storage);
+CHECK(names_of(**storage).empty());
+return false;
+}
 if(!storage){
 const bool version=at>=8&&at<12;
 CHECK(storage.error().failure.message==(version?pack::kNewerFormatText:pack::kWrongKeyText));
@@ -362,7 +372,70 @@ refused+=refuses(at);
 put_byte(at,good[at]);
 }
 CHECK(file_bytes(path)==good);
-CHECK(refused==good.size()-(dead_end-dead_begin));
+CHECK(refused==good.size()-(dead_end-dead_begin)-pack::kFooterMagic.size());
+}
+
+// The Durability rule from the reader's side, on copies of a pack after a's flush and b's: a flush whose magic never reached the
+// device (missing or cut magic, whatever its other bytes and whether b's chunks did) opens at the previous flush; a whole magic
+// over a footer whose other bytes are wrong cannot be a crash (the magic is written last) and is refused, also when junk after it
+// hides it from the end of the file.
+TEST_CASE("an unfinished flush opens at the previous flush, and a changed footer is refused even behind junk")
+{
+TempDir dir;
+const crypto::Key key=test_key(4);
+const std::string a=data_of(3000,61);
+const std::string b=data_of(10000,62);
+const fs::path path=dir.path/"torn.zpk";
+std::size_t after_a=0;
+{
+const auto storage=make(path,key,pack::PackOptions{64,1,12});
+add(*storage,"a",a);
+REQUIRE(storage->flush());
+after_a=static_cast<std::size_t>(fs::file_size(path));
+add(*storage,"b",b);
+REQUIRE(storage->flush());
+}
+const std::string good=file_bytes(path);
+const std::size_t footer=good.size()-pack::kFooterSize;
+const std::size_t magic=footer+pack::kFooterMagicOffset;
+int copy=0;
+const auto variant=[&](std::string bytes){
+const fs::path file=dir.path/("torn"+std::to_string(++copy)+".zpk");
+put_bytes(file,bytes);
+return file;
+};
+const auto opens_at_a=[&](const fs::path& file){
+const auto storage=reopen(file,key);
+CHECK(names_of(*storage)==std::vector<std::string>{"a"});
+CHECK(read_ok(*storage,"a")==a);
+};
+// The magic missing (zeros where it was not yet written), or cut after 4 of its bytes.
+std::string missing=good;
+std::fill(missing.begin()+static_cast<std::ptrdiff_t>(magic),missing.end(),'\0');
+opens_at_a(variant(missing));
+std::string cut=good;
+std::fill(cut.begin()+static_cast<std::ptrdiff_t>(magic+4),cut.end(),'\0');
+opens_at_a(variant(cut));
+// The first device flush did not finish either: b's chunks and the index never arrived (zeros), the magic neither.
+std::string lost=good;
+std::fill(lost.begin()+static_cast<std::ptrdiff_t>(after_a),lost.begin()+static_cast<std::ptrdiff_t>(magic),'\0');
+std::fill(lost.begin()+static_cast<std::ptrdiff_t>(magic),lost.end(),'\0');
+opens_at_a(variant(lost));
+// A whole magic over garbage (a torn footer cannot look like this): refused, not recovered from.
+std::string garbage=good;
+for(std::size_t i=footer;i<magic;++i)garbage[i]=static_cast<char>(garbage[i]^0x5A);
+CHECK(open_error(variant(garbage),key)==pack::kWrongKeyText);
+// A flipped byte of the newest footer with 40 junk bytes after it: the scan meets that footer's magic first and refuses it.
+for(const std::size_t at:{footer,footer+9,footer+20,footer+29}){
+CAPTURE(at);
+std::string changed=good;
+changed[at]=static_cast<char>(changed[at]^0xFF);
+CHECK(open_error(variant(changed+data_of(40,at)),key)==pack::kWrongKeyText);
+}
+// Junk after an unchanged pack (a crash in the next append): the newest flush, untouched.
+const auto storage=reopen(variant(good+data_of(40,9)),key);
+CHECK(names_of(*storage)==std::vector<std::string>{"a","b"});
+CHECK(read_ok(*storage,"b")==b);
 }
 
 TEST_CASE("the same plaintext in two packs with the same password gives different ciphertext")
@@ -550,6 +623,15 @@ CHECK(storage->stat("a")->kind==EntryKind::file);
 CHECK(names_of(*storage)==std::vector<std::string>{"a"});
 CHECK(storage->count()==1);
 CHECK(storage->add_deletion_marker("../x").error()==FileError::bad_path);
+// A marker is no file: remove refuses it, and it stays.
+CHECK_FALSE(*storage->remove("b"));
+CHECK(storage->stat("b")->kind==EntryKind::deleted);
+// An add over it replaces it with the file.
+add(*storage,"b","back");
+CHECK(read_ok(*storage,"b")=="back");
+CHECK(storage->count()==2);
+REQUIRE(*storage->remove("b"));
+CHECK_FALSE(storage->stat("b"));
 }
 
 TEST_CASE("metadata survives a flush and a reopen exactly")
@@ -585,6 +667,122 @@ CHECK(second->stat("a").error()==FileError::not_found);
 const auto third=reopen(path,std::string("pw"));
 CHECK(third.get()!=first.get());
 CHECK(read_ok(*third,"a")=="alpha");
+}
+
+TEST_CASE("the registry keys on the window too, and loads one storage for opens racing on one file")
+{
+TempDir dir;
+const fs::path path=dir.path/"keyed.zpk";
+const auto writable=make(path,std::string("pw"));
+add(*writable,"a","alpha");
+REQUIRE(writable->flush());
+const std::uint64_t size=fs::file_size(path);
+// The whole file as a window at offset 0 is a read-only storage of its own, never the writable one.
+const auto windowed=reopen(path,std::string("pw"),pack::PackLocation{0,size});
+CHECK(windowed.get()!=writable.get());
+CHECK(windowed->read_only());
+CHECK_FALSE(writable->read_only());
+CHECK(read_ok(*windowed,"a")=="alpha");
+CHECK(reopen(path,std::string("pw"),pack::PackLocation{0,size}).get()==windowed.get());
+// Four threads opening a pack no one has open: one load, one storage for all.
+const fs::path racing=dir.path/"racing.zpk";
+{
+const auto storage=make(racing,std::string("pw"));
+add(*storage,"r","race");
+REQUIRE(storage->flush());
+}
+std::vector<std::shared_ptr<pack::PackStorage>> opened(4);
+std::vector<std::thread> threads;
+for(std::size_t i=0;i<opened.size();++i)threads.emplace_back([&,i]{
+auto storage=pack::PackStorage::open(racing,std::string("pw"),false);
+if(storage)opened[i]=std::move(*storage);
+});
+for(std::thread& thread:threads)thread.join();
+for(const auto& storage:opened){
+REQUIRE(storage);
+CHECK(storage.get()==opened[0].get());
+}
+CHECK(read_ok(*opened[0],"r")=="race");
+}
+
+TEST_CASE("a pack open for writing is locked against other programs, and read-only opens are not")
+{
+TempDir dir;
+const fs::path path=dir.path/"locked.zpk";
+const crypto::Key key=test_key(16);
+{
+const auto storage=make(path,key);
+add(*storage,"a","alpha");
+REQUIRE(storage->flush());
+}
+const std::uint64_t size=fs::file_size(path);
+{
+// Another program's lock (an independent open of the file: the lock belongs to the open, as flock and LockFileEx do).
+auto other=zodiac::platform::File::open(path,zodiac::platform::FileAccess::read_write);
+REQUIRE(other);
+REQUIRE(*other->lock_exclusive());
+const auto refused=pack::PackStorage::open(path,key,false);
+REQUIRE_FALSE(refused);
+CHECK(refused.error().in_use);
+const std::string& text=refused.error().failure.message;
+CHECK(text.front()=='"');
+CHECK(text.ends_with(std::string("\"")+pack::kInUseText));
+// Reading is never refused for the lock.
+CHECK(read_ok(*reopen(path,key,pack::PackLocation{0,size}),"a")=="alpha");
+}
+// Released, the pack opens for writing and holds the lock itself, also over the file compact makes.
+const auto storage=reopen(path,key);
+const auto try_lock=[&]{
+auto probe=zodiac::platform::File::open(path,zodiac::platform::FileAccess::read);
+REQUIRE(probe);
+return *probe->lock_exclusive();
+};
+CHECK_FALSE(try_lock());
+add(*storage,"b","beta");
+REQUIRE(storage->compact());
+CHECK_FALSE(try_lock());
+CHECK(read_ok(*storage,"b")=="beta");
+REQUIRE(storage->close());
+CHECK(try_lock());
+}
+
+// The writer mutex: a lookup never waits for a write's I/O. A thread keeps finding and reading a small entry while another adds a
+// large one and compacts, and makes progress all along.
+TEST_CASE("lookups go on while a large entry is added and the pack is compacted")
+{
+TempDir dir;
+const fs::path path=dir.path/"busy.zpk";
+const auto storage=make(path,test_key(17));
+add(*storage,"probe","small");
+REQUIRE(storage->flush());
+const std::string big=data_of(24u<<20,71);
+std::atomic<bool> writing{false};
+std::atomic<bool> stop{false};
+std::atomic<bool> failed{false};
+std::atomic<std::uint64_t> during{0};
+std::thread lookups([&]{
+while(!stop.load()){
+const auto info=storage->stat("probe");
+auto reader=storage->open_reader("probe");
+std::string bytes(5,'\0');
+if(!info||!reader||(*reader)->read_at(0,writable(bytes))!=5||bytes!="small")failed=true;
+if(writing.load())++during;
+}
+});
+writing=true;
+const auto added=storage->add("big",span_of(big),0);
+const std::uint64_t during_add=during.load();
+const auto compacted=storage->compact();
+writing=false;
+stop=true;
+lookups.join();
+REQUIRE(added);
+REQUIRE(compacted);
+CHECK_FALSE(failed.load());
+// Hundreds of lookups fit in a write of 24 MiB; a lookup blocked for the whole write would make at most one or two.
+CHECK(during_add>20);
+CHECK(during.load()-during_add>20);
+CHECK(read_ok(*storage,"big")==big);
 }
 
 TEST_CASE("a reader opened before compact and a replacement reads its own bytes")
@@ -785,9 +983,19 @@ const auto storage=make(path,key,pack::PackOptions{64,1,12});
 for(int step=0;step<400;++step){
 const std::string name="e"+std::to_string(random()%24);
 const std::uint64_t action=random()%10;
-if(action<6){
+if(action<4||(action<6&&expected.empty())){
 const std::string bytes=data_of(static_cast<std::size_t>(random()%9000),random());
 add(*storage,name,bytes);
+expected[name]=bytes;
+}
+else if(action<6){
+// add_reader, from a reader of another entry of the same pack.
+auto from=expected.begin();
+std::advance(from,static_cast<std::ptrdiff_t>(random()%expected.size()));
+const std::string bytes=from->second;
+auto reader=storage->open_reader(from->first);
+REQUIRE(reader);
+REQUIRE(storage->add_reader(name,**reader,0));
 expected[name]=bytes;
 }
 else if(action<8){
@@ -797,6 +1005,19 @@ expected.erase(name);
 else if(action==8)REQUIRE(storage->flush());
 else REQUIRE(storage->compact());
 }
+REQUIRE(storage->flush());
+for(const auto& [name,bytes]:expected)CHECK(read_ok(*storage,name)==bytes);
+// Appends that fail part way (the second write of chunks fails): the index stays, the ids they took stay used, and the adds
+// after them (over the half-written bytes) seal under new ones.
+for(int round=0;round<3;++round){
+pack::testing::pack_fail_chunk_write(1);
+const std::string name="e"+std::to_string(round);
+CHECK(storage->add(name,span_of(data_of(3u<<20,static_cast<std::uint64_t>(round))),0).error()==FileError::io);
+const std::string bytes=data_of(7000+static_cast<std::size_t>(round),static_cast<std::uint64_t>(round)+100);
+add(*storage,name,bytes);
+expected[name]=bytes;
+}
+pack::testing::pack_fail_chunk_write(std::numeric_limits<std::uint64_t>::max());
 REQUIRE(storage->flush());
 for(const auto& [name,bytes]:expected)CHECK(read_ok(*storage,name)==bytes);
 // A copy cut in the middle of its last chunks: recovered, it writes under the same file key.
@@ -897,5 +1118,19 @@ add(*storage,"b","beta");
 REQUIRE(storage->add_deletion_marker("b"));
 REQUIRE(storage->flush());
 }
-CHECK(text_of(fixture,"pack p; if(!p.open(\"marked.zpk\", \"k\"))return p.error; return p.exists(\"a\")+\",\"+p.exists(\"b\")+\",\"+p.list().join(\",\")+\",\"+p.count+\",\"+p.size(\"b\");")=="true,false,a,1,-1");
+CHECK(text_of(fixture,"pack p; if(!p.open(\"marked.zpk\", \"k\"))return p.error; string s=p.exists(\"a\")+\",\"+p.exists(\"b\")+\",\"+p.list().join(\",\")+\",\"+p.count+\",\"+p.size(\"b\"); s+=\",\"+p.remove(\"b\")+\",\"+p.error; return s;")=="true,false,a,1,-1,false,cannot delete \"b\" from the pack: file not found");
+}
+
+TEST_CASE("the script pack names its own path when another program holds the pack")
+{
+ScriptFixture fixture;
+fs::create_directories(fixture.root()/"saves");
+{
+const auto storage=make(fixture.root()/"saves"/"held.zpk",std::string("k"));
+REQUIRE(storage->flush());
+}
+auto other=zodiac::platform::File::open(fixture.root()/"saves"/"held.zpk",zodiac::platform::FileAccess::read_write);
+REQUIRE(other);
+REQUIRE(*other->lock_exclusive());
+CHECK(text_of(fixture,"pack p; return p.open(\"saves\\\\held.zpk\", \"k\")+\",\"+p.error;")=="false,\"saves\\held.zpk\" is in use by another program");
 }

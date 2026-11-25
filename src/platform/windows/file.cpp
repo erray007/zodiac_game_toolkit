@@ -259,6 +259,17 @@ std::expected<FileIdentity,std::error_code> File::identity() const noexcept
 return identity_of(handle_of(handle_));
 }
 
+std::expected<bool,std::error_code> File::lock_exclusive() noexcept
+{
+// The byte at 2^64 - 2: offsets past the end of a file may be locked, and no file ever has data there.
+OVERLAPPED at{};
+at.Offset=0xFFFFFFFEu;
+at.OffsetHigh=0xFFFFFFFFu;
+if(LockFileEx(handle_of(handle_),LOCKFILE_EXCLUSIVE_LOCK|LOCKFILE_FAIL_IMMEDIATELY,0,1,0,&at))return true;
+if(GetLastError()==ERROR_LOCK_VIOLATION)return false;
+return std::unexpected(last_error());
+}
+
 bool File::sync() noexcept
 {
 return FlushFileBuffers(handle_of(handle_))!=0;

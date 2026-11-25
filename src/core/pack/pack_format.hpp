@@ -17,8 +17,13 @@
 //   i64 modified_utc_ms. write_index_head and write_entry encode it in place; decode_index parses it, checking only the
 //   structure (every length inside the bytes, no undefined flag, nothing left over); validate_index checks the meaning.
 // - Footer, kFooterSize (40) bytes: u64 index_offset, u64 index_length (ciphertext and tag), the 12-byte index nonce, u32
-//   CRC-32 (payload.hpp's crc32) of the preceding 28 bytes, then the magic "ZDPKEND1". inspect_footer classifies 40 bytes
-//   that end at a given offset (FooterState below).
+//   CRC-32 (payload.hpp's crc32) of the preceding 28 bytes, then the magic "ZDPKEND1" at kFooterMagicOffset. A writer makes
+//   the index and the first 32 footer bytes durable before it writes the magic (pack_storage.hpp), so a whole magic means a
+//   whole footer was on the device: inspect_footer classifies 40 bytes that end at a given offset (FooterState below).
+// - The index is sealed under crypto::derive_index_key(file key), the chunks under the file key itself, so an index nonce
+//   (random) and a chunk nonce (chunk index and entry id) are never used under one key.
+// - Versioning: any change of this layout raises kFormatVersion (an older reader then says the pack is newer). The flags are
+//   for features a version-1 reader can tell it lacks, never for a different layout.
 #pragma once
 #include <core/pack/crypto.hpp>
 #include <array>
@@ -34,6 +39,7 @@
 namespace zodiac::pack {
 inline constexpr std::size_t kHeaderSize=64;
 inline constexpr std::size_t kFooterSize=40;
+inline constexpr std::size_t kFooterMagicOffset=32;
 inline constexpr std::size_t kTagSize=16;
 inline constexpr std::uint32_t kFormatVersion=1;
 inline constexpr std::uint8_t kMinChunkLog2=12;
@@ -112,8 +118,10 @@ FooterBytes encode_footer(const Footer& footer) noexcept;
 // What kFooterSize bytes that end at footer_offset + kFooterSize look like:
 // - complete: the magic, the CRC, and an index of at least kMinIndexLength bytes from kHeaderSize on that ends exactly at
 //   footer_offset (the footer is then filled in);
-// - marked: not complete, but the magic or the CRC is right: a footer that was there and has been changed;
-// - none: neither: no footer ends here (a truncated file or an interrupted append).
+// - marked: the whole magic, but a wrong CRC or an index that does not end here: since the magic is written only once the rest
+//   is durable, a footer that has been changed;
+// - none: no whole magic: no footer ends here (a truncated file, an interrupted append, a flush whose magic never reached the
+//   device).
 enum class FooterState{complete,marked,none};
 FooterState inspect_footer(std::span<const std::byte,kFooterSize> bytes,std::uint64_t footer_offset,Footer& footer) noexcept;
 }

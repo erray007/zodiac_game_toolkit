@@ -22,12 +22,14 @@
 //   kMaxKdfPasses, and the password at most 4 GiB - 1 bytes; otherwise it throws std::invalid_argument. It allocates kib KiB
 //   (std::bad_alloc when that fails) and wipes it before freeing it.
 // - derive_file_key is BLAKE2b-256 keyed with master over "zodiac pack key v1" (18 bytes, no terminator) then the salt.
+// - derive_index_key is BLAKE2b-256 keyed with file_key over "zodiac pack index v1" (20 bytes, no terminator): the key a
+//   pack's indexes are sealed under, apart from its chunks' file key, so the two nonce spaces never meet.
 // - hash is unkeyed BLAKE2b-256.
 // - random_bytes fills the span from platform::fill_entropy; std::runtime_error("the entropy source failed") when it fails.
 // - Secrets are never logged. Every key, Poly1305 key, keystream buffer and work area this code creates in memory it names is
 //   wiped before it goes out of scope. Two things are not:
-//   - The caller's own Key copies: the keys it passes in and the ones derive_password_key and derive_file_key return are the
-//     caller's to wipe (crypto::wipe) when it is done with them.
+//   - The caller's own Key copies: the keys it passes in and the ones derive_password_key, derive_file_key and
+//     derive_index_key return are the caller's to wipe (crypto::wipe) when it is done with them.
 //   - Registers and compiler spills: the vectorized rounds (batch4, batch8) hold key-derived state words in vector registers,
 //     and the compiler may spill some of them to the stack; no portable code can wipe those slots (Monocypher's scalar code has
 //     the same limit).
@@ -68,6 +70,7 @@ void seal(const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::
 [[nodiscard]] bool open(const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::span<const std::byte> cipher,const Tag& tag,std::span<std::byte> plain) noexcept;
 [[nodiscard]] Key derive_password_key(std::string_view password,std::span<const std::uint8_t,16> salt,std::uint32_t kib,std::uint32_t passes);
 [[nodiscard]] Key derive_file_key(const Key& master,std::span<const std::uint8_t,16> salt) noexcept;
+[[nodiscard]] Key derive_index_key(const Key& file_key) noexcept;
 [[nodiscard]] std::array<std::uint8_t,32> hash(std::span<const std::byte> data) noexcept;
 void random_bytes(std::span<std::byte> out);
 // Zeroes size bytes at secret in a way the optimizer cannot remove (Monocypher's crypto_wipe).

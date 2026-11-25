@@ -133,7 +133,10 @@ if(!found)return fail(vfs::failure_text(action,path,found.error()));
 if(!*found)return fail(quoted(path).append(" is inside a pack; a pack file must be a plain file"));
 auto storage=pack::PackStorage::open((*found)->path,pack::KeySource(std::in_place_type<std::string>,key),create);
 if(missing)vfs_->forget(path);
-if(!storage)return fail(vfs::failure_text(storage.error().action,path,storage.error().failure));
+if(!storage){
+if(storage.error().in_use)return fail(quoted(path).append(pack::kInUseText));
+return fail(vfs::failure_text(storage.error().action,path,storage.error().failure));
+}
 storage_=std::move(*storage);
 path_.assign(path);
 writable_=(*found)->writable&&!storage_->read_only();

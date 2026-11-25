@@ -1,11 +1,14 @@
 // PackStorage (contract in pack_storage.hpp): the registry, opening and recovery, the chunked writer and reader, flush and
 // compact. Every write happens with no window (a window is read only), so a writable storage's offsets are file offsets.
 #include <core/pack/pack_storage.hpp>
+#include <core/path_utf8.hpp>
 #include <core/text.hpp>
 #include <core/vfs/folder_source.hpp>
 #include <core/vfs/path.hpp>
 #include <monocypher.h>
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <condition_variable>
 #include <cstring>
 #include <limits>
@@ -15,6 +18,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 
 namespace zodiac::pack {
@@ -112,20 +116,27 @@ if(std::holds_alternative<std::string>(key)&&(options.kdf_kib<crypto::kMinKdfKib
 struct Slot{
 std::weak_ptr<PackStorage> storage;
 const PackStorage* raw=nullptr;
+// An open is loading the storage of this slot (with the registry's lock released): others wait for it.
+bool loading=false;
 };
 using PathText=std::filesystem::path::string_type;
+// A storage's place: the canonical path, and its window (none: offset and size 0).
 struct RegistryKey{
 PathText path;
 std::uint64_t offset=0;
+std::uint64_t size=0;
+bool windowed=false;
 };
 // A key as unregister looks it up, so that the lookup allocates nothing.
 struct KeyView{
 std::basic_string_view<std::filesystem::path::value_type> path;
 std::uint64_t offset=0;
+std::uint64_t size=0;
+bool windowed=false;
 };
 KeyView view_of(const RegistryKey& key) noexcept
 {
-return {key.path,key.offset};
+return {key.path,key.offset,key.size,key.windowed};
 }
 KeyView view_of(const KeyView& key) noexcept
 {
@@ -138,13 +149,13 @@ bool operator()(const A& a,const B& b) const noexcept
 {
 const KeyView x=view_of(a);
 const KeyView y=view_of(b);
-return x.path<y.path||(x.path==y.path&&x.offset<y.offset);
+return std::tie(x.path,x.windowed,x.offset,x.size)<std::tie(y.path,y.windowed,y.offset,y.size);
 }
 };
 struct Registry{
 std::mutex mutex;
-// Signalled when a slot is erased: an open waiting for a storage being freed to finish closing.
-std::condition_variable erased;
+// Signalled when a slot is erased or finishes loading.
+std::condition_variable changed;
 std::map<RegistryKey,Slot,KeyLess> slots;
 };
 Registry& registry()
@@ -156,7 +167,21 @@ return *instance;
 #if defined(ZODIAC_TEST_HOOKS)
 std::mutex seal_mutex;
 std::vector<testing::SealRecord>* seal_log=nullptr;
+std::atomic<std::uint64_t> writes_before_failure{std::numeric_limits<std::uint64_t>::max()};
 #endif
+// Writes one batch of chunks (with ZODIAC_TEST_HOOKS, the write pack_fail_chunk_write chose fails).
+std::expected<void,std::error_code> write_chunks(platform::File& file,std::uint64_t at,std::span<const std::byte> bytes) noexcept
+{
+#if defined(ZODIAC_TEST_HOOKS)
+for(std::uint64_t left=writes_before_failure.load();left!=std::numeric_limits<std::uint64_t>::max();){
+if(writes_before_failure.compare_exchange_weak(left,left==0?std::numeric_limits<std::uint64_t>::max():left-1)){
+if(left==0)return std::unexpected(std::error_code(EIO,std::generic_category()));
+break;
+}
+}
+#endif
+return file.write_at(at,bytes);
+}
 
 // Reads one entry of a pack file from the snapshot open_reader took.
 class PackReader final:public vfs::Reader{
@@ -239,18 +264,19 @@ KeySource& key;
 std::error_code error;
 const std::filesystem::path canonical=std::filesystem::weakly_canonical(host,error);
 if(error)return std::unexpected(system_failure(FileAction::read,error));
-RegistryKey slot_key{canonical.native(),window?window->offset:0};
+RegistryKey slot_key{canonical.native(),window?window->offset:0,window?window->size:0,window.has_value()};
 Registry& shared=registry();
 std::unique_lock lock(shared.mutex);
 for(;;){
 const auto found=shared.slots.find(slot_key);
 if(found==shared.slots.end())break;
+if(!found->second.loading){
 std::shared_ptr<PackStorage> existing=found->second.storage.lock();
-// A storage closing (closed, not yet out of the registry) is waited for like one being freed. Its lock is taken under the
-// registry's: close never holds both (it releases its own before it leaves the registry).
+// A storage closing (closed, not yet out of the registry) is waited for like one being freed. Its shared lock is taken
+// under the registry's, which close never holds both of (it leaves the registry after releasing its own locks).
 if(existing&&existing->is_open()){
 lock.unlock();
-// header_ and file_key_ never change once a storage is loaded, so they are read without its lock.
+// header_ and file_key_ never change once a storage is loaded, so they are read without its locks.
 auto file_key=file_key_of(key,existing->header_);
 if(!file_key)return std::unexpected(file_key.error());
 const bool same=crypto_verify32(file_key->data(),existing->file_key_.data())==0;
@@ -258,38 +284,49 @@ crypto::wipe(file_key->data(),file_key->size());
 if(!same)return std::unexpected(wrong_key());
 return existing;
 }
-// The storage is being freed or closed: wait until its close has written its last index and left the registry. The copy is
-// dropped first, so the last release never happens under the registry's lock (a release locks it).
+// Dropped before waiting, so a last release never happens under the registry's lock (a release locks it): a closed
+// storage's release does not (its close already left the registry), and an expired one has nothing to drop.
 existing.reset();
-shared.erased.wait(lock);
 }
-// The slot is taken before anything is loaded and filled only once the storage is shared: a storage that fails on the way is
-// never registered, so freeing it never locks the registry, which this thread holds.
+// Being loaded by another open, closed or freed: wait for its slot to change.
+shared.changed.wait(lock);
+}
+// The slot marks the load in progress; the load itself (file reads, the key derivation) runs without the registry's lock.
 const auto slot=shared.slots.try_emplace(slot_key).first;
+slot->second.loading=true;
+lock.unlock();
+const auto abandon=[&]{
+const std::lock_guard relock(shared.mutex);
+shared.slots.erase(slot);
+shared.changed.notify_all();
+};
+std::shared_ptr<PackStorage> storage;
 try{
 auto loaded=load(canonical,key,create,options,window);
 if(!loaded){
-shared.slots.erase(slot);
-shared.erased.notify_all();
+abandon();
 return std::unexpected(std::move(loaded.error()));
 }
 (*loaded)->registry_path_=std::move(slot_key.path);
-std::shared_ptr<PackStorage> storage=share(std::move(*loaded));
-slot->second=Slot{storage,storage.get()};
-storage->registered_=true;
-return storage;
+// Not registered yet, so a failure of share's own allocation frees it without touching the registry.
+storage=share(std::move(*loaded));
 }
 catch(...){
-shared.slots.erase(slot);
-shared.erased.notify_all();
+abandon();
 throw;
 }
+{
+const std::lock_guard relock(shared.mutex);
+slot->second=Slot{storage,storage.get(),false};
+storage->registered_=true;
+}
+shared.changed.notify_all();
+return storage;
 }
 
 std::shared_ptr<PackStorage> PackStorage::share(std::unique_ptr<PackStorage> storage)
 {
-// The last holder closes the storage (flushing it) and reports a failure there is no one else to tell. A storage that is not
-// registered yet (shared_ptr's own allocation failing) only frees itself: it has nothing to write.
+// The last holder closes the storage (flushing it) and reports a failure there is no one else to tell.
 return std::shared_ptr<PackStorage>(storage.release(),[](PackStorage* released) noexcept{
 try{
 if(auto closed=released->close();!closed&&released->log_){
@@ -307,6 +344,30 @@ delete released;
 PackStorage::~PackStorage()
 {
 crypto::wipe(file_key_.data(),file_key_.size());
+crypto::wipe(index_key_.data(),index_key_.size());
+}
+
+void PackStorage::take_keys(crypto::Key& file_key) noexcept
+{
+file_key_=file_key;
+index_key_=crypto::derive_index_key(file_key_);
+crypto::wipe(file_key.data(),file_key.size());
+#if defined(ZODIAC_TEST_HOOKS)
+key_tag_=crypto::hash(std::as_bytes(std::span(file_key_)));
+index_tag_=crypto::hash(std::as_bytes(std::span(index_key_)));
+#endif
+}
+
+// Takes file's exclusive lock for a writable storage: in_use when another open of the file holds it. A system that cannot lock
+// leaves the file unlocked (the lock only guards against a second program; nothing else depends on it).
+std::expected<void,PackError> PackStorage::lock_file(platform::File& file) const
+{
+const auto locked=file.lock_exclusive();
+if(!locked||*locked)return {};
+std::string text(1,'"');
+text.append(one_line(path_to_utf8(host_))).push_back('"');
+text.append(kInUseText);
+return std::unexpected(PackError{FileAction::write,Failure{FileError::access_denied,std::move(text)},true});
 }
 
 std::expected<std::unique_ptr<PackStorage>,PackError> PackStorage::load(const std::filesystem::path& host,const KeySource& key,bool create,const PackOptions& options,std::optional<PackLocation> window)
@@ -329,6 +390,7 @@ return storage;
 for(int attempt=0;;++attempt){
 auto file=platform::File::open(host,platform::FileAccess::read_write);
 if(file){
+if(auto locked=storage->lock_file(*file);!locked)return std::unexpected(std::move(locked.error()));
 storage->file_=std::make_shared<platform::File>(std::move(*file));
 break;
 }
@@ -351,14 +413,20 @@ platform::discard_file(host);
 };
 std::expected<void,PackError> created;
 try{
+// Locked before anything is written: the file is new, so only a program racing for it could hold the lock.
+if(auto locked=storage->lock_file(*made);!locked)created=std::unexpected(std::move(locked.error()));
+else{
 storage->file_=std::make_shared<platform::File>(std::move(*made));
 created=storage->create_new(options,key);
+}
 }
 catch(...){
 discard();
 throw;
 }
 if(!created){
+// A file another program holds is not ours to remove.
+if(created.error().in_use)return std::unexpected(std::move(created.error()));
 discard();
 return std::unexpected(std::move(created.error()));
 }
@@ -390,16 +458,12 @@ return std::unexpected(PackError{FileAction::write,Failure{FileError::io,{}}});
 header_bytes_=encode_header(header_);
 auto file_key=file_key_of(key,header_);
 if(!file_key)return std::unexpected(file_key.error());
-file_key_=*file_key;
-crypto::wipe(file_key->data(),file_key->size());
-#if defined(ZODIAC_TEST_HOOKS)
-key_tag_=crypto::hash(std::as_bytes(std::span(file_key_)));
-#endif
+take_keys(*file_key);
 chunk_size_=std::uint64_t{1}<<header_.chunk_log2;
 window_size_=0;
-const auto failed=[](const std::error_code& error){return std::unexpected(system_failure(FileAction::write,error));};
-if(auto written=file_->write_at(0,header_bytes_);!written)return failed(written.error());
+if(auto written=file_->write_at(0,header_bytes_);!written)return std::unexpected(system_failure(FileAction::write,written.error()));
 try{
+// Durable as a flush (the header with it, by the first device flush).
 const auto length=write_index(*file_,kHeaderSize,0,0,{});
 if(!length)return std::unexpected(PackError{FileAction::write,Failure{length.error(),{}}});
 index_offset_=kHeaderSize;
@@ -409,7 +473,6 @@ end_=kHeaderSize+*length+kFooterSize;
 catch(const std::runtime_error&){
 return std::unexpected(PackError{FileAction::write,Failure{FileError::io,{}}});
 }
-if(auto synced=file_->sync_data();!synced)return failed(synced.error());
 return {};
 }
 
@@ -427,11 +490,7 @@ header_=*header;
 chunk_size_=std::uint64_t{1}<<header_.chunk_log2;
 auto file_key=file_key_of(key,header_);
 if(!file_key)return std::unexpected(file_key.error());
-file_key_=*file_key;
-crypto::wipe(file_key->data(),file_key->size());
-#if defined(ZODIAC_TEST_HOOKS)
-key_tag_=crypto::hash(std::as_bytes(std::span(file_key_)));
-#endif
+take_keys(*file_key);
 FooterBytes last;
 if(const std::int64_t got=read_exact(*file_,base_+size-kFooterSize,last.data(),kFooterSize);got!=0){
 if(got<0)return std::unexpected(PackError{FileAction::read,Failure{read_failure(got),{}}});
@@ -442,17 +501,17 @@ switch(inspect_footer(last,size-kFooterSize,footer)){
 case FooterState::complete:
 return try_footer(size-kFooterSize,footer);
 case FooterState::marked:
-// A footer that was changed, never one an interrupted append left: refused, not recovered from.
+// A whole magic is written only once the rest of its footer is durable: this footer was changed. Refused, not recovered from.
 return std::unexpected(wrong_key());
 case FooterState::none:
 break;
 }
-// Recovery: the newest complete footer inside the window, scanning backwards for its magic (one footer ending in the block's
-// first bytes is found by the next block, which overlaps this one by the magic's size less one).
+// Recovery: the newest whole magic inside the window, scanning backwards (one ending in a block's first bytes is found by the
+// next block, which overlaps this one by the magic's size less one). Its footer must be complete and authenticate.
 constexpr std::uint64_t lowest=kHeaderSize+kMinIndexLength;
 const auto block=std::make_unique_for_overwrite<char[]>(kScanBlock);
 std::uint64_t high=size;
-while(high>lowest+kFooterSize-kFooterMagic.size()){
+while(high>lowest+kFooterMagicOffset){
 const std::uint64_t low=std::max<std::uint64_t>(lowest,high>kScanBlock?high-kScanBlock:0);
 const auto length=static_cast<std::size_t>(high-low);
 if(const std::int64_t got=read_exact(*file_,base_+low,reinterpret_cast<std::byte*>(block.get()),length);got!=0){
@@ -460,17 +519,19 @@ if(got<0)return std::unexpected(PackError{FileAction::read,Failure{read_failure(
 return std::unexpected(wrong_key());
 }
 const std::string_view text(block.get(),length);
-for(std::size_t at=text.rfind(kFooterMagic);at!=std::string_view::npos;at=at==0?std::string_view::npos:text.rfind(kFooterMagic,at-1)){
-// The footer's magic is its last 8 bytes.
+const std::size_t at=text.rfind(kFooterMagic);
+if(at!=std::string_view::npos){
 const std::uint64_t magic=low+at;
-if(magic<lowest+kFooterSize-kFooterMagic.size())break;
-const std::uint64_t start=magic+kFooterMagic.size()-kFooterSize;
+// A magic too near the header to end a footer is no footer; nothing lower can be one either.
+if(magic<lowest+kFooterMagicOffset)break;
+const std::uint64_t start=magic-kFooterMagicOffset;
 FooterBytes candidate;
 if(const std::int64_t got=read_exact(*file_,base_+start,candidate.data(),kFooterSize);got!=0){
 if(got<0)return std::unexpected(PackError{FileAction::read,Failure{read_failure(got),{}}});
 return std::unexpected(wrong_key());
 }
-if(inspect_footer(candidate,start,footer)!=FooterState::complete)continue;
+// A whole magic whose footer is not complete was changed: refused, never skipped for an older one.
+if(inspect_footer(candidate,start,footer)!=FooterState::complete)return std::unexpected(wrong_key());
 auto recovered=try_footer(start,footer);
 if(!recovered)return recovered;
 truncate_pending_=!read_only_&&end_<size;
@@ -502,7 +563,7 @@ const std::size_t plain_size=length-kTagSize;
 crypto::Tag tag;
 std::memcpy(tag.data(),record.get()+plain_size,kTagSize);
 const std::span<std::byte> plain(record.get(),plain_size);
-if(!crypto::open(file_key_,footer.nonce,header_bytes_,plain,tag,plain))return std::unexpected(wrong_key());
+if(!crypto::open(index_key_,footer.nonce,header_bytes_,plain,tag,plain))return std::unexpected(wrong_key());
 auto index=decode_index(plain);
 if(!index)return std::unexpected(wrong_key());
 std::vector<std::string> folds;
@@ -531,27 +592,30 @@ end_=footer_offset+kFooterSize;
 return {};
 }
 
-std::expected<void,vfs::FileError> PackStorage::writable_locked() const
+std::expected<void,vfs::FileError> PackStorage::writable_writing() const
 {
+// closed_ changes only under writer_mutex_, which the caller holds.
 if(closed_)return std::unexpected(FileError::io);
 if(read_only_)return std::unexpected(FileError::access_denied);
 return {};
 }
 
-std::expected<void,vfs::FileError> PackStorage::prepare_append_locked()
+std::expected<void,vfs::FileError> PackStorage::prepare_append_writing()
 {
 if(!truncate_pending_)return {};
 if(auto cut=file_->truncate(end_);!cut)return std::unexpected(file_error(cut.error()));
+// The cut reaches the device before anything is appended after it.
+if(auto synced=file_->sync_data();!synced)return std::unexpected(file_error(synced.error()));
 truncate_pending_=false;
 return {};
 }
 
 // The nonce rule (pack_storage.hpp): an id is used for one entry's chunks once in the file's life. It is never 0 (the id of
 // deletion markers) and never one this storage has seen (used_ids_ holds every id of the index it opened and every id it has
-// handed out since, entries replaced, removed or compacted away included), so no (file key, chunk_nonce) pair repeats; ids it
-// cannot know (lost in a crash, in older indexes) are avoided by the 64-bit random draw. crypto::random_bytes throws
-// std::runtime_error when the entropy source fails.
-std::uint64_t PackStorage::new_id_locked()
+// handed out since, entries replaced, removed or compacted away and appends that failed included), so no (file key,
+// chunk_nonce) pair repeats; ids it cannot know (lost in a crash, in older indexes) are avoided by the 64-bit random draw.
+// crypto::random_bytes throws std::runtime_error when the entropy source fails.
+std::uint64_t PackStorage::new_id_writing()
 {
 for(;;){
 std::uint64_t id=0;
@@ -564,7 +628,7 @@ void PackStorage::record_seal([[maybe_unused]] const crypto::Nonce& nonce,[[mayb
 {
 #if defined(ZODIAC_TEST_HOOKS)
 const std::lock_guard lock(seal_mutex);
-if(seal_log)seal_log->push_back(testing::SealRecord{key_tag_,nonce,index});
+if(seal_log)seal_log->push_back(testing::SealRecord{index?index_tag_:key_tag_,nonce,index});
 #endif
 }
 
@@ -573,10 +637,10 @@ std::expected<IndexEntry,vfs::MoveError> PackStorage::append_entry(std::uint64_t
 {
 const auto stored=stored_size(size,header_.chunk_log2);
 if(!stored||*stored>std::numeric_limits<std::uint64_t>::max()-end_)return std::unexpected(vfs::MoveError{FileError::io,true});
-if(auto ready=prepare_append_locked();!ready)return std::unexpected(vfs::MoveError{ready.error(),true});
+if(auto ready=prepare_append_writing();!ready)return std::unexpected(vfs::MoveError{ready.error(),true});
 IndexEntry record;
 try{
-record.id=new_id_locked();
+record.id=new_id_writing();
 }
 catch(const std::runtime_error&){
 return std::unexpected(vfs::MoveError{FileError::io,true});
@@ -613,7 +677,7 @@ crypto::seal(file_key_,nonce,{},*plain,room,tag);
 std::memcpy(buffer.get()+filled+length,tag.data(),kTagSize);
 filled+=length+kTagSize;
 }
-if(auto written=file_->write_at(end_+first*stored_chunk,{buffer.get(),filled});!written)return std::unexpected(vfs::MoveError{file_error(written.error()),true});
+if(auto written=write_chunks(*file_,end_+first*stored_chunk,{buffer.get(),filled});!written)return std::unexpected(vfs::MoveError{file_error(written.error()),true});
 first+=count;
 }
 pending.done=true;
@@ -621,9 +685,10 @@ end_+=*stored;
 return record;
 }
 
-void PackStorage::insert_locked(std::string fold,IndexEntry record)
+void PackStorage::insert_writing(std::string fold,IndexEntry record)
 {
 const std::uint64_t stored=record.deleted?0:*stored_size(record.size,header_.chunk_log2);
+const std::unique_lock lock(mutex_);
 const auto [slot,inserted]=entries_.try_emplace(std::move(fold));
 if(!inserted){
 wasted_+=slot->second.stored;
@@ -636,8 +701,8 @@ dirty_=true;
 
 std::expected<void,vfs::FileError> PackStorage::add(std::string_view name,std::span<const std::byte> bytes,std::int64_t modified_utc_ms)
 {
-const std::unique_lock lock(mutex_);
-if(auto writable=writable_locked();!writable)return std::unexpected(writable.error());
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
 const auto canonical=canonical_entry_name(name);
 if(!canonical||*canonical!=name)return std::unexpected(FileError::bad_path);
 std::string fold=vfs::fold_name(name);
@@ -647,14 +712,14 @@ return bytes.subspan(static_cast<std::size_t>(at),room.size());
 if(!record)return std::unexpected(record.error().code);
 record->name.assign(name);
 record->modified_utc_ms=modified_utc_ms;
-insert_locked(std::move(fold),std::move(*record));
+insert_writing(std::move(fold),std::move(*record));
 return {};
 }
 
 std::expected<void,vfs::MoveError> PackStorage::add_reader(std::string_view name,vfs::Reader& from,std::int64_t modified_utc_ms)
 {
-const std::unique_lock lock(mutex_);
-if(auto writable=writable_locked();!writable)return std::unexpected(vfs::MoveError{writable.error(),true});
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(vfs::MoveError{writable.error(),true});
 const auto canonical=canonical_entry_name(name);
 if(!canonical||*canonical!=name)return std::unexpected(vfs::MoveError{FileError::bad_path,true});
 std::string fold=vfs::fold_name(name);
@@ -673,31 +738,33 @@ return room;
 if(!record)return std::unexpected(record.error());
 record->name.assign(name);
 record->modified_utc_ms=modified_utc_ms;
-insert_locked(std::move(fold),std::move(*record));
+insert_writing(std::move(fold),std::move(*record));
 return {};
 }
 
 std::expected<void,vfs::FileError> PackStorage::add_deletion_marker(std::string_view name)
 {
-const std::unique_lock lock(mutex_);
-if(auto writable=writable_locked();!writable)return std::unexpected(writable.error());
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
 const auto canonical=canonical_entry_name(name);
 if(!canonical||*canonical!=name)return std::unexpected(FileError::bad_path);
 IndexEntry record;
 record.name.assign(name);
 record.deleted=true;
-insert_locked(vfs::fold_name(name),std::move(record));
+insert_writing(vfs::fold_name(name),std::move(record));
 return {};
 }
 
 std::expected<bool,vfs::FileError> PackStorage::remove(std::string_view name)
 {
+const std::string fold=vfs::fold_name(name);
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
 const std::unique_lock lock(mutex_);
-if(auto writable=writable_locked();!writable)return std::unexpected(writable.error());
-const auto found=entries_.find(vfs::fold_name(name));
-if(found==entries_.end())return false;
+const auto found=entries_.find(fold);
+if(found==entries_.end()||found->second.record.deleted)return false;
 wasted_+=found->second.stored;
-if(!found->second.record.deleted)--files_;
+--files_;
 entries_.erase(found);
 dirty_=true;
 return true;
@@ -767,29 +834,36 @@ const auto plain_bytes=static_cast<std::size_t>(plain_size);
 const auto buffer=std::make_unique_for_overwrite<std::byte[]>(plain_bytes+kTagSize+kFooterSize);
 std::byte* out=write_index_head(buffer.get(),generation,wasted,metadata_,static_cast<std::uint32_t>(entries.size()));
 for(const IndexEntry* entry:entries)out=write_entry(out,*entry);
-// A fresh random nonce for every index, never derived from the generation (the nonce rule).
+// A fresh random nonce for every index, never derived from the generation (the nonce rule), under the index key.
 Footer footer;
 crypto::random_bytes(std::as_writable_bytes(std::span(footer.nonce)));
 record_seal(footer.nonce,true);
 const std::span<std::byte> plain(buffer.get(),plain_bytes);
 crypto::Tag tag;
-crypto::seal(file_key_,footer.nonce,header_bytes_,plain,plain,tag);
+crypto::seal(index_key_,footer.nonce,header_bytes_,plain,plain,tag);
 std::memcpy(buffer.get()+plain_bytes,tag.data(),kTagSize);
 footer.index_offset=at;
 footer.index_length=plain_size+kTagSize;
 const FooterBytes encoded=encode_footer(footer);
 std::memcpy(buffer.get()+plain_bytes+kTagSize,encoded.data(),kFooterSize);
-if(auto written=file.write_at(at,{buffer.get(),plain_bytes+kTagSize+kFooterSize});!written)return std::unexpected(file_error(written.error()));
+// The Durability rule: everything but the magic, a device flush (which takes every chunk written before with it), then the
+// magic and another flush. Until the second flush completes no whole magic can be on the device.
+const std::size_t body=plain_bytes+kTagSize+kFooterMagicOffset;
+if(auto written=file.write_at(at,{buffer.get(),body});!written)return std::unexpected(file_error(written.error()));
+if(auto synced=file.sync_data();!synced)return std::unexpected(file_error(synced.error()));
+if(auto written=file.write_at(at+body,{buffer.get()+body,kFooterMagic.size()});!written)return std::unexpected(file_error(written.error()));
+if(auto synced=file.sync_data();!synced)return std::unexpected(file_error(synced.error()));
 return footer.index_length;
 }
 
-std::expected<void,vfs::FileError> PackStorage::flush_locked()
+std::expected<void,vfs::FileError> PackStorage::flush_writing()
 {
 if(!dirty_)return {};
-if(auto writable=writable_locked();!writable)return std::unexpected(writable.error());
-if(auto ready=prepare_append_locked();!ready)return std::unexpected(ready.error());
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
+if(auto ready=prepare_append_writing();!ready)return std::unexpected(ready.error());
 const std::uint64_t generation=generation_+1;
 const std::uint64_t wasted=wasted_+index_length_+kFooterSize;
+// entries_ changes only under writer_mutex_, held here, so it is read without the shared mutex.
 std::vector<const IndexEntry*> records;
 records.reserve(entries_.size());
 for(const auto& [fold,entry]:entries_)records.push_back(&entry.record);
@@ -802,37 +876,37 @@ catch(const std::runtime_error&){
 return std::unexpected(FileError::io);
 }
 if(!length)return std::unexpected(length.error());
-if(auto synced=file_->sync_data();!synced)return std::unexpected(file_error(synced.error()));
 truncate_pending_=false;
 generation_=generation;
-wasted_=wasted;
 index_offset_=end_;
 index_length_=*length;
 end_+=*length+kFooterSize;
 dirty_=false;
+const std::unique_lock lock(mutex_);
+wasted_=wasted;
 return {};
 }
 
 std::expected<void,vfs::FileError> PackStorage::flush()
 {
-const std::unique_lock lock(mutex_);
+const std::lock_guard writing(writer_mutex_);
 if(closed_)return std::unexpected(FileError::io);
-return flush_locked();
+return flush_writing();
 }
 
 std::expected<void,vfs::FileError> PackStorage::compact()
 {
-const std::unique_lock lock(mutex_);
-if(auto writable=writable_locked();!writable)return std::unexpected(writable.error());
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
 try{
-return compact_locked();
+return compact_writing();
 }
 catch(const std::runtime_error&){
 return std::unexpected(FileError::io);
 }
 }
 
-std::expected<void,vfs::FileError> PackStorage::compact_locked()
+std::expected<void,vfs::FileError> PackStorage::compact_writing()
 {
 std::filesystem::path temp=host_;
 temp+=".compact.tmp";
@@ -840,6 +914,12 @@ temp+=".compact.tmp";
 platform::remove_file(temp);
 auto opened=platform::File::open(temp,platform::FileAccess::create_private);
 if(!opened)return std::unexpected(file_error(opened.error()));
+// The new file is locked before it takes the pack's name, so no other program can open it for writing in between.
+if(const auto locked=opened->lock_exclusive();locked&&!*locked){
+opened->close();
+platform::discard_file(temp);
+return std::unexpected(FileError::access_denied);
+}
 // Allocated before the replace, so nothing after it can fail but the folder's flush.
 auto next=std::make_shared<platform::File>(std::move(*opened));
 struct Discard{
@@ -866,6 +946,7 @@ for(const auto& [fold,entry]:entries_)largest=std::max(largest,entry.stored);
 std::unique_ptr<std::byte[]> buffer;
 if(largest)buffer=std::make_unique_for_overwrite<std::byte[]>(static_cast<std::size_t>(std::min<std::uint64_t>(largest,std::uint64_t{batch}*stored_chunk)));
 std::uint64_t position=kHeaderSize;
+// entries_ and file_ change only under writer_mutex_, held here: lookups go on reading them (and the old file) meanwhile.
 for(const auto& [fold,entry]:entries_){
 Entry copy;
 copy.record=entry.record;
@@ -873,7 +954,7 @@ copy.stored=entry.stored;
 if(!entry.record.deleted){
 const IndexEntry& old=entry.record;
 // A new id: the old file's chunks keep theirs, and the file key stays (the nonce rule).
-copy.record.id=new_id_locked();
+copy.record.id=new_id_writing();
 copy.record.offset=position;
 const std::uint64_t chunks=(old.size+chunk_size_-1)>>header_.chunk_log2;
 for(std::uint64_t first=0;first<chunks;){
@@ -895,7 +976,7 @@ crypto::seal(file_key_,nonce,{},data,data,tag);
 std::memcpy(buffer.get()+at+length,tag.data(),kTagSize);
 at+=length+kTagSize;
 }
-if(auto written=next->write_at(position+first*stored_chunk,{buffer.get(),bytes});!written)return std::unexpected(file_error(written.error()));
+if(auto written=write_chunks(*next,position+first*stored_chunk,{buffer.get(),bytes});!written)return std::unexpected(file_error(written.error()));
 first+=count;
 }
 position+=entry.stored;
@@ -903,23 +984,28 @@ position+=entry.stored;
 const auto slot=fresh.emplace(fold,std::move(copy)).first;
 records.push_back(&slot->second.record);
 }
+// Durable before the replace (write_index flushes twice).
 const auto length=write_index(*next,position,generation_+1,0,records);
 if(!length)return std::unexpected(length.error());
-if(auto synced=next->sync_data();!synced)return std::unexpected(file_error(synced.error()));
 if(const std::error_code moded=next->copy_mode(host_))return std::unexpected(file_error(moded));
 std::error_code error;
 if(!platform::replace_file(temp,host_,error))return std::unexpected(file_error(error));
 discard.done=true;
 // From here the new file is the pack's: nothing below can fail but the folder's flush, reported after the switch.
-file_=std::move(next);
-entries_.swap(fresh);
 ++generation_;
-wasted_=0;
 index_offset_=position;
 index_length_=*length;
 end_=position+*length+kFooterSize;
 dirty_=false;
 truncate_pending_=false;
+{
+const std::unique_lock lock(mutex_);
+file_=std::move(next);
+entries_.swap(fresh);
+wasted_=0;
+}
+// The old entries (fresh now) are freed outside the lock.
+fresh.clear();
 if(const std::error_code synced=platform::sync_directory(host_.parent_path()))return std::unexpected(file_error(synced));
 return {};
 }
@@ -932,10 +1018,13 @@ return metadata_;
 
 std::expected<void,vfs::FileError> PackStorage::set_metadata(std::string metadata)
 {
-const std::unique_lock lock(mutex_);
-if(auto writable=writable_locked();!writable)return std::unexpected(writable.error());
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
 if(metadata.size()>std::numeric_limits<std::uint32_t>::max())return std::unexpected(FileError::io);
-metadata_=std::move(metadata);
+{
+const std::unique_lock lock(mutex_);
+metadata_.swap(metadata);
+}
 dirty_=true;
 return {};
 }
@@ -944,17 +1033,24 @@ std::expected<void,vfs::FileError> PackStorage::close()
 {
 std::expected<void,FileError> result;
 {
-const std::unique_lock lock(mutex_);
+const std::lock_guard writing(writer_mutex_);
 if(closed_)return {};
 try{
-result=flush_locked();
+result=flush_writing();
 }
 catch(const std::bad_alloc&){
 result=std::unexpected(FileError::io);
 }
+std::unordered_map<std::string,Entry> dropped;
+// The storage lets go of the file (and its lock, once the readers still reading it are done).
+std::shared_ptr<platform::File> file;
+{
+const std::unique_lock lock(mutex_);
 closed_=true;
-entries_.clear();
+entries_.swap(dropped);
 files_=0;
+file_.swap(file);
+}
 }
 unregister();
 return result;
@@ -968,7 +1064,7 @@ return !closed_;
 
 void PackStorage::set_log(std::string name,Log log)
 {
-const std::unique_lock lock(mutex_);
+const std::lock_guard writing(writer_mutex_);
 if(log_)return;
 log_name_=std::move(name);
 log_=std::move(log);
@@ -976,15 +1072,15 @@ log_=std::move(log);
 
 void PackStorage::unregister() noexcept
 {
-if(!registered_)return;
 Registry& shared=registry();
 {
 const std::lock_guard lock(shared.mutex);
-const auto found=shared.slots.find(KeyView{registry_path_,base_});
+if(!registered_)return;
+const auto found=shared.slots.find(KeyView{registry_path_,windowed_?base_:0,windowed_?window_size_:0,windowed_});
 if(found!=shared.slots.end()&&found->second.raw==this)shared.slots.erase(found);
 registered_=false;
 }
-shared.erased.notify_all();
+shared.changed.notify_all();
 }
 
 #if defined(ZODIAC_TEST_HOOKS)
@@ -992,6 +1088,11 @@ void testing::pack_record_seals(std::vector<SealRecord>* log) noexcept
 {
 const std::lock_guard lock(seal_mutex);
 seal_log=log;
+}
+
+void testing::pack_fail_chunk_write(std::uint64_t after) noexcept
+{
+writes_before_failure.store(after);
 }
 #endif
 }
