@@ -126,6 +126,9 @@ zodiac_add_test(test_math SOURCES test_math.cpp script_fixture.hpp LIBRARIES zod
 zodiac_add_test(test_random SOURCES test_random.cpp script_fixture.hpp LIBRARIES zodiac_core)
 zodiac_add_test(test_time SOURCES test_time.cpp script_fixture.hpp LIBRARIES zodiac_core)
 zodiac_add_test(test_files SOURCES test_files.cpp script_fixture.hpp LIBRARIES zodiac_core)
+# The RFC 8439 vectors are transcribed by hand from the RFC into tests/fixtures/crypto/rfc8439.txt.
+zodiac_add_test(test_crypto SOURCES test_crypto.cpp LIBRARIES zodiac_core)
+target_compile_definitions(test_crypto PRIVATE "ZODIAC_TEST_CRYPTO_VECTORS=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crypto/rfc8439.txt\"")
 zodiac_add_test(test_script_literals SOURCES test_script_literals.cpp script_fixture.hpp LIBRARIES zodiac_core angelscript_literal_scanner)
 zodiac_add_test(test_module_registry SOURCES test_module_registry.cpp script_fixture.hpp LIBRARIES zodiac_core)
 target_compile_definitions(test_module_registry PRIVATE

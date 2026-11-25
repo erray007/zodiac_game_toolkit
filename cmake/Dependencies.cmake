@@ -24,6 +24,15 @@ URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.12.tar.gz
 URL_HASH SHA256=73381c7aa4dee704bd935609668cf41880ea7f19fa0504a200e13b74999c2d70
 DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
+# Monocypher 4.0.2 (BSD-2-Clause, or CC0; THIRD_PARTY_LICENSES): Poly1305, BLAKE2b, Argon2id and the reference ChaCha20 behind
+# src/core/pack/crypto.cpp. Only src/monocypher.c is compiled, into both core targets (src/core/CMakeLists.txt). The SHA256 was
+# taken from the downloaded tarball and checked against the SHA-512 and BLAKE2b sums monocypher.org publishes beside it
+# (download/monocypher-4.0.2.tar.gz.sha512 and .blake2b), and the GitHub release asset, the second URL, is the same file.
+FetchContent_Declare(monocypher
+URL https://monocypher.org/download/monocypher-4.0.2.tar.gz https://github.com/LoupVaillant/Monocypher/releases/download/4.0.2/monocypher-4.0.2.tar.gz
+URL_HASH SHA256=38d07179738c0c90677dba3ceb7a7b8496bcfea758ba1a53e803fed30ae0879c
+DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
 set(DOCTEST_WITH_TESTS OFF CACHE BOOL "" FORCE)
 set(DOCTEST_WITH_MAIN_IN_STATIC_LIB ON CACHE BOOL "" FORCE)
 set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
@@ -31,6 +40,9 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 FetchContent_MakeAvailable(tomlplusplus doctest)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
+# The tarball has no CMakeLists.txt, so this only downloads and extracts it.
+FetchContent_MakeAvailable(monocypher)
+set(ZODIAC_MONOCYPHER_DIR "${monocypher_SOURCE_DIR}/src")
 FetchContent_GetProperties(angelscript_sdk)
 if(NOT angelscript_sdk_POPULATED)
 FetchContent_MakeAvailable(angelscript_sdk)
