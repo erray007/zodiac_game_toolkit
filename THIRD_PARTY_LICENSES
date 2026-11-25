@@ -2,7 +2,7 @@ Zodiac third-party licenses
 
 The Zodiac kit contains or is built from the software below. The license texts are copied unchanged from the sources the kit is built from.
 
-AngelScript and toml++ are linked into zodiac.exe and into every game built with the kit, and so are Zodiac's tables generated from the Unicode Character Database. The AngelScript in the kit is an altered version of AngelScript 2.39.0: Zodiac changed its number literal scanner and its compiler so that decimal literals compile to the nearest double or float (cmake/patches/angelscript-exact-literals.patch in Zodiac's source; each change is marked "Zodiac (altered source)"). Zodiac's script array (array<T>) is derived from AngelScript's scriptarray add-on and is covered by the AngelScript license below. The LLVM linker (ld.lld.exe) and its runtime libraries libLLVM, libc++ and libunwind are shipped in bin (libLLVM also contains the regular expression, strlcpy, xxHash and Unicode code listed after the LLVM license), and libc++, libunwind and compiler-rt (libclang_rt.builtins) are statically linked into every game. The MinGW-w64 runtime is statically linked into zodiac.exe and into every game. doctest is only used to test Zodiac and is not shipped, and mimalloc is only built into a benchmark experiment and is not shipped.
+AngelScript, toml++ and Monocypher are linked into zodiac.exe and into every game built with the kit, and so are Zodiac's tables generated from the Unicode Character Database. The AngelScript in the kit is an altered version of AngelScript 2.39.0: Zodiac changed its number literal scanner and its compiler so that decimal literals compile to the nearest double or float (cmake/patches/angelscript-exact-literals.patch in Zodiac's source; each change is marked "Zodiac (altered source)"). Zodiac's script array (array<T>) is derived from AngelScript's scriptarray add-on and is covered by the AngelScript license below. The LLVM linker (ld.lld.exe) and its runtime libraries libLLVM, libc++ and libunwind are shipped in bin (libLLVM also contains the regular expression, strlcpy, xxHash and Unicode code listed after the LLVM license), and libc++, libunwind and compiler-rt (libclang_rt.builtins) are statically linked into every game. The MinGW-w64 runtime is statically linked into zodiac.exe and into every game. doctest is only used to test Zodiac and is not shipped, and mimalloc is only built into a benchmark experiment and is not shipped.
 
 ==============================================================================
 AngelScript (zlib license), https://www.angelcode.com/angelscript/
@@ -58,6 +58,55 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+==============================================================================
+Monocypher 4.0.2 (2-clause BSD), https://monocypher.org/
+==============================================================================
+
+Linked into zodiac.exe and into every game built with the kit (its src/monocypher.c, unmodified: the packs' Poly1305, BLAKE2b, Argon2id and ChaCha20). Monocypher is dual-licensed under the 2-clause BSD licence and CC-0; Zodiac uses it under the 2-clause BSD licence below.
+
+Monocypher as a whole is dual-licensed.  Choose whichever licence you
+want from the two licences listed below.
+
+The first licence is a regular 2-clause BSD licence.  The second licence
+is the CC-0 from Creative Commons. It is intended to release Monocypher
+to the public domain.  The BSD licence serves as a fallback option.
+
+See the individual files for specific information about who contributed
+to what file during which years.  See below for special notes.
+
+Licence 1 (2-clause BSD)
+------------------------
+
+Copyright (c) 2017-2023, Loup Vaillant
+Copyright (c) 2017-2019, Michael Savage
+Copyright (c) 2017-2023, Fabio Scotoni
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the
+   distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ==============================================================================
