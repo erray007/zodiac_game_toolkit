@@ -484,7 +484,7 @@ namespace {
 // Per-thread caches of the blocks a small dictionary is made of (Task 5c fix round 1): the Dictionary object, its first segment
 // (first_segment_size entries) and an index of min_index_size or twice that many slots (up to 16 keys). A script that makes and drops
 // small dictionaries in a loop (a dictionary per frame) then never reaches the C heap for them. On the Segment Heap, which games run on
-// (src/platform/windows/application.manifest), those three allocations made dict_insert_10 4 % slower than on the NT heap
+// (src/platform/windows/application.manifest.in), those three allocations made dict_insert_10 4 % slower than on the NT heap
 // (placement-study 45563514749). Any thread may free any dictionary: a block goes to the cache of the thread that frees it, as ScriptArray
 // objects do (array.cpp). Under AddressSanitizer the caches step aside, so it sees every block.
 constexpr bool dictionary_cache_on=!heap::under_address_sanitizer;

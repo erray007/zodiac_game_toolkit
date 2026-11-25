@@ -1,5 +1,5 @@
 // Test tool (Windows): which heap a program's process heap is, the Segment Heap or the NT heap (Task 5c fix round 1: every shipped executable
-// and every game asks for the Segment Heap in its application manifest, src/platform/windows/application.manifest).
+// and every game asks for the Segment Heap in its application manifest, src/platform/windows/application.manifest.in).
 //   heap_kind_probe [--require-segment] [--require-same-elevation] <program> [arguments...]
 // It also prints whether the child's token is elevated, beside the probe's own; --require-same-elevation fails (1) when the child is
 // elevated and the probe is not (the manifest's asInvoker keeps installer detection off a game named setup or update). A program that

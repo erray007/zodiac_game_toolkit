@@ -21,7 +21,7 @@ set_target_properties(zodiac PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY
 target_link_libraries(zodiac PRIVATE zodiac_cli)
 if(WIN32)
 target_link_options(zodiac PRIVATE -municode)
-# The shipped application manifest (the Segment Heap, src/platform/windows/application.manifest).
+# The shipped application manifest (the Segment Heap, asInvoker; src/platform/windows/application.manifest.in).
 target_sources(zodiac PRIVATE $<TARGET_OBJECTS:zodiac_application_manifest>)
 endif()
 zodiac_target_warnings(zodiac)

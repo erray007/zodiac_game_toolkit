@@ -47,13 +47,28 @@ if(WIN32)
 zodiac_capture_release_link("${CMAKE_BINARY_DIR}/lib/release")
 endif()
 if(WIN32)
-# The application manifest of every Windows executable Zodiac ships or builds (src/platform/windows/application.manifest: the Segment Heap
-# on Windows 10 2004 and later), compiled once: zodiac and zodiacw link these objects, the kit stages them as lib/release/zodiac_manifest.obj
-# for zodiac build to link into every game, and bench_types links them so the gate measures the heap games get.
+# The application manifest of every Windows executable Zodiac ships or builds (src/platform/windows/application.manifest.in: the Segment
+# Heap on Windows 10 2004 and later, and the execution level). zodiac_manifest_object(<target> <level>) configures the template for one
+# requestedExecutionLevel (asInvoker or requireAdministrator) into the build tree and compiles it into the OBJECT library <target>, holding
+# one RT_MANIFEST resource 1. zodiac and zodiacw link zodiac_application_manifest (asInvoker); the kit stages it as
+# lib/release/zodiac_manifest.obj, which zodiac build links into every game, and zodiac_application_manifest_admin (requireAdministrator)
+# as lib/release/zodiac_manifest_admin.obj, for a game that will ask to run as administrator (Task 9); bench_types links the asInvoker one,
+# so the gate measures the heap games get.
 enable_language(RC)
-add_library(zodiac_application_manifest OBJECT src/platform/windows/application.rc)
-set_property(SOURCE src/platform/windows/application.rc APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows")
-set_property(SOURCE src/platform/windows/application.rc APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/application.manifest")
+function(zodiac_manifest_object target level)
+if(NOT level MATCHES "^(asInvoker|requireAdministrator)$")
+message(FATAL_ERROR "zodiac_manifest_object: \"${level}\" is not an execution level (asInvoker, requireAdministrator)")
+endif()
+set(dir "${CMAKE_BINARY_DIR}/manifest/${level}")
+set(ZODIAC_EXECUTION_LEVEL "${level}")
+set(ZODIAC_MANIFEST_FILE "${dir}/application.manifest")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/application.manifest.in" "${ZODIAC_MANIFEST_FILE}" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/application.rc.in" "${dir}/application.rc" @ONLY)
+add_library(${target} OBJECT "${dir}/application.rc")
+set_property(SOURCE "${dir}/application.rc" APPEND PROPERTY OBJECT_DEPENDS "${ZODIAC_MANIFEST_FILE}")
+endfunction()
+zodiac_manifest_object(zodiac_application_manifest asInvoker)
+zodiac_manifest_object(zodiac_application_manifest_admin requireAdministrator)
 endif()
 add_library(zodiac_plugin_abi INTERFACE)
 target_include_directories(zodiac_plugin_abi INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -3,7 +3,7 @@
 # Windows only. Creates the target zodiac_kit_stage, which lays the build tree out as a runnable kit around bin/zodiac.exe (see core/kit_layout.hpp),
 # and makes every zodiac build depend on it:
 # - lib/release/: libzodiac_release_stub.a, libzodiac_core_release.a, libangelscript.a, zodiac_manifest.obj (the application manifest
-#   resource every game links: the Segment Heap), and crt/ with every toolchain file the captured link line names (ZODIAC_RELEASE_CRT_FILES,
+#   resource every game links: the Segment Heap, asInvoker), zodiac_manifest_admin.obj (the same with requireAdministrator, for Task 9), and crt/ with every toolchain file the captured link line names (ZODIAC_RELEASE_CRT_FILES,
 #   from zodiac_capture_release_link, which also writes link.txt and toolchain.txt there; call it first).
 # - bin/: ld.lld.exe from the toolchain, with the toolchain DLLs it loads (found through llvm-objdump's import tables, transitively), because the
 #   toolchain's ld.lld.exe is not self-contained (it loads libLLVM-<n>.dll and libc++.dll from its own folder).
@@ -32,11 +32,16 @@ add_custom_command(OUTPUT "${staged}" COMMAND "${CMAKE_COMMAND}" -E copy "$<TARG
 list(APPEND outputs "${staged}")
 list(APPEND install_lib "${staged}")
 endforeach()
-# The application manifest object (the Segment Heap; src/platform/windows/application.rc), which zodiac build links into every game.
-set(staged "${release_lib}/zodiac_manifest.obj")
-add_custom_command(OUTPUT "${staged}" COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_OBJECTS:zodiac_application_manifest>" "${staged}" DEPENDS zodiac_application_manifest "${CMAKE_SOURCE_DIR}/src/platform/windows/application.manifest" VERBATIM COMMAND_EXPAND_LISTS)
+# The application manifest objects (src/platform/windows/application.manifest.in, one per execution level): zodiac build links
+# zodiac_manifest.obj (asInvoker) into every game; zodiac_manifest_admin.obj (requireAdministrator) is staged for Task 9's run_as_admin.
+foreach(pair "zodiac_application_manifest;zodiac_manifest.obj" "zodiac_application_manifest_admin;zodiac_manifest_admin.obj")
+list(GET pair 0 object_target)
+list(GET pair 1 object_name)
+set(staged "${release_lib}/${object_name}")
+add_custom_command(OUTPUT "${staged}" COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_OBJECTS:${object_target}>" "${staged}" DEPENDS ${object_target} "${CMAKE_SOURCE_DIR}/src/platform/windows/application.manifest.in" VERBATIM COMMAND_EXPAND_LISTS)
 list(APPEND outputs "${staged}")
 list(APPEND install_lib "${staged}")
+endforeach()
 foreach(file IN LISTS ZODIAC_RELEASE_CRT_FILES)
 cmake_path(GET file FILENAME name)
 set(staged "${release_lib}/crt/${name}")

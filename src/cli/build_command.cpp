@@ -580,7 +580,8 @@ LinkRequest request;
 request.output=tmp.path();
 request.inputs.reserve(libraries.size()+5);
 request.inputs.push_back(object.path());
-// The application manifest every game carries (the Segment Heap on Windows 10 2004 and later; src/platform/windows/application.manifest).
+// The application manifest every game carries (the Segment Heap on Windows 10 2004 and later, asInvoker; src/platform/windows/
+// application.manifest.in). Task 9's [release] run_as_admin will choose zodiac_manifest_admin.obj here instead, never both.
 request.inputs.push_back(kit.release_lib/"zodiac_manifest.obj");
 request.inputs.push_back(kit.release_lib/"libzodiac_release_stub.a");
 for(const StaticLibrary& library:libraries){

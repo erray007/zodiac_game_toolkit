@@ -64,18 +64,28 @@ class KitTest(unittest.TestCase):
             self.assertIn(dll, dlls)
         self.assertEqual(sorted(p.name for p in (KIT / "bin").iterdir()), sorted(["zodiac.exe", "zodiacw.exe", "ld.lld.exe"] + dlls))
         release = KIT / "lib" / "release"
-        for name in ("libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "zodiac_manifest.obj", "link.txt", "toolchain.txt"):
+        for name in ("libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "zodiac_manifest.obj", "zodiac_manifest_admin.obj", "link.txt", "toolchain.txt"):
             self.assertTrue((release / name).is_file(), name)
         # Every toolchain file the link line names is in crt/, and nothing else.
         link = (release / "link.txt").read_text(encoding="utf-8").splitlines()
         wanted = sorted({line.rsplit("/", 1)[1] for line in link if line.startswith("{release_lib}/crt/")})
         self.assertTrue(wanted)
         self.assertEqual(sorted(p.name for p in (release / "crt").iterdir()), wanted)
-        self.assertEqual(sorted(p.name for p in release.iterdir()), sorted(["crt", "libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "zodiac_manifest.obj", "link.txt", "toolchain.txt"]))
-        # The shipped application manifest (the Segment Heap) is in zodiac.exe, zodiacw.exe and the object every game links.
+        self.assertEqual(sorted(p.name for p in release.iterdir()), sorted(["crt", "libzodiac_release_stub.a", "libzodiac_core_release.a", "libangelscript.a", "zodiac_manifest.obj", "zodiac_manifest_admin.obj", "link.txt", "toolchain.txt"]))
+        # The shipped application manifest (the Segment Heap, asInvoker) is in zodiac.exe, zodiacw.exe and the object every game links; the
+        # administrator object differs only in its execution level.
         heap_type = b'<heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>'
+        as_invoker = b'<requestedExecutionLevel level="asInvoker" uiAccess="false"/>'
+        as_admin = b'<requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>'
         for path in (KIT / "bin" / "zodiac.exe", KIT / "bin" / "zodiacw.exe", release / "zodiac_manifest.obj"):
-            self.assertIn(heap_type, path.read_bytes(), path)
+            data = path.read_bytes()
+            self.assertIn(heap_type, data, path)
+            self.assertIn(as_invoker, data, path)
+            self.assertNotIn(as_admin, data, path)
+        admin = (release / "zodiac_manifest_admin.obj").read_bytes()
+        self.assertIn(heap_type, admin)
+        self.assertIn(as_admin, admin)
+        self.assertNotIn(as_invoker, admin)
         for header in ("plugin.h", "plugin.hpp"):
             self.assertTrue((KIT / "include" / "zodiac" / header).is_file(), header)
         self.assertEqual(sorted(p.name for p in (KIT / "include").iterdir()), ["zodiac"])

@@ -1,0 +1,14 @@
+// The application manifest resource of one execution level: resource 1 of type 24 (CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST),
+// the manifest configured from application.manifest.in by zodiac_manifest_object (top-level CMakeLists.txt). The manifest's bytes go
+// into every executable as they are, so its explanation is here, not in it:
+// - It is the manifest of every Windows executable Zodiac ships or builds: zodiac.exe and zodiacw.exe, and every game, which links
+//   lib/release/zodiac_manifest.obj (asInvoker) or, once Task 9 adds [release] run_as_admin, lib/release/zodiac_manifest_admin.obj
+//   (requireAdministrator).
+// - heapType (owner decision, Task 5c fix round 1): the process heap, and so the C runtime's heap, is the Segment Heap. Windows 10 2004
+//   (build 19041) and later honour it; older Windows ignores the element and keeps the NT heap, as before.
+// - trustInfo (Task 5c fix round 2): the execution level is declared, so Windows' installer detection never applies its name heuristics
+//   (setup, update, patch, install) to a game.
+// - A later entry (DPI awareness, the UTF-8 code page, supportedOS) goes into application.manifest.in. An executable links exactly one
+//   manifest object, and no other resource script of zodiac, zodiacw or a game (an icon, version information) may declare a manifest of
+//   its own, or the link would carry two RT_MANIFEST resources 1.
+1 24 "@ZODIAC_MANIFEST_FILE@"

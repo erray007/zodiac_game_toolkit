@@ -31,7 +31,7 @@ option(ZODIAC_BENCH_FIXED_BASE "Link bench_types without ASLR (the placement stu
 if(ZODIAC_BENCH_FIXED_BASE AND WIN32)
 target_link_options(bench_types PRIVATE "-Wl,--disable-dynamicbase")
 endif()
-# bench_types carries the shipped application manifest (the Segment Heap; src/platform/windows/application.manifest), so the gate measures
+# bench_types carries the shipped application manifest (the Segment Heap, asInvoker; src/platform/windows/application.manifest.in), so the gate measures
 # the heap every game gets. The allocator experiment's "nt" tree (top-level ZODIAC_BENCH_ALLOCATOR) leaves it out, for the NT heap; its
 # mimalloc tree needs nothing here (the core carries it) and keeps the manifest.
 if(WIN32 AND NOT ZODIAC_BENCH_ALLOCATOR STREQUAL "nt")

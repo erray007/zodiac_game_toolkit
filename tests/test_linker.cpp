@@ -162,6 +162,7 @@ CHECK(fs::is_regular_file(kit.release_lib/"libzodiac_release_stub.a"));
 CHECK(fs::is_regular_file(kit.release_lib/"libzodiac_core_release.a"));
 CHECK(fs::is_regular_file(kit.release_lib/"libangelscript.a"));
 CHECK(fs::is_regular_file(kit.release_lib/"zodiac_manifest.obj"));
+CHECK(fs::is_regular_file(kit.release_lib/"zodiac_manifest_admin.obj"));
 CHECK(fs::is_regular_file(kit.release_lib/"crt"/"crt2u.o"));
 CHECK(fs::is_regular_file(kit.static_modules/"zodiac_mod_example.a"));
 std::ifstream toolchain(kit.release_lib/"toolchain.txt",std::ios::binary);
