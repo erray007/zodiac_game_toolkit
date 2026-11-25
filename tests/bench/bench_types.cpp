@@ -591,6 +591,34 @@ std::vector<Job> all_jobs(bool diagnostic)
 std::vector<Job> jobs;
 for(const Operation& operation:kOperations)jobs.push_back({operation.name,operation.items,operation.zodiac,operation.addon});
 std::vector<Job> extra;
+// The return-type pairs (Task 5c fix round 3): Zodiac's length() and byte_length() return int and the add-on's length() uint, so in
+// n+=s.length() (int64 n) the gated snippets differ by one VM instruction, iTOi64 against uTOi64. These give both sides the same one,
+// so a ratio that moves between them and the gated operation belongs to that instruction, not to the call.
+extra.push_back({"diag_length_int",1000,
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=ascii_text.length();return n;}",
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=int(ascii_text.length());return n;}"});
+extra.push_back({"diag_length_uint",1000,
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=uint(ascii_text.length());return n;}",
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)n+=ascii_text.length();return n;}"});
+extra.push_back({"diag_length_call",1000,
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)ascii_text.length();return n;}",
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i)ascii_text.length();return n;}"});
+extra.push_back({"diag_construct_short_uint",1000,
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=\"Merhaba\";string t=s;n+=uint(t.byte_length());}return n;}",
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=\"Merhaba\";string t=s;n+=t.length();}return n;}"});
+extra.push_back({"diag_construct_short_bare",1000,
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=\"Merhaba\";string t=s;}return n;}",
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=\"Merhaba\";string t=s;}return n;}"});
+extra.push_back({"diag_concat_add_uint",1000,
+"const string first=\"Merhaba \";const string second=\"dünya\";\n"
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=first+second;n+=uint(s.byte_length());}return n;}",
+"const string first=\"Merhaba \";const string second=\"dünya\";\n"
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=first+second;n+=s.length();}return n;}"});
+extra.push_back({"diag_concat_add_bare",1000,
+"const string first=\"Merhaba \";const string second=\"dünya\";\n"
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=first+second;}return n;}",
+"const string first=\"Merhaba \";const string second=\"dünya\";\n"
+"int64 run(int reps){int64 n=0;for(int r=0;r<reps;++r)for(int i=0;i<ITEMS;++i){string s=first+second;}return n;}"});
 for(const int size:{10,1000,100000}){
 DictionarySnippets s=dictionary_snippets(size);
 jobs.push_back({s.insert_name,size,s.zodiac_insert,s.addon_insert});

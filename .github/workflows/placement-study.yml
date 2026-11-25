@@ -34,6 +34,9 @@ on:
       linux:
         description: "true: also one Linux job with the same variants (commit variants are Windows only)"
         default: "false"
+      diagnostic:
+        description: "true: run bench_types with --diagnostic, so ops may name its diagnostic-only operations"
+        default: "false"
 
 permissions:
   contents: read
@@ -45,6 +48,7 @@ env:
   OPS: ${{ inputs.ops }}
   VARIANTS: ${{ inputs.variants || 'aslr= fixed=-DZODIAC_BENCH_FIXED_BASE=ON' }}
   GAME: ${{ inputs.game || '0' }}
+  DIAGNOSTIC: ${{ inputs.diagnostic == 'true' && '--bench-arg=--diagnostic' || '' }}
 
 jobs:
   windows:
@@ -124,7 +128,7 @@ jobs:
           for variant in "${variants[@]}"; do label=${variant%%=*}; args+=(--variant "$label=builds/$label/bench_types.exe"); done
           if [ -z "$OPS" ] || [ "$OPS" = all ]; then mapfile -t names < <("builds/${variants[0]%%=*}/bench_types.exe" --list | tr -d '\r'); else read -r -a names <<< "$OPS"; fi
           for op in "${names[@]}"; do args+=(--op "$op"); done
-          python -I tools/bench_placement.py "${args[@]}" --game "$GAME" --bench-arg=--calibrate --bench-arg=time --out-dir placement
+          python -I tools/bench_placement.py "${args[@]}" --game "$GAME" --bench-arg=--calibrate --bench-arg=time $DIAGNOSTIC --out-dir placement
       - name: Upload the runs
         if: always()
         uses: actions/upload-artifact@v4
@@ -200,7 +204,7 @@ jobs:
           done
           if [ -z "$OPS" ] || [ "$OPS" = all ]; then mapfile -t names < <("builds/$first/bench_types" --list); else read -r -a names <<< "$OPS"; fi
           for op in "${names[@]}"; do args+=(--op "$op"); done
-          python -I tools/bench_placement.py "${args[@]}" --game "$GAME" --bench-arg=--calibrate --bench-arg=time --out-dir placement
+          python -I tools/bench_placement.py "${args[@]}" --game "$GAME" --bench-arg=--calibrate --bench-arg=time $DIAGNOSTIC --out-dir placement
       - name: Upload the runs
         if: always()
         uses: actions/upload-artifact@v4

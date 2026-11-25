@@ -1399,8 +1399,21 @@ return append_raw(buffer,size,size|meta_ascii);
 
 String String::concat(std::string_view a,std::uint32_t a_meta,std::string_view b,std::uint32_t b_meta)
 {
-if(a.size()+b.size()>max_size)too_long();
-String out=with_size(a.size()+b.size());
+const std::size_t size=a.size()+b.size();
+// An inline result (short words and names, the common case) is built in place: no capacity check, no heap test, each field stored
+// once (with_size, raw_reserve and raw_set_size test the storage kind three times).
+if(size<=static_cast<std::size_t>(inline_capacity))[[likely]]{
+String out;
+char* d=out.rep_.storage.buffer;
+copy_bytes(d,a.data(),a.size());
+copy_bytes(d+a.size(),b.data(),b.size());
+d[size]='\0';
+out.rep_.size=static_cast<std::uint32_t>(size);
+out.rep_.meta=size==0?meta_ascii:a.empty()?b_meta:joined_meta(a_meta,b_meta,b);
+return out;
+}
+if(size>max_size)too_long();
+String out=with_size(size);
 char* d=out.mutable_data();
 if(!a.empty())copy_bytes(d,a.data(),a.size());
 if(!b.empty())copy_bytes(d+a.size(),b.data(),b.size());
