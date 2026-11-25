@@ -25,12 +25,6 @@ set(ZODIAC_BENCH_STRING_CACHE_TOP "" CACHE STRING "String block cache study: the
 if(NOT ZODIAC_BENCH_STRING_CACHE_TOP STREQUAL "")
 set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_STRING_BLOCK_CACHE_TOP=${ZODIAC_BENCH_STRING_CACHE_TOP})
 endif()
-# The length() convention study (placement-study.yml's variants, Task 5c fix round 2): -DZODIAC_BENCH_LENGTH_CALL_OBJLAST=ON registers the
-# release core's string length() as a CDECL_OBJLAST free function instead of a THISCALL member (string_binding.cpp). This tree only.
-option(ZODIAC_BENCH_LENGTH_CALL_OBJLAST "length() convention study: register it CDECL_OBJLAST" OFF)
-if(ZODIAC_BENCH_LENGTH_CALL_OBJLAST)
-set_property(SOURCE ${PROJECT_SOURCE_DIR}/src/core/types/string_binding.cpp TARGET_DIRECTORY zodiac_core_release APPEND PROPERTY COMPILE_DEFINITIONS ZODIAC_LENGTH_CALL_STUDY=1)
-endif()
 # The placement study (placement-study.yml, Task 5c): -DZODIAC_BENCH_FIXED_BASE=ON links bench_types without ASLR, so every copy of the
 # file loads at its preferred base instead of a base Windows draws per image file. Windows only; never set by a preset.
 option(ZODIAC_BENCH_FIXED_BASE "Link bench_types without ASLR (the placement study only)" OFF)

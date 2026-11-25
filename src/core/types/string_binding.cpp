@@ -670,13 +670,9 @@ r.value<std::uint64_t>("uint64");
 r.value<float>("float");
 r.value<double>("double");
 r.value<bool>("bool");
-#if defined(ZODIAC_LENGTH_CALL_STUDY)
-// Bench study only (Task 5c fix round 2, tests/bench's ZODIAC_BENCH_LENGTH_CALL; no preset, the kit or a game): length() as a free
-// function taking the string last (asCALL_CDECL_OBJLAST), as the add-on registers its length(), instead of a THISCALL member.
-r.method("int length() const",asFUNCTION(+[](const String& self) noexcept{return self.length();}),asCALL_CDECL_OBJLAST);
-#else
+// THISCALL, not the add-on's CDECL_OBJLAST: OBJLAST was 2-3 % slower on the EPYC 7763, 9V74 and both Xeons and 0.6 % faster only on
+// the EPYC 9V45 (placement-study 45606248890, Task 5c fix round 2).
 r.method("int length() const",asMETHOD(String,length),asCALL_THISCALL);
-#endif
 r.method("int byte_length() const",asMETHOD(String,byte_length),asCALL_THISCALL);
 r.method("bool empty() const",asMETHOD(String,empty),asCALL_THISCALL);
 r.method("const uint &code_at(int) const",asFUNCTION(code_at));
