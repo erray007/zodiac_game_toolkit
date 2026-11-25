@@ -19,13 +19,15 @@ The regression gate (--baseline, one file per process of main's bench on the sam
 in alternation) is one-sided: it fails when head is slower. Per operation both have, head's best new_ns (minimum over its processes) over
 main's median is at most that operation's limit; over all of them,
 the geometric mean of head's best over main's best is at most the geometric-mean limit; both from --limits
-(tools/bench_regression_limits.json; the file says how they were derived). Why these (Task 5c, 96 gate-replica A/A' jobs):
+(tools/bench_regression_limits.json; the file says how they were derived, from 64 relinked gate-replica A/A' jobs). Why these
+statistics (chosen in Task 5c fix round 1 on that round's 96 gate-replica A/A' jobs of one link layout, on the NT heap):
 - Head's best: the slow modes seen (the Windows NT heap's per-process slow request sizes) only slow a process down, and in up to 2 of 3
   processes at once, so a median of head's processes reads them as a regression; the fastest one measured the code.
 - Main's median: one process of a side is sometimes several percent fast on one operation (its copy's placement; once 13 % on
   array_find_string), which main's best would read as a regression of head. Main's median ignores one such process, and what makes main
-  slow only makes head look better, which a one-sided gate may allow. Held out one job at a time, best over best failed 3 of 96 jobs at
-  the limits the other 95 give, best over median 0.
+  slow only makes head look better, which a one-sided gate may allow. Held out one job at a time in those 96 jobs, best over best failed 3 at
+  the limits the other 95 gave, best over median 0 (over the 64 relinked jobs best over median failed 1, array_sort_string at 1.043,
+  before that sample was part of its limit).
 - The geometric mean takes best over best: over every operation one operation's outlier barely moves it, and it stays the sensitive
   check for a slowdown spread over everything.
 - No time is normalized by the add-on side (Task 5c fix round 2). A machine-speed factor taken from it was tried and dropped: each process

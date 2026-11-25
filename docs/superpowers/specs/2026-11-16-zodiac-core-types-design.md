@@ -68,6 +68,7 @@ The owner chose 2 and asked for as many own types as possible; after discussing 
 Representation (builder's details within these rules):
 - UTF-8 bytes, always NUL-terminated so the plugin ABI can hand out `const char*` without copying.
 - Small-string optimization: short strings (at least 22 bytes) live inline with no allocation.
+- Heap blocks are recycled per thread in size classes: 16-byte steps up to 256 bytes, then powers of two up to 4096 (Task 5c fix round 2), so a live string of 257-4096 bytes holds up to about twice its size (a 257-byte string takes a 512-byte block).
 - Cached metadata: byte length, character count, and an "all ASCII" flag. For ASCII strings every character operation is a byte operation. For non-ASCII strings a sparse index (character → byte offset every N characters, built lazily on the first indexed access and dropped on mutation) makes `s[i]` and `substr` close to O(1).
 - Invalid UTF-8 (bytes read from a file or the network) is kept as is; each invalid byte counts as one character, so `length()` and indices stay consistent and no data is lost.
 

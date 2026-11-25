@@ -69,8 +69,8 @@ jobs:
       #   windows per side (--calibrate time), gated on the median of their ratios per operation (at most 1.05). One file's placement
       #   moves a ratio by several percent (Task 5b fix rounds 3 and 4, Task 5c), so no single placement decides, and there is no retry.
       # - Zodiac against main's Zodiac on this same runner: main's bench (cached per main commit, built when the cache misses) runs
-      #   in alternation with this one (main, head, head, main, main, head), each process from its own copy too. Each process's time
-      #   is corrected by its machine-speed factor (its add-on side against its own side's other processes); per operation head's best
+      #   in alternation with this one (main, head, head, main, main, head), each process from its own copy too. Times are Zodiac's
+      #   raw ns (nothing is normalized by the add-on side; that ratio is printed as a diagnostic only); per operation head's best
       #   process over main's median process must stay within that operation's regression limit, and the geometric mean over
       #   operations of head's best over main's best within its limit. On main itself both sides are this build (an A/A run).
       # Each run's table and --detail lines are in the log and, on failure, in the bench artifact.
@@ -512,6 +512,8 @@ jobs:
           & $probe --require-segment $zodiacw --version
           if ($LASTEXITCODE -ne 0) { throw "zodiacw.exe does not run on the Segment Heap (heap_kind_probe exit code $LASTEXITCODE)" }
           # A game whose name Windows' installer detection looks for (setup) runs as the user who starts it: the manifest's asInvoker.
+          # The run and the elevation probe below cannot fail here: the runners run elevated with UAC off (token type 1), and installer
+          # detection skips 64-bit executables anyway. The real guard is the byte check of setup.exe's requestedExecutionLevel (asInvoker).
           & $zodiac new setup
           if ($LASTEXITCODE -ne 0) { throw "zodiac new setup failed with exit code $LASTEXITCODE" }
           & $zodiac build setup --no-window
