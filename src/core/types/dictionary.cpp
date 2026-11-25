@@ -480,31 +480,116 @@ reset();
 
 // ---- Dictionary: storage ----
 
+namespace {
+// Per-thread caches of the blocks a small dictionary is made of (Task 5c fix round 1): the Dictionary object, its first segment
+// (first_segment_size entries) and an index of min_index_size or twice that many slots (up to 16 keys). A script that makes and drops
+// small dictionaries in a loop (a dictionary per frame) then never reaches the C heap for them. On the Segment Heap, which games run on
+// (src/platform/windows/application.manifest), those three allocations made dict_insert_10 4 % slower than on the NT heap
+// (placement-study 45563514749). Any thread may free any dictionary: a block goes to the cache of the thread that frees it, as ScriptArray
+// objects do (array.cpp). Under AddressSanitizer the caches step aside, so it sees every block.
+constexpr bool dictionary_cache_on=!heap::under_address_sanitizer;
+constexpr int dictionary_block_limit=16;
+// Entry's alignment (asserted where Entry is complete, in the constructor).
+constexpr std::size_t entry_alignment=64;
+enum class DictionaryBlock {object,segment,small_index,index,count};
+constexpr int dictionary_block_kinds=static_cast<int>(DictionaryBlock::count);
+// Trivially destructible members, so the caches stay usable after the thread's cache is destroyed (dictionaries freed by later destructors).
+struct DictionaryBlocks {
+void* blocks[dictionary_block_kinds][dictionary_block_limit];
+int counts[dictionary_block_kinds];
+~DictionaryBlocks();
+};
+thread_local bool dictionary_blocks_closed=false;
+thread_local DictionaryBlocks dictionary_blocks{};
+void release_dictionary_block(DictionaryBlock kind,void* block) noexcept
+{
+switch(kind){
+case DictionaryBlock::object:
+heap::release_aligned(block,alignof(Dictionary));
+break;
+case DictionaryBlock::segment:
+heap::release_aligned(block,entry_alignment);
+break;
+default:
+heap::release(block);
+break;
+}
+}
+DictionaryBlocks::~DictionaryBlocks()
+{
+dictionary_blocks_closed=true;
+for(int kind=0;kind<dictionary_block_kinds;++kind){
+while(counts[kind]>0)release_dictionary_block(static_cast<DictionaryBlock>(kind),blocks[kind][--counts[kind]]);
+}
+}
+// A cached block of kind, or nullptr.
+void* take_dictionary_block(DictionaryBlock kind) noexcept
+{
+if(!dictionary_cache_on||dictionary_blocks_closed)return nullptr;
+DictionaryBlocks& cache=dictionary_blocks;
+int& count=cache.counts[static_cast<int>(kind)];
+return count>0?cache.blocks[static_cast<int>(kind)][--count]:nullptr;
+}
+// Caches block, or releases it when the cache is full or closed.
+void give_dictionary_block(DictionaryBlock kind,void* block) noexcept
+{
+if(dictionary_cache_on&&!dictionary_blocks_closed){
+DictionaryBlocks& cache=dictionary_blocks;
+int& count=cache.counts[static_cast<int>(kind)];
+if(count<dictionary_block_limit){
+cache.blocks[static_cast<int>(kind)][count++]=block;
+return;
+}
+}
+release_dictionary_block(kind,block);
+}
+// The cache that holds an index of size slots, if any.
+inline bool cached_index(std::uint32_t size,DictionaryBlock& kind) noexcept
+{
+if(size==min_index_size)kind=DictionaryBlock::small_index;
+else if(size==2*min_index_size)kind=DictionaryBlock::index;
+else return false;
+return true;
+}
+void release_index(void* index,std::uint32_t size) noexcept
+{
+if(!index)return;
+DictionaryBlock kind{};
+if(cached_index(size,kind))give_dictionary_block(kind,index);
+else heap::release(index);
+}
+}
+
 Dictionary::Dictionary(DictionaryCache& cache) noexcept:cache_(&cache),free_(no_entry),first_(no_entry),last_(no_entry)
 {
-static_assert(sizeof(Entry)==64&&sizeof(Slot)==16);
+static_assert(sizeof(Entry)==64&&sizeof(Slot)==16&&alignof(Entry)==entry_alignment);
 }
 
 Dictionary::~Dictionary()
 {
 // Nothing can reach a dictionary being destroyed, so the values are released in place.
-heap::release(index_);
+release_index(index_,index_?mask_+1:0);
 for(int segment=0;segment<segment_count&&segments_[segment];++segment){
 Entry* block=segments_[segment];
 const std::uint32_t size=first_segment_size<<segment;
 for(std::uint32_t at=0;at<size;++at)block[at].~Entry();
-heap::release_aligned(block,alignof(Entry));
+if(segment==0)give_dictionary_block(DictionaryBlock::segment,block);
+else heap::release_aligned(block,alignof(Entry));
 }
 }
 
 void* Dictionary::operator new(std::size_t size)
 {
+if(size==sizeof(Dictionary)){
+if(void* block=take_dictionary_block(DictionaryBlock::object))return block;
+}
 return heap::allocate_aligned_or_throw(size,alignof(Dictionary));
 }
 
 void Dictionary::operator delete(void* block) noexcept
 {
-heap::release_aligned(block,alignof(Dictionary));
+// Every Dictionary is sizeof(Dictionary) (the class has no derived types), so every block fits the cache.
+if(block)give_dictionary_block(DictionaryBlock::object,block);
 }
 
 Dictionary* Dictionary::create(DictionaryCache& cache)
@@ -538,7 +623,8 @@ void Dictionary::add_segment()
 const unsigned segment=static_cast<unsigned>(std::bit_width((capacity_/first_segment_size)+1))-1;
 if(segment>=static_cast<unsigned>(segment_count))throw std::bad_alloc();
 const std::uint32_t size=first_segment_size<<segment;
-auto* block=static_cast<Entry*>(heap::allocate_aligned(sizeof(Entry)*size,alignof(Entry)));
+auto* block=static_cast<Entry*>(segment==0?take_dictionary_block(DictionaryBlock::segment):nullptr);
+if(!block)block=static_cast<Entry*>(heap::allocate_aligned(sizeof(Entry)*size,alignof(Entry)));
 if(!block)throw std::bad_alloc();
 for(std::uint32_t at=0;at<size;++at)new(block+at) Entry{String(),DictionaryValue(),free_mark,no_entry};
 segments_[segment]=block;
@@ -547,7 +633,15 @@ capacity_+=size;
 
 void Dictionary::rehash(std::uint32_t size)
 {
-auto* slots=static_cast<Slot*>(heap::allocate_zeroed(size,sizeof(Slot)));
+Slot* slots=nullptr;
+DictionaryBlock kind{};
+if(cached_index(size,kind)){
+if(void* block=take_dictionary_block(kind)){
+std::memset(block,0,std::size_t{size}*sizeof(Slot));
+slots=static_cast<Slot*>(block);
+}
+}
+if(!slots)slots=static_cast<Slot*>(heap::allocate_zeroed(size,sizeof(Slot)));
 if(!slots)throw std::bad_alloc();
 Slot* const old=index_;
 const std::uint32_t old_size=old?mask_+1:0;
@@ -561,7 +655,7 @@ std::uint32_t position=home(slot.hash);
 while(slots[position].entry)position=(position+1)&mask_;
 slots[position]=slot;
 }
-heap::release(old);
+release_index(old,old_size);
 }
 
 void Dictionary::reserve(std::uint32_t count)

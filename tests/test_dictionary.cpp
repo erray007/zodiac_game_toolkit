@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using zodiac_test::ScriptFixture;
@@ -685,4 +686,66 @@ REQUIRE(std::is_sorted(keys.begin(),keys.end()));
 REQUIRE(std::adjacent_find(keys.begin(),keys.end())==keys.end());
 check_spread(fixture,keys);
 }
+}
+
+TEST_CASE("small dictionaries made and dropped in a loop and on other threads reuse their cached blocks intact")
+{
+// Task 5c fix round 1: a small dictionary's object, first segment and 16- or 32-slot index come from per-thread caches. Sizes 0-20
+// cover every cached block (indexes of 16 and 32 slots) and uncached ones (a 64-slot index, a second segment); each round checks
+// that a reused block holds nothing of its last dictionary (stale keys, stale index slots).
+ScriptFixture fixture;
+const char* source=
+"array<dictionary@> made;\n"
+"bool loop(){for(int round=0;round<300;++round){dictionary d;int count=round%21;for(int i=0;i<count;++i)d.set(\"k\"+i,int64(i*round));"
+"if(d.length()!=count||d.exists(\"k\"+count))return false;for(int i=0;i<count;++i){int64 v=-1;if(!d.get(\"k\"+i,v)||v!=i*round)return false;}"
+"if(count>0&&(!d.remove(\"k0\")||d.exists(\"k0\")||d.length()!=count-1))return false;}return true;}\n"
+"void make(){for(int i=0;i<40;++i){dictionary@ d=dictionary();for(int k=0;k<i%19;++k)d.set(\"m\"+k,int64(k+i));made.insert_last(d);}}\n"
+"void drop(){made.resize(0);}\n"
+"bool check(){if(made.length()!=40)return false;for(int i=0;i<40;++i){dictionary@ d=made[i];if(d.length()!=i%19)return false;"
+"for(int k=0;k<i%19;++k){int64 v=-1;if(!d.get(\"m\"+k,v)||v!=k+i)return false;}if(d.exists(\"m\"+(i%19)))return false;}return true;}\n";
+REQUIRE(fixture.run(source,"bool loop()")==asEXECUTION_FINISHED);
+CHECK(fixture.context->GetReturnByte()!=0);
+asIScriptModule* module=fixture.engine->GetModule("test");
+REQUIRE(module!=nullptr);
+asIScriptFunction* make=module->GetFunctionByDecl("void make()");
+asIScriptFunction* drop=module->GetFunctionByDecl("void drop()");
+asIScriptFunction* check=module->GetFunctionByDecl("bool check()");
+REQUIRE((make&&drop&&check));
+asPrepareMultithread();
+// Runs function of the built module on the calling thread; false when it did not finish, or when it returns bool and returned false.
+// The garbage collection after it (collect) frees the dropped dictionaries on that thread.
+const auto call=[&fixture](asIScriptFunction* function,bool collect){
+asIScriptContext* context=fixture.engine->CreateContext();
+bool ok=context&&context->Prepare(function)>=0&&context->Execute()==asEXECUTION_FINISHED;
+if(ok&&function->GetReturnTypeId()==asTYPEID_BOOL)ok=context->GetReturnByte()!=0;
+if(context)context->Release();
+if(collect)fixture.engine->GarbageCollect(asGC_FULL_CYCLE);
+return ok;
+};
+// Each worker counts its failures (a failed REQUIRE cannot leave a thread) and the test requires none after it.
+int failed=0;
+// Made on a worker, then checked and freed (by the garbage collector) on this thread: their blocks go to this thread's cache.
+std::thread maker([&]{
+if(!call(make,false))++failed;
+asThreadCleanup();
+});
+maker.join();
+CHECK(call(check,false));
+CHECK(call(drop,true));
+// A thread that makes, drops and collects three times (filling its own cache from the blocks it frees) and ends: its cached blocks are
+// freed with it.
+std::thread filler([&]{
+for(int round=0;round<3;++round){
+if(!call(make,false)||!call(check,false)||!call(drop,true))++failed;
+}
+asThreadCleanup();
+});
+filler.join();
+CHECK(failed==0);
+// This thread then makes dictionaries from its cache and from the allocator, and they read back intact.
+CHECK(call(make,false));
+CHECK(call(check,false));
+CHECK(call(drop,true));
+REQUIRE(fixture.run(source,"bool loop()")==asEXECUTION_FINISHED);
+CHECK(fixture.context->GetReturnByte()!=0);
 }

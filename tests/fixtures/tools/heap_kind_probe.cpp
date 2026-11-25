@@ -41,6 +41,17 @@ line.append(backslashes*2,L'\\');
 line+=L'"';
 }
 
+// The program's name as UTF-8 for the output line (printf's %ls stops at the first character the C locale cannot convert, such as the
+// ş of a kit folder).
+std::string utf8(const wchar_t* text)
+{
+const int count=WideCharToMultiByte(CP_UTF8,0,text,-1,nullptr,0,nullptr,nullptr);
+if(count<=1)return {};
+std::string result(static_cast<std::size_t>(count)-1,'\0');
+WideCharToMultiByte(CP_UTF8,0,text,-1,result.data(),count,nullptr,nullptr);
+return result;
+}
+
 DWORD windows_build()
 {
 using RtlGetVersionFn=LONG(WINAPI*)(OSVERSIONINFOW*);
@@ -92,7 +103,7 @@ STARTUPINFOW startup{};
 startup.cb=sizeof startup;
 PROCESS_INFORMATION process{};
 if(!CreateProcessW(nullptr,line.data(),nullptr,nullptr,FALSE,DEBUG_ONLY_THIS_PROCESS,nullptr,nullptr,&startup,&process)){
-std::fprintf(stderr,"heap_kind_probe: cannot start %ls (error %lu)\n",argv[first],GetLastError());
+std::fprintf(stderr,"heap_kind_probe: cannot start %s (error %lu)\n",utf8(argv[first]).c_str(),GetLastError());
 return 2;
 }
 HeapInfo info;
@@ -100,7 +111,7 @@ bool at_breakpoint=false;
 for(bool running=true;running;){
 DEBUG_EVENT event{};
 if(!WaitForDebugEvent(&event,60000)){
-std::fprintf(stderr,"heap_kind_probe: %ls sent no debug event within 60 s\n",argv[first]);
+std::fprintf(stderr,"heap_kind_probe: %s sent no debug event within 60 s\n",utf8(argv[first]).c_str());
 TerminateProcess(process.hProcess,3);
 return 2;
 }
@@ -132,12 +143,13 @@ ContinueDebugEvent(event.dwProcessId,event.dwThreadId,status);
 CloseHandle(process.hThread);
 CloseHandle(process.hProcess);
 if(!info.read){
-std::fprintf(stderr,"heap_kind_probe: could not read the process heap of %ls\n",argv[first]);
+std::fprintf(stderr,"heap_kind_probe: could not read the process heap of %s\n",utf8(argv[first]).c_str());
 return 2;
 }
 const DWORD build=windows_build();
 const char* kind=info.signature==0xDDEEDDEEu?"segment":info.signature==0xFFEEFFEEu?"nt":"unknown";
-std::printf("%ls: heap %s %08x, Windows build %lu, NtGlobalFlag 0x%x\n",argv[first],kind,info.signature,build,info.global_flag);
+std::printf("%s: heap %s %08x, Windows build %lu, NtGlobalFlag 0x%x\n",utf8(argv[first]).c_str(),kind,info.signature,build,info.global_flag);
+std::fflush(stdout);
 if(!require_segment)return 0;
 if(build<segment_heap_build){
 std::printf("Windows build %lu is older than %lu (Windows 10 2004): heapType is ignored there, so the NT heap is expected (report only)\n",build,segment_heap_build);
