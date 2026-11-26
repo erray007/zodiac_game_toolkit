@@ -1,14 +1,16 @@
 // Windows implementation of zodiac::platform::run_process (see platform/process.hpp).
 //
-// The command line is built with the quoting rules CommandLineToArgvW / the MSVC runtime parse, so every UTF-8 argument
-// reaches the child verbatim. Standard output and standard error share one inherited pipe that is read until EOF.
+// The command line is built with the quoting rules CommandLineToArgvW / the MSVC runtime parse (platform/command_line.hpp), so every
+// UTF-8 argument reaches the child verbatim. Standard output and standard error share one inherited pipe that is read until EOF.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <platform/process.hpp>
+#include <platform/command_line.hpp>
 #include <core/text.hpp>
 #include <windows.h>
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -46,35 +48,6 @@ result.resize(static_cast<std::size_t>(count));
 return MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),result.data(),count)==count;
 }
 
-// Appends one argument quoted so that CommandLineToArgvW returns exactly argument.
-void append_quoted(std::wstring& line,const std::wstring& argument)
-{
-if(!argument.empty()&&argument.find_first_of(L" \t\n\v\"")==std::wstring::npos){
-line+=argument;
-return;
-}
-line+=L'"';
-std::size_t backslashes=0;
-for(const wchar_t character:argument){
-if(character==L'\\'){
-++backslashes;
-continue;
-}
-if(character==L'"'){
-// Backslashes in front of a quote are doubled, then the quote itself is escaped.
-line.append(backslashes*2+1,L'\\');
-line+=L'"';
-} else {
-line.append(backslashes,L'\\');
-line+=character;
-}
-backslashes=0;
-}
-// Backslashes in front of the closing quote are doubled so they do not escape it.
-line.append(backslashes*2,L'\\');
-line+=L'"';
-}
-
 // The system's UTF-8 description of a GetLastError code, through the one helper every message uses.
 std::string last_error_text(DWORD code)
 {
@@ -109,7 +82,7 @@ if(i==0){
 command_line+=L'"';
 command_line+=argument;
 command_line+=L'"';
-} else append_quoted(command_line,argument);
+} else zodiac::platform::append_argument(command_line,std::wstring_view(argument));
 }
 
 SECURITY_ATTRIBUTES inheritable{};

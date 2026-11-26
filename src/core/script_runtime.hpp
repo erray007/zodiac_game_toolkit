@@ -14,11 +14,13 @@
 // "error: the game data does not match the modules it was built with").
 // Never reads outside bytecode, which only has to stay alive during the call.
 // run(): executes "int main()" or "void main()" and returns its value (0 for void), or 1 on an uncaught exception. Never exits the process.
+// When main() ended through restart_as_admin starting the elevated copy (core/library/library.hpp), it returns 0 and reports nothing.
 // Runtime errors are reported identically from source and from bytecode with debug info; from stripped bytecode, a location without a line ends with " (line unknown)".
 // enter_root() and exit_code_of() are the start-up rules zodiac run and the release stub share.
 // Threads: construct, build, load_bytecode and run on the main thread.
 #pragma once
 #include <core/host.hpp>
+#include <core/library/library.hpp>
 #include <core/module_registry.hpp>
 #include <core/vfs/vfs.hpp>
 #include <expected>
@@ -83,6 +85,8 @@ vfs::Vfs vfs_;
 asIScriptEngine* engine_;
 Host host_;
 asIScriptContext* context_=nullptr;
+// is_admin and restart_as_admin (core/library/library.hpp): restart_as_admin acts on context_ only.
+SystemLibrary system_{&context_};
 asIScriptFunction* main_=nullptr;
 std::filesystem::path root_;
 std::string main_section_;

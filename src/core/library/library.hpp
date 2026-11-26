@@ -34,13 +34,36 @@
 //   saving change keeps the wall-clock time (the real time elapsed was 23 or 25 hours). Measure durations with ticks() or
 //   timer, never with now().
 //   ticks() and timers keep counting while the system is suspended (platform::monotonic_us).
+// - register_system(engine, library) (system_binding.cpp) registers bool is_admin() and bool restart_as_admin() (platform/
+//   elevation.hpp has the platform rules and the accessibility note on the UAC prompt):
+//   - is_admin(): platform::is_elevated(), read once per process.
+//   - restart_as_admin(): true at once, doing nothing, when the process is elevated already (on POSIX: root). Otherwise it only acts
+//     on main()'s own context (the runtime's, library.main_context), so the game's main(), or anything main() calls on its thread,
+//     may restart the game; a global variable's initializer (which zodiac build runs too) or a script on another context gets false.
+//     It starts the game again with administrator rights (platform::restart_elevated: the same executable, arguments and starting
+//     folder; in zodiac run, zodiac.exe runs the script again). When the user declines the UAC prompt, or the start fails, it returns
+//     false and the game runs on. When the elevated copy started, this process ends normally: the call aborts main()'s context and
+//     sets library.restarting, and ScriptRuntime::run then returns 0 with nothing reported, so the runtime shuts down as after any
+//     main() (modules shut down, logs flushed, the exit code is 0); the script never sees the call return. On POSIX it is false
+//     unless the process is root (no portable elevation).
+//   Both are native asCALL_CDECL / asCALL_THISCALL_ASGLOBAL functions that cannot fail.
 // - Each throws std::runtime_error naming the declaration when the engine refuses one, as register_exception_helpers does.
 #pragma once
 
+class asIScriptContext;
 class asIScriptEngine;
 
 namespace zodiac {
+// The state restart_as_admin needs, owned by the ScriptRuntime (which outlives its engine's script calls).
+struct SystemLibrary{
+// The runtime's main() context: where it is kept, since the runtime makes it on its first run.
+asIScriptContext* const* main_context=nullptr;
+// Set when restart_as_admin started the elevated copy and aborted main().
+bool restarting=false;
+bool restart_as_admin() noexcept;
+};
 void register_math(asIScriptEngine* engine);
 void register_random(asIScriptEngine* engine);
 void register_time(asIScriptEngine* engine);
+void register_system(asIScriptEngine* engine,SystemLibrary& library);
 }

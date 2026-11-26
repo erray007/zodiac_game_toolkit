@@ -158,6 +158,7 @@ register_math(engine_);
 register_time(engine_);
 register_files(engine_,vfs_);
 register_pack(engine_,vfs_);
+register_system(engine_,system_);
 register_exception_helpers(engine_);
 host_.set_log_handler([this](zodiac_log_level level,std::string_view message){diagnostics_.report(level,message);});
 vfs_.set_log([this](zodiac_log_level level,std::string_view message){diagnostics_.report(level,message);});
@@ -433,6 +434,8 @@ return 1;
 const int state=context_->Execute();
 int result=1;
 if(state==asEXECUTION_FINISHED)result=main_->GetReturnTypeId()==asTYPEID_INT32?static_cast<int>(context_->GetReturnDWord()):0;
+// restart_as_admin started the elevated copy and stopped main(): this game ends normally, its copy carries on.
+else if(state==asEXECUTION_ABORTED&&system_.restarting)result=0;
 else if(state==asEXECUTION_EXCEPTION)report_exception();
 else{
 std::string line=main_section_;

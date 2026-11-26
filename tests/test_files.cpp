@@ -3,6 +3,7 @@
 // misuse and failure texts, the helpers and last_file_error, copies and moves across "/" and "data:/", file_modified against
 // date_time::now(), reads at the 64 KiB buffer's edges, and a sparse file of more than 4 GiB read at its end (Review Focus 3).
 #include "script_fixture.hpp"
+#include "sparse_file.hpp"
 #include <core/vfs/vfs.hpp>
 #include <platform/clock.hpp>
 #include <core/vfs/folder_source.hpp>
@@ -101,45 +102,7 @@ std::string bytes(size,'\0');
 for(std::size_t i=0;i<size;++i)bytes[i]=static_cast<char>((i*131+i/65536*7+1)&0xFF);
 return bytes;
 }
-// A sparse file of offset + text.size() bytes holding text at offset and nothing (a hole) before it. Fails rather than write the
-// hole out when the file system cannot keep it sparse.
-void make_sparse(const fs::path& file,std::uint64_t offset,std::string_view text)
-{
-fs::create_directories(file.parent_path());
-#ifdef _WIN32
-const HANDLE handle=CreateFileW(file.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-REQUIRE(handle!=INVALID_HANDLE_VALUE);
-DWORD returned=0;
-const bool sparse=DeviceIoControl(handle,FSCTL_SET_SPARSE,nullptr,0,nullptr,0,&returned,nullptr)!=0;
-LARGE_INTEGER end;
-end.QuadPart=static_cast<LONGLONG>(offset);
-const bool sized=sparse&&SetFilePointerEx(handle,end,nullptr,FILE_BEGIN)&&SetEndOfFile(handle);
-DWORD written=0;
-const bool wrote=sized&&WriteFile(handle,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)&&written==text.size();
-CloseHandle(handle);
-REQUIRE(sparse);
-REQUIRE(sized);
-REQUIRE(wrote);
-DWORD high=0;
-const DWORD low=GetCompressedFileSizeW(file.c_str(),&high);
-REQUIRE((low!=INVALID_FILE_SIZE||GetLastError()==NO_ERROR));
-const std::uint64_t allocated=(static_cast<std::uint64_t>(high)<<32)|low;
-#else
-const int descriptor=::open(file.c_str(),O_RDWR|O_CREAT|O_TRUNC,0600);
-REQUIRE(descriptor>=0);
-const bool sized=ftruncate(descriptor,static_cast<off_t>(offset))==0;
-const bool wrote=sized&&pwrite(descriptor,text.data(),text.size(),static_cast<off_t>(offset))==static_cast<ssize_t>(text.size());
-struct stat info{};
-const bool stated=fstat(descriptor,&info)==0;
-::close(descriptor);
-REQUIRE(sized);
-REQUIRE(wrote);
-REQUIRE(stated);
-const std::uint64_t allocated=static_cast<std::uint64_t>(info.st_blocks)*512;
-#endif
-// The hole takes no space: at most a few blocks hold the text.
-REQUIRE(allocated<(std::uint64_t{1}<<20));
-}
+using zodiac_test::make_sparse;
 // A source that is no host folder: its files live in memory, so copies and moves through it go through the sources (the buffered
 // path), and its write targets can be told to fail on write_at or on commit.
 class MemorySource final:public zodiac::vfs::Source{
