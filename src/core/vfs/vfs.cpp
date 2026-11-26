@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -322,6 +323,11 @@ return std::nullopt;
 
 void Source::forget(std::string_view)
 {
+}
+
+std::uint64_t Source::max_file_size() const noexcept
+{
+return std::numeric_limits<std::uint64_t>::max();
 }
 
 Vfs::Vfs():table_(std::make_shared<const Table>()),host_(std::make_shared<HostSource>()),checked_(std::make_unique<std::atomic<std::uint64_t>[]>(checked_slots))
@@ -701,6 +707,9 @@ if(!info){
 auto seed=older_reader(*table,path,*p,target.mount);
 if(!seed)return std::unexpected(std::move(seed.error()));
 if(*seed){
+// A seed larger than one file of this source can hold is refused as a full disk would be, before the target is made or anything
+// is allocated for the copy (a pack's file holds at most pack::kMaxPackWriteBytes).
+if((*seed)->size()>source.max_file_size())return failed(FileError::disk_full);
 auto made=source.open_write(target.sub,WriteMode::truncate);
 if(!made)return fail(made.error());
 writer=std::move(*made);

@@ -6,8 +6,11 @@
 // - deletion markers hiding older packs and the folder, and a newer pack showing the name again; listings merged by fold;
 // - unmount while a read is open, concurrent reads through a mount, and Review Focus 4: a pack changed while it is mounted and
 //   read, a second pack object on one file, and compact under an open file object.
+// - the 2 GiB limit of a file written through a pack mount, also for an append seeded from an older mount's (sparse) file;
+// - lookups that allocate nothing: usual and Turkish names on the stack fold, a name past it with one allocation.
 // Packs are made with 64 KiB, 1 pass Argon2id or raw keys for speed.
 #include "script_fixture.hpp"
+#include "sparse_file.hpp"
 #include <core/pack/pack_format.hpp>
 #include <core/pack/pack_source.hpp>
 #include <core/pack/pack_storage.hpp>
@@ -38,10 +41,13 @@
 // that a lookup allocates nothing.
 namespace {
 thread_local std::uint64_t allocations=0;
+// The largest single request since a test last reset it, so a test can show that no buffer of a file's size was made.
+thread_local std::size_t largest_allocation=0;
 }
 void* operator new(std::size_t size)
 {
 ++allocations;
+if(size>largest_allocation)largest_allocation=size;
 if(void* memory=std::malloc(size?size:1))return memory;
 throw std::bad_alloc();
 }
@@ -775,6 +781,38 @@ REQUIRE(out.commit());
 CHECK(read_ok(m.vfs,"big.bin")=="ok");
 }
 
+TEST_CASE("an append or update of an older mount's file over 2 GiB through a pack mount is refused before anything is allocated")
+{
+Mounted m;
+// One byte more than a pack's file may hold, as a hole on disk.
+zodiac_test::make_sparse(m.root()/"huge.log",pack::kMaxPackWriteBytes,"!");
+const fs::path file=m.packs()/"seed.zpk";
+auto storage=pack_of(file,59,{});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(storage,true),true,&owner_a));
+for(const WriteMode mode:{WriteMode::append,WriteMode::update}){
+CAPTURE(static_cast<int>(mode));
+largest_allocation=0;
+const auto opened=m.vfs.open_write("huge.log",mode);
+const std::size_t largest=largest_allocation;
+REQUIRE_FALSE(opened);
+CHECK(opened.error().code==FileError::disk_full);
+CHECK(zodiac::vfs::write_failure_text("huge.log",opened.error())=="cannot write \"huge.log\": disk full");
+// The lookup's own small allocations only: no buffer for the file's bytes was asked for.
+CHECK(largest<(std::size_t{1}<<20));
+}
+// Nothing was made in the pack, and the folder's file is as it was.
+CHECK(storage->stat("huge.log").error()==FileError::not_found);
+CHECK(fs::file_size(m.root()/"huge.log")==pack::kMaxPackWriteBytes+1);
+// A file of the pack's size limit or less still starts the pack's copy.
+put_bytes(m.root()/"small.log","line 1\n");
+auto small=m.vfs.open_write("small.log",WriteMode::append);
+REQUIRE(small);
+REQUIRE((*small)->write_at((*small)->size(),span_of("line 2\n")));
+REQUIRE((*small)->commit());
+CHECK(read_ok(m.vfs,"small.log")=="line 1\nline 2\n");
+CHECK(file_bytes(m.root()/"small.log")=="line 1\n");
+}
+
 TEST_CASE("remove leaves a deletion marker when an older mount still has the name, which a write replaces and a reopen keeps")
 {
 Mounted m;
@@ -883,6 +921,40 @@ REQUIRE((*target)->write_at(7,span_of("line 2\n")));
 REQUIRE((*target)->sync());
 CHECK(on_disk("copy2.zpk")=="line 1\nline 2\n");
 REQUIRE((*target)->commit());
+}
+
+TEST_CASE("a lookup of a Turkish name, or one longer than the stack fold, allocates nothing but the long fold")
+{
+TempDir dir;
+// 288 bytes: past PackStorage::kStackFold, so its fold goes to a string (one allocation, as the name is ASCII and folds to its own
+// size). Its last segment is short, so the name stat returns stays inside the string's own buffer and allocates nothing.
+const std::string long_name=std::string(200,'a')+"/"+std::string(80,'b')+"/x.ogg";
+REQUIRE(long_name.size()>pack::PackStorage::kStackFold);
+const std::string long_lookup=std::string(200,'A')+"/"+std::string(80,'B')+"/X.OGG";
+auto storage=pack_of(dir.path/"names.zpk",60,{{"M\xC3\xBCzik/I\xC5\x9EIK.ogg","t"},{long_name,"l"}});
+REQUIRE(storage->stat("M\xC3\xBCzik/I\xC5\x9EIK.ogg"));
+REQUIRE(storage->stat(long_name));
+const std::uint64_t before=allocations;
+// IŞIK.ogg is found as ışık.ogg and işik.ogg, never as İŞİK.ogg (the fold is Unicode simple uppercase per code point).
+const auto dotless=storage->stat("m\xC3\xBCzik/\xC4\xB1\xC5\x9F\xC4\xB1k.ogg");
+const auto dotted=storage->stat("M\xC3\x9CZIK/i\xC5\x9Fik.ogg");
+const auto capital_dotted=storage->stat("m\xC3\xBCzik/\xC4\xB0\xC5\x9E\xC4\xB0K.ogg");
+const auto folder=storage->stat("M\xC3\x9CZIK");
+const std::uint64_t turkish=allocations-before;
+const std::uint64_t long_before=allocations;
+const auto long_hit=storage->stat(long_lookup);
+const std::uint64_t long_allocated=allocations-long_before;
+REQUIRE(dotless);
+CHECK(dotless->kind==EntryKind::file);
+REQUIRE(dotted);
+CHECK(dotted->kind==EntryKind::file);
+CHECK_FALSE(capital_dotted);
+REQUIRE(folder);
+CHECK(folder->kind==EntryKind::directory);
+CHECK(turkish==0);
+REQUIRE(long_hit);
+CHECK(long_hit->kind==EntryKind::file);
+CHECK(long_allocated==1);
 }
 
 TEST_CASE("a lookup that finds an entry allocates nothing but what it returns")

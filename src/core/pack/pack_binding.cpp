@@ -349,10 +349,13 @@ case vfs::Vfs::MountError::taken:
 return fail(kAlreadyMounted);
 case vfs::Vfs::MountError::out_of_memory:
 return fail(kOutOfMemory);
-default:
-// parse_path accepted at above, so only a source that could not be made gets here.
+case vfs::Vfs::MountError::bad_point:
+// try_mount refuses an at parse_path refuses (accepted above, with the same rules) or a null source (make_pack_source makes one
+// for every open storage), so this is unreachable; should the two ever disagree, the path rule's own text names the failure.
+if(auto point=vfs::parse_path(at,false);!point)return fail(std::move(point.error()));
 return fail(kOutOfMemory);
 }
+return fail(kOutOfMemory);
 }
 return succeeded();
 }

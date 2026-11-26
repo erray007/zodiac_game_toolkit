@@ -68,7 +68,8 @@ capacity_=capacity;
 std::expected<void,FileError> PackWriteTarget::write_at(std::uint64_t offset,std::span<const std::byte> bytes)
 {
 if(bytes.empty())return {};
-// Refused before anything is allocated: past the cap there is no room, as on a full disk.
+// Refused before anything is allocated: past the cap there is no room, as on a full disk. (An entry of this pack that an "a" or
+// "r+" continues is checked by load, an older mount's file by the Vfs against max_file_size, both before their bytes are read.)
 if(offset>kMaxPackWriteBytes||bytes.size()>kMaxPackWriteBytes-offset)return std::unexpected(FileError::disk_full);
 const auto at=static_cast<std::size_t>(offset);
 const std::size_t end=at+bytes.size();
@@ -136,6 +137,7 @@ std::expected<void,FileError> remove(std::string_view relative,bool leave_marker
 std::expected<void,FileError> make_directory(std::string_view relative) override;
 std::expected<void,FileError> remove_directory(std::string_view relative,bool recursive) override;
 std::expected<bool,vfs::MoveError> rename(std::string_view from,std::string_view to) override;
+std::uint64_t max_file_size() const noexcept override{return kMaxPackWriteBytes;}
 bool read_only() const noexcept override{return read_only_;}
 bool real_spelling(std::string_view relative,std::string& real) override;
 private:

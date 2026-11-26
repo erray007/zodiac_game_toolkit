@@ -103,8 +103,9 @@
 //   (it cannot fail); lookups through them stop at once, while files already open read on. A null handle throws
 //   `Null pointer access`.
 // - A file written through a writable pack mount is held in memory and stored as one entry when it is closed; it holds at
-//   most 2 GiB (pack::kMaxPackWriteBytes): a write, or "a"/"r+" of a larger entry, past that fails with `cannot write
-//   "<path>": disk full` before anything is allocated. Each sync of such a file re-appends the whole file to the pack, so
+//   most 2 GiB (pack::kMaxPackWriteBytes): a write past that, or "a"/"r+" of a larger file (an entry of that pack, or the
+//   file of an older mount that would start the pack's copy), fails with `cannot write "<path>": disk full` before anything
+//   is allocated. Each sync of such a file re-appends the whole file to the pack, so
 //   syncing after every line costs O(n^2) bytes: sync once, or close the file, when the data must be safe. delete_file of a
 //   name an older mount (the game folder, an older pack) also has leaves a deletion marker in the pack, so file_exists is
 //   false afterwards; a later write of the name replaces the marker.

@@ -12,9 +12,9 @@
 //   its time) at commit, so a truncating write replaces the entry only then. A name that exists keeps its stored spelling.
 //   sync stores what has been written so far (when anything changed since it was last stored) and flushes the pack; after
 //   commit it flushes the pack. Each store re-appends the whole file, so a file synced after every line costs O(n^2) bytes.
-//   A write target holds the storage. The buffer holds at most kMaxPackWriteBytes (2 GiB): a write, truncate or starting
-//   entry past it fails with disk_full before anything is allocated (there is no room for those bytes, as on a full disk;
-//   io would mean a device fault). Far below stored_size's limit (2^32 chunks of at least 4 KiB). make_directory succeeds
+//   A write target holds the storage. The buffer holds at most kMaxPackWriteBytes (2 GiB, max_file_size): a write, truncate or
+//   starting entry past it fails with disk_full before anything is allocated (there is no room for those bytes, as on a full disk;
+//   io would mean a device fault); so does an "a" or "r+" whose older mount's file is larger, which the Vfs refuses before the open. Far below stored_size's limit (2^32 chunks of at least 4 KiB). make_directory succeeds
 //   unless a file has the name or lies above it (not_a_directory; folders come with the files in them); remove_directory
 //   removes every file below a folder when recursive, else is not_empty; rename is PackStorage::rename, which moves the entry
 //   without rewriting it. A folder is is_directory and a name below a file not_a_directory for open_write, so a pack never

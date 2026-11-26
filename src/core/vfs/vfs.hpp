@@ -155,6 +155,9 @@ virtual std::expected<std::optional<std::filesystem::path>,FileError> host_file(
 // Tells the source that the file relative was made, replaced or removed behind its back (through host_file), so whatever it
 // caches about its folder is dropped. The default does nothing.
 virtual void forget(std::string_view relative);
+// The most bytes one file of this source can hold (its write target refuses more with disk_full). The Vfs refuses an "a" or "r+"
+// whose older file, which would start the new one, is larger before anything is opened or allocated. The default is no limit.
+virtual std::uint64_t max_file_size() const noexcept;
 virtual bool read_only() const noexcept=0;
 // When an entry exists at relative and its real spelling differs from relative (only by case), sets real to that spelling and
 // returns true. Sources without case folding keep the default.
