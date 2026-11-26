@@ -361,13 +361,18 @@ class BuildTest(unittest.TestCase):
         key_file = project / ".zodiac" / "pack.key"
         key = key_file.read_bytes()
         self.assertRegex(key.decode("ascii"), r"\A[0-9a-f]{64}\n\Z")
-        self.assertIn("pack.key", (project / ".zodiac" / ".gitignore").read_text(encoding="utf-8").splitlines())
+        # Everything in .zodiac/ is ignored by git: the key, a crash's leftover temporary name of it, the payload object, the manifest.
+        self.assertIn("*", (project / ".zodiac" / ".gitignore").read_text(encoding="utf-8").splitlines())
+        self.assertEqual(sorted(p.name for p in (project / ".zodiac").iterdir()), [".gitignore", "pack.key", "release.manifest"])
         # One file: the assets are inside the executable, encrypted, after the linked image and before the trailer at the end.
         self.assertEqual(self.release_files(release), ["game.exe"])
         image = (release / "game.exe").read_bytes()
         self.assertEqual(image[-8:], TRAILER_MAGIC)
         self.assertEqual(len(image) % 8, 0)
         self.assertNotIn(self.sound[:4096], image)
+        # Until the protection plan the raw key is in the payload in clear, by design (pack/release_pack.hpp: obfuscation, not
+        # protection), so this proves only that it is there once (the payload's copy) and that the key file's text is not shipped.
+        self.assertEqual(image.count(bytes.fromhex(key.decode("ascii").strip())), 1)
         self.assertNotIn(key.strip(), image)
         self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
         self.assertEqual(self.copied("game"), self.sound)
@@ -378,8 +383,11 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(manifest[2], "next_patch 1")
         self.assertEqual([line.split(" ", 2)[1:] for line in manifest[3:]], [[str(len(self.sound)), "sounds/a.ogg"], ["1", "sounds/x/b.ogg"]])
         self.assertTrue(all(len(line.split(" ")[0]) == 64 for line in manifest[3:]))
-        # A second build reuses the key: the file is unchanged and nothing is announced.
+        # A second build reuses the key: the file is unchanged and nothing is announced. A temporary name of the key that a crash
+        # left behind goes.
+        (project / ".zodiac" / "pack.key.tmp").write_bytes(key)
         out = self.build_packed(project)
+        self.assertFalse((project / ".zodiac" / "pack.key.tmp").exists())
         self.assertEqual(out.splitlines(), ["Build succeeded: %s" % (release / "game.exe")])
         self.assertEqual(key_file.read_bytes(), key)
         self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
@@ -410,6 +418,35 @@ class BuildTest(unittest.TestCase):
         self.assertNotIn(self.sound[:4096], (release / "game.zpk").read_bytes())
         self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
         self.assertEqual(self.copied("game"), self.sound)
+        stale = ['error: the game data is damaged (pack "game.zpk" is from another build)']
+        # An old game.zpk put back over a newer build's is refused, never served.
+        old = (release / "game.zpk").read_bytes()
+        self.build_packed(project)
+        (release / "game.zpk").write_bytes(old)
+        code, out, err = run_exe(release / "game.exe")
+        self.assertEqual((code, out, err.splitlines()), (2, "", stale))
+        # A build whose game.zpk cannot be replaced (held open without sharing) has replaced the executable first: the new
+        # executable refuses the old pack rather than run on stale assets.
+        self.build_packed(project)
+        held = (release / "game.zpk").read_bytes()
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.CreateFileW(str(release / "game.zpk"), 0x80000000, 0, None, 3, 0, None)
+        self.assertNotEqual(handle, wintypes.HANDLE(-1).value, ctypes.get_last_error())
+        try:
+            code, out, err = self.build(str(project))
+        finally:
+            kernel32.CloseHandle(handle)
+        self.assertEqual(code, 2, err)
+        self.assertIn('error: cannot replace "%s": it is in use (is the game still running?)' % (release / "game.zpk"), err.splitlines())
+        self.assertEqual((release / "game.zpk").read_bytes(), held)
+        self.assertEqual(self.release_files(release), ["game.exe", "game.zpk"])
+        code, out, err = run_exe(release / "game.exe")
+        self.assertEqual((code, out, err.splitlines()), (2, "", stale))
         (release / "game.zpk").unlink()
         code, out, err = run_exe(release / "game.exe")
         self.assertEqual((code, out, err.splitlines()), (2, "", ['error: the game data is damaged (pack "game.zpk" is missing)']))
@@ -432,8 +469,8 @@ class BuildTest(unittest.TestCase):
 
     def test_build_writable_pack_is_external(self):
         # writable forces external (a running executable is locked); a save outside data:/ goes into the pack and survives a restart.
-        # The save's name is computed: a literal one would draw the build's warning, since no declared asset is called that.
-        script = 'int main()\n{\nstring save="save"+".txt";\nif(file_exists(save))return read_file(save)=="level 2"?10:11;\nif(read_file("sounds/x/b.ogg")!="b")return 12;\nreturn write_file(save,"level 2")?0:13;\n}\n'
+        # The save is read by its literal name: the script writes that name too, so the build does not warn about it.
+        script = 'int main()\n{\nif(file_exists("save.txt"))return read_file("save.txt")=="level 2"?10:11;\nif(read_file("sounds/x/b.ogg")!="b")return 12;\nreturn write_file("save.txt","level 2")?0:13;\n}\n'
         project = self.packing_project('\n[pack]\nwritable = true\n', script)
         release = project / "release"
         self.build_packed(project)
@@ -470,14 +507,45 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
         self.assertEqual(self.copied("game"), self.sound)
 
+    def test_build_with_a_pack_that_fails_leaves_no_temporary_file(self):
+        # A failed signing (echo_args without --marker exits 1), then a failed link (a stamped static plugin whose archive is no
+        # archive): no .zpk.tmp, no manifest or its .tmp, no payload object (which holds the key) anywhere.
+        self.assertTrue(ECHO_ARGS and Path(ECHO_ARGS).is_file(), ECHO_ARGS)
+        project = self.packing_project("\n[build.sign]\ncommand = [%s, \"{file}\"]\n" % toml_literal(ECHO_ARGS))
+        code, out, err = self.build(str(project))
+        self.assertEqual(code, 2, err)
+        self.assertIn('error: signing "%s" failed' % (project / "release" / "game.exe"), err.splitlines())
+        self.assertEqual(list((project / "release").iterdir()), [])
+        self.assertEqual(sorted(p.name for p in (project / ".zodiac").iterdir()), [".gitignore", "pack.key"])
+        linking = self.new_project(self.root / "linking", static=["gpl_static"], script=self.COPYING_SCRIPT)
+        self.append_toml(linking, '\n[build]\nassets = ["sounds/**"]\n')
+        write(linking / "sounds" / "a.ogg", "a")
+        static_dir = linking / "plugins" / "static"
+        static_dir.mkdir(parents=True)
+        write(static_dir / "zodiac_mod_gpl_static.a", "not an archive\n")
+        toolchain = Path(EXE).resolve().parent.parent / "lib" / "release" / "toolchain.txt"
+        (static_dir / "zodiac_mod_gpl_static.stamp").write_bytes(toolchain.read_bytes())
+        code, out, err = self.build(str(linking), "--module-dir", TEST_MODULE_DIR)
+        self.assertEqual(code, 2, err)
+        self.assertIn("error: linking failed", err.splitlines())
+        self.assertEqual(list((linking / "release").iterdir()), [])
+        self.assertEqual(sorted(p.name for p in (linking / ".zodiac").iterdir()), [".gitignore", "pack.key"])
+
     def test_build_warns_for_undeclared_literal_path(self):
-        script = 'void main()\n{\nread_file("sounds/a.ogg");\nfile_exists("notes.txt");\nwrite_file("log.txt","x");\nread_file("data:/save.txt");\nlist_files("sounds/x");\n}\n'
+        script = ('void main()\n{\nread_file("sounds/a.ogg");\nfile_exists("notes.txt");\nwrite_file("log.txt","x");\nread_file("data:/save.txt");\n'
+                  'list_files("sounds/x");\nread_file("log.txt");\nread_file("maps/1.txt");\n}\n'
+                  'pack p;\nvoid mount()\n{\nmount_pack(p,"maps");\n}\n')
         project = self.packing_project(script=script)
         code, out, err = self.build(str(project))
         self.assertEqual(code, 0, err)
-        # Only the read of an undeclared file: the declared one, the write, data:/ and a folder of assets are fine. Never an error.
+        # Only the read of an undeclared file: the declared one, the write, data:/, a folder of assets, a name the script writes itself
+        # and one below a folder it mounts a pack at are fine. Never an error.
         self.assertEqual(err.splitlines(), ['warning: main.zs:4: "notes.txt" is not among the declared assets, so the release cannot open it'])
         self.assertEqual(out.splitlines()[-1], "Build succeeded: %s" % (project / "release" / "game.exe"))
+        # A pack mounted at the root folder may hold any name: no warning at all.
+        write(project / "main.zs", script.replace('mount_pack(p,"maps")', "mount_pack(p)"))
+        code, out, err = self.build(str(project))
+        self.assertEqual((code, err), (0, ""))
 
     def test_run_warns_writing_a_packed_path(self):
         script = 'void main()\n{\nwrite_file("sounds/a.ogg","x");\nwrite_file("sounds/a.ogg","y");\nwrite_file("data:/a.ogg","z");\nwrite_file("notes.txt","n");\n}\n'

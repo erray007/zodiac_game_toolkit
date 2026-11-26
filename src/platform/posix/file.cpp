@@ -74,10 +74,11 @@ flags|=O_RDWR|O_CREAT;
 break;
 case FileAccess::create_new:
 case FileAccess::create_private:
+case FileAccess::create_secret:
 flags|=O_RDWR|O_CREAT|O_EXCL;
 break;
 }
-const mode_t mode=access==FileAccess::create_private?0600:0666;
+const mode_t mode=access==FileAccess::create_private||access==FileAccess::create_secret?0600:0666;
 int fd;
 do{
 fd=::open(path.c_str(),flags,mode);
@@ -332,6 +333,31 @@ error.clear();
 if(std::rename(from.c_str(),to.c_str())==0)return true;
 error=errno_code(errno);
 return false;
+}
+
+bool rename_no_replace(const fs::path& from,const fs::path& to,std::error_code& error)
+{
+error.clear();
+#if defined(__linux__)&&defined(RENAME_NOREPLACE)
+if(::renameat2(AT_FDCWD,from.c_str(),AT_FDCWD,to.c_str(),RENAME_NOREPLACE)==0)return true;
+if(errno!=EINVAL&&errno!=ENOSYS&&errno!=ENOTSUP){
+error=errno_code(errno);
+return false;
+}
+#elif defined(__APPLE__)
+if(::renamex_np(from.c_str(),to.c_str(),RENAME_EXCL)==0)return true;
+if(errno!=EINVAL&&errno!=ENOTSUP){
+error=errno_code(errno);
+return false;
+}
+#endif
+// No exclusive rename here: a second name, which link() never puts over an existing one, then the first one goes.
+if(::link(from.c_str(),to.c_str())!=0){
+error=errno_code(errno);
+return false;
+}
+if(::unlink(from.c_str())!=0)error=errno_code(errno);
+return true;
 }
 
 std::expected<FileIdentity,std::error_code> file_identity(const fs::path& path)

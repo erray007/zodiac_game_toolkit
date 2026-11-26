@@ -633,6 +633,12 @@ pack_mode=project.pack.external?PackMode::external:PackMode::embedded;
 }
 GamePayload payload=payload_of(project,runtime,std::move(*bytecode),pack_mode,key);
 const WipeOnExit payload_key_wipe{payload.pack_key.data(),payload.pack_key.size()};
+// Made before the link, so the payload names the pack it belongs to (the release refuses an external pack of another build).
+if(pack_mode!=PackMode::none){
+auto id=new_build_id();
+if(!id)return fail(diagnostics,id.error());
+payload.build_id=std::move(*id);
+}
 const std::optional<std::vector<std::string>> shipped=shipped_names(payload,exe,module_dlls,diagnostics);
 if(!shipped)return exit_build_error;
 // The compiled scripts' literal paths against what the release holds: warnings only.
@@ -643,7 +649,9 @@ if(ec)return fail(diagnostics,"error: cannot create directory "+quoted_path(outp
 std::string serialized=serialize_payload(payload);
 const WipeOnExit serialized_wipe{serialized.data(),serialized.size()};
 const std::uint32_t payload_crc=pack::payload_checksum(serialized);
-const TemporaryFile object(output/path_from_utf8(project.name+".zodpay.obj"),diagnostics);
+// With a pack the object holds the key in clear, so it is made in .zodiac/, which .zodiac/.gitignore keeps out of git whatever
+// happens to the build (a crash leaves it there, never in the output folder).
+const TemporaryFile object((pack_mode!=PackMode::none?project.root/".zodiac":output)/path_from_utf8(project.name+".zodpay.obj"),diagnostics);
 {
 std::string object_bytes=write_payload_object(serialized);
 const WipeOnExit object_wipe{object_bytes.data(),object_bytes.size()};
@@ -675,8 +683,7 @@ std::optional<TemporaryFile> pack_tmp;
 ManifestGuard manifest(project);
 if(pack_mode!=PackMode::none){
 pack_tmp.emplace(output/path_from_utf8(project.name+".zpk.tmp"),diagnostics);
-std::string build_id;
-if(auto written=write_release_pack(project,key,split,pack_tmp->path(),build_id);!written)return fail(diagnostics,written.error());
+if(auto written=write_release_pack(project,key,split,pack_tmp->path(),payload.build_id);!written)return fail(diagnostics,written.error());
 if(pack_mode==PackMode::embedded){
 if(auto appended=append_pack(tmp.path(),pack_tmp->path(),payload_crc);!appended)return fail(diagnostics,appended.error());
 }

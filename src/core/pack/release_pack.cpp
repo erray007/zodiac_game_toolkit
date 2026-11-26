@@ -85,6 +85,19 @@ result.append(one_line(text)).push_back('"');
 return result;
 }
 
+// True when metadata (key=value lines, "\n" between them) holds the line "build=<build_id>".
+bool names_build(std::string_view metadata,std::string_view build_id) noexcept
+{
+while(!metadata.empty()){
+const std::size_t end=metadata.find('\n');
+const std::string_view line=metadata.substr(0,end);
+if(line.size()==6+build_id.size()&&line.starts_with("build=")&&line.substr(6)==build_id)return true;
+if(end==std::string_view::npos)break;
+metadata.remove_prefix(end+1);
+}
+return false;
+}
+
 // The line for a failed open of the build pack, named file (the pack's or the executable's file name).
 std::string open_failure(const PackError& error,std::string_view file,bool external)
 {
@@ -175,6 +188,7 @@ diagnostics.report(ZODIAC_LOG_ERROR,line);
 return exit_start_error;
 };
 if(payload.pack_key.size()!=kPayloadPackKeySize)return refuse(damaged("invalid pack key"));
+if(payload.build_id.size()!=kPayloadBuildIdSize)return refuse(damaged("invalid build id"));
 const bool external=payload.pack_mode==PackMode::external;
 if(payload.pack_writable&&!external)return refuse(damaged("invalid pack or file setting"));
 const std::string shown=external?payload.game_name+".zpk":path_to_utf8(executable.filename());
@@ -197,6 +211,9 @@ crypto::Key key=release_pack_key(payload);
 auto storage=PackStorage::open(host,KeySource(key),false,{},window);
 crypto::wipe(key.data(),key.size());
 if(!storage)return refuse(open_failure(storage.error(),shown,external));
+// The pack must be the one this executable was built with: an external pack left from another build (a failed rename of the new
+// one, an old copy put back) would otherwise serve stale assets without a word. An embedded one is tied by the trailer already.
+if(!names_build((*storage)->metadata(),payload.build_id))return refuse(external?damaged("pack "+in_quotes(shown)+" is from another build"):damaged(std::string("pack: ")+kWrongKeyText));
 const bool writable=payload.pack_writable&&!(*storage)->read_only();
 (*storage)->set_log(shown,[&diagnostics](std::string_view line){diagnostics.report(ZODIAC_LOG_ERROR,line);});
 std::shared_ptr<vfs::Source> source;

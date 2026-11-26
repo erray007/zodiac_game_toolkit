@@ -281,6 +281,31 @@ std::optional<std::string> key;
 
 // Calls whose first argument is a path that is read.
 constexpr std::array<std::string_view,7> kReadingFunctions{"read_file","file_exists","file_size","file_modified","list_files","copy_file","move_file"};
+// Calls whose first argument is a path that is written.
+constexpr std::array<std::string_view,2> kWritingFunctions{"write_file","append_file"};
+
+enum class Declared:std::uint8_t{file,pack,both};
+// The names declared with the type file or pack in source ("file f", "pack@ p", class members too): a declaration is the type name,
+// an optional '@', and a name not followed by '(' (that would be a function returning one). A name declared with both types (in
+// two scopes) is both, so neither rule is sure of it.
+std::unordered_map<std::string_view,Declared> declared_types(const std::vector<Token>& tokens)
+{
+std::unordered_map<std::string_view,Declared> types;
+for(std::size_t i=0;i+1<tokens.size();++i){
+const Token& type=tokens[i];
+if(type.kind!=Kind::identifier||(type.text!="file"&&type.text!="pack"))continue;
+// "x.file" is a member named file, no type.
+if(i>0&&is_punctuation(tokens[i-1],'.'))continue;
+std::size_t at=i+1;
+if(is_punctuation(tokens[at],'@'))++at;
+if(at>=tokens.size()||tokens[at].kind!=Kind::identifier)continue;
+if(at+1<tokens.size()&&is_punctuation(tokens[at+1],'('))continue;
+const Declared kind=type.text=="file"?Declared::file:Declared::pack;
+const auto [slot,inserted]=types.try_emplace(tokens[at].text,kind);
+if(!inserted&&slot->second!=kind)slot->second=Declared::both;
+}
+return types;
+}
 
 std::string relative_text(const fs::path& path,const fs::path& root)
 {
@@ -303,13 +328,22 @@ return text;
 }
 }
 
-std::vector<LiteralPath> find_literal_paths(std::string_view source)
+std::vector<LiteralPath> find_literal_paths(std::string_view source,LiteralUses* uses)
 {
 const std::vector<Token> tokens=tokenize(source);
+const std::unordered_map<std::string_view,Declared> types=declared_types(tokens);
+const auto type_of=[&types](std::string_view receiver)->std::optional<Declared>{
+const auto found=types.find(receiver);
+if(found==types.end())return std::nullopt;
+return found->second;
+};
 std::vector<LiteralPath> found;
 std::unordered_map<std::string_view,PackOpen> packs;
 const auto report=[&found](std::optional<std::pair<std::string,int>> literal){
 if(literal)found.push_back(LiteralPath{literal->second,std::move(literal->first),false,{},{}});
+};
+const auto written=[uses](std::optional<std::pair<std::string,int>> literal){
+if(uses&&literal)uses->written.push_back(std::move(literal->first));
 };
 for(std::size_t i=0;i+1<tokens.size();++i){
 const Token& name=tokens[i];
@@ -317,13 +351,35 @@ if(name.kind!=Kind::identifier||!is_punctuation(tokens[i+1],'('))continue;
 const bool member=i>0&&is_punctuation(tokens[i-1],'.');
 // The receiver of a member call when it is one identifier ("p.open"), else empty.
 const std::string_view receiver=member&&i>1&&tokens[i-2].kind==Kind::identifier&&!(i>2&&is_punctuation(tokens[i-3],'.'))?tokens[i-2].text:std::string_view();
+const std::optional<Declared> type=receiver.empty()?std::nullopt:type_of(receiver);
 if(!member){
-if(std::ranges::find(kReadingFunctions,name.text)==kReadingFunctions.end())continue;
+const bool reading=std::ranges::find(kReadingFunctions,name.text)!=kReadingFunctions.end();
+const bool writing=std::ranges::find(kWritingFunctions,name.text)!=kWritingFunctions.end();
+const bool mounting=name.text=="mount_pack";
+if(!reading&&!writing&&!mounting)continue;
 const std::vector<Argument> arguments=arguments_of(tokens,i+1);
-if(!arguments.empty())report(literal_of(tokens,arguments.front()));
+if(arguments.empty())continue;
+if(mounting){
+if(uses){
+// No literal folder (the default "/", or a computed one): the pack may provide any name.
+auto at=arguments.size()>1?literal_of(tokens,arguments[1]):std::nullopt;
+if(arguments.size()>1&&at)uses->mounted.push_back(std::move(at->first));
+else uses->mounted_at_root=true;
+}
+continue;
+}
+if(writing){
+written(literal_of(tokens,arguments.front()));
+continue;
+}
+report(literal_of(tokens,arguments.front()));
+// copy_file's and move_file's destination is written.
+if(arguments.size()>1&&(name.text=="copy_file"||name.text=="move_file"))written(literal_of(tokens,arguments[1]));
 continue;
 }
 if(name.text=="add_file"){
+// Only on a declared pack: another object's add_file is no file read the scanner can name.
+if(type!=Declared::pack)continue;
 const std::vector<Argument> arguments=arguments_of(tokens,i+1);
 if(!arguments.empty())report(literal_of(tokens,arguments.front()));
 continue;
@@ -333,30 +389,39 @@ const std::vector<Argument> arguments=arguments_of(tokens,i+1);
 if(arguments.size()<2)continue;
 auto path=literal_of(tokens,arguments[0]);
 auto second=literal_of(tokens,arguments[1]);
-if(second&&file_mode(second->first)){
+const bool mode=second&&file_mode(second->first);
+// A file's open: a declared file, or (the known pattern) any receiver whose second argument is a file mode literal, unless
+// it is a declared pack.
+if(type==Declared::file||(mode&&type!=Declared::pack)){
 if(!receiver.empty())packs.erase(receiver);
+if(!mode)continue;
 if(second->first=="r"||second->first=="rb")report(std::move(path));
+else written(std::move(path));
 continue;
 }
+// A pack's open needs a declared pack: an open(path, text) of any other object is not taken for one.
+if(type!=Declared::pack)continue;
 const bool creating=arguments.size()>2&&!is_identifier(tokens,arguments[2],"false");
-if(!receiver.empty()){
 PackOpen& open=packs[receiver];
 open.path.reset();
 open.key.reset();
+if(creating){
 // A pack being created is written, so no pairing can check its entries.
-if(!creating){
-if(path)open.path=path->first;
-if(second)open.key=second->first;
-}
-}
-if(!creating)report(std::move(path));
+written(std::move(path));
 continue;
 }
-if(name.text=="extract"&&!receiver.empty()){
-const auto open=packs.find(receiver);
-if(open==packs.end()||!open->second.path||!open->second.key)continue;
+if(path)open.path=path->first;
+if(second)open.key=second->first;
+report(std::move(path));
+continue;
+}
+if(name.text=="extract"&&type==Declared::pack){
 const std::vector<Argument> arguments=arguments_of(tokens,i+1);
 if(arguments.empty())continue;
+// The destination is written.
+if(arguments.size()>1)written(literal_of(tokens,arguments[1]));
+const auto open=packs.find(receiver);
+if(open==packs.end()||!open->second.path||!open->second.key)continue;
 auto entry=literal_of(tokens,arguments.front());
 if(!entry)continue;
 LiteralPath literal{entry->second,std::move(entry->first),true,*open->second.path,*open->second.key};
@@ -386,10 +451,29 @@ auto parsed=vfs::parse_path(path,project.files.host_paths);
 if(!parsed||!parsed->mount.empty())return std::nullopt;
 return vfs::fold_name(parsed->relative);
 };
+// Every script first: a name the scripts write themselves (a save, a log) is no asset the release lacks, and a pack a script
+// mounts may provide names below its folder (anything, mounted at "/" or at a computed folder).
+std::vector<std::vector<LiteralPath>> reads;
+reads.reserve(files.size());
+LiteralUses uses;
 for(const ScriptRuntime::ScriptFile& file:files){
 const std::optional<std::string> source=read_source(file.path);
-if(!source)continue;
-for(const LiteralPath& literal:find_literal_paths(*source)){
+reads.push_back(source?find_literal_paths(*source,&uses):std::vector<LiteralPath>());
+}
+if(uses.mounted_at_root)return;
+std::unordered_set<std::string> written;
+for(const std::string& path:uses.written)if(auto fold=resolve(path))written.insert(std::move(*fold));
+std::vector<std::string> mounted;
+for(const std::string& at:uses.mounted){
+auto parsed=vfs::parse_path(at,project.files.host_paths);
+if(!parsed||!parsed->mount.empty())continue;
+// A pack mounted at the root folder itself ("/", "") may provide any name.
+if(parsed->relative.empty())return;
+mounted.push_back(vfs::fold_name(parsed->relative)+'/');
+}
+for(std::size_t index=0;index<files.size();++index){
+const ScriptRuntime::ScriptFile& file=files[index];
+for(const LiteralPath& literal:reads[index]){
 bool found=false;
 if(literal.pack_entry){
 const std::optional<std::string> pack_fold=resolve(literal.pack);
@@ -414,7 +498,7 @@ found=entry&&entry->kind==vfs::EntryKind::file;
 else{
 const std::optional<std::string> fold=resolve(literal.path);
 if(!fold)continue;
-found=fold->empty()||known.contains(*fold);
+found=fold->empty()||known.contains(*fold)||written.contains(*fold)||std::ranges::any_of(mounted,[&fold](const std::string& at){return fold->starts_with(at)||std::string_view(*fold)==std::string_view(at).substr(0,at.size()-1);});
 }
 if(found)continue;
 std::string line="warning: ";

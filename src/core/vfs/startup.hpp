@@ -7,9 +7,10 @@
 // gets one warning: `warning: data:/ is not available: <reason>`.
 // mount_project(vfs, project, dev_mode) calls it with the project root, [files] host_paths and the game name. In dev mode (zodiac run)
 // it also sets the Vfs's release pack check (vfs.hpp), unless [pack] is disabled or writable or there are no [build] assets: a
-// path of the root mount is named when one [build] assets pattern matches it as spelled (glob_match), packed_in_release holds
-// for it (no [pack] exclude match, no .zpk), and it is none of the files expand_assets never ships (zodiac.toml, the project file,
-// release/ and .zodiac/ in the root, compared by fold_name). The release would put such a file into its read-only pack, where a
+// path of the root mount is named when, everything compared by fold_name as VFS lookups compare names (glob_match over the folded
+// pattern and path, so "Sounds/a.ogg" counts for "sounds/**"), one [build] assets pattern matches it, no [pack] exclude pattern
+// does, it does not end in ".zpk", and it is none of the files expand_assets never ships (zodiac.toml, the project file,
+// release/ and .zodiac/ in the root). zodiac build itself matches the disk's spelling (packed_in_release); the check is advisory. The release would put such a file into its read-only pack, where a
 // write fails; the Vfs warns once per path, and only when the write lands in a folder source.
 // The release stub mounts through pack::mount_release (core/pack/release_pack.hpp), which calls mount_game_folders first.
 #pragma once

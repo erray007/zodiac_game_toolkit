@@ -21,6 +21,7 @@ payload.pack_mode=zodiac::PackMode::external;
 payload.pack_writable=true;
 payload.host_paths=true;
 payload.pack_key=std::string("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF7\xF8\xF9\xFA\xFB\xFC\xFD\xFE\xFF",32);
+payload.build_id="0123456789abcdef0123456789abcdef";
 payload.scripts={{"main.zs",true,std::string("\x00\x01\xFF bytecode \x00",14)}};
 return payload;
 }
@@ -48,6 +49,7 @@ CHECK(parsed->pack_mode==zodiac::PackMode::external);
 CHECK(parsed->pack_writable);
 CHECK(parsed->host_paths);
 CHECK(parsed->pack_key==input.pack_key);
+CHECK(parsed->build_id==input.build_id);
 }
 
 TEST_CASE("payload defaults describe a release without a pack or host paths")
@@ -126,6 +128,23 @@ const auto parsed=zodiac::parse_payload(zodiac::serialize_payload(input));
 REQUIRE_FALSE(parsed.has_value());
 CHECK(parsed.error()=="error: the game data is damaged (invalid pack key)");
 }
+}
+
+TEST_CASE("a build id that is not empty or 32 lowercase hex digits is damage")
+{
+for(const std::string& id:{std::string("abc"),std::string(33,'a'),std::string("0123456789ABCDEF0123456789abcdef"),std::string("0123456789abcdef0123456789abcdeg")}){
+CAPTURE(id);
+zodiac::GamePayload input=sample();
+input.build_id=id;
+const auto parsed=zodiac::parse_payload(zodiac::serialize_payload(input));
+REQUIRE_FALSE(parsed.has_value());
+CHECK(parsed.error()=="error: the game data is damaged (invalid build id)");
+}
+zodiac::GamePayload none=sample();
+none.build_id.clear();
+const auto parsed=zodiac::parse_payload(zodiac::serialize_payload(none));
+REQUIRE(parsed.has_value());
+CHECK(parsed->build_id.empty());
 }
 
 TEST_CASE("a pack mode or flag out of range is damage")

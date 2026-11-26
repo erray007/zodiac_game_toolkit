@@ -21,6 +21,12 @@
 #include <vector>
 #ifdef _WIN32
 #include <stdlib.h>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <aclapi.h>
+#else
+#include <sys/stat.h>
 #endif
 
 namespace {
@@ -109,6 +115,85 @@ CHECK_FALSE(fs::exists(from));
 // A missing source fails and says why.
 CHECK_FALSE(zodiac::platform::replace_file(from,to,error));
 CHECK(zodiac::platform::error_kind(error)==zodiac::platform::ErrorKind::not_found);
+}
+
+TEST_CASE("rename_no_replace moves to a free name and never over an existing one")
+{
+const TempDir temp;
+const fs::path from=temp.dir()/"pack.key.tmp";
+const fs::path to=temp.dir()/"pack.key";
+write_disk(from,"new key");
+write_disk(to,"the game's key");
+std::error_code error;
+CHECK_FALSE(zodiac::platform::rename_no_replace(from,to,error));
+CHECK(zodiac::platform::error_kind(error)==zodiac::platform::ErrorKind::exists);
+CHECK(read_disk(to)=="the game's key");
+CHECK(read_disk(from)=="new key");
+fs::remove(to);
+REQUIRE(zodiac::platform::rename_no_replace(from,to,error));
+CHECK_FALSE(error);
+CHECK(read_disk(to)=="new key");
+CHECK_FALSE(fs::exists(from));
+CHECK_FALSE(zodiac::platform::rename_no_replace(from,to,error));
+CHECK(zodiac::platform::error_kind(error)==zodiac::platform::ErrorKind::not_found);
+}
+
+TEST_CASE("create_secret makes a new file only its owner, SYSTEM and Administrators can open")
+{
+const TempDir temp;
+const fs::path path=temp.dir()/"secret.key";
+{
+auto file=File::open(path,FileAccess::create_secret);
+REQUIRE(file);
+REQUIRE(file->write_at(0,std::as_bytes(std::span(std::string_view("key")))));
+}
+CHECK(read_disk(path)=="key");
+// Like create_new, never over an existing file.
+CHECK_FALSE(File::open(path,FileAccess::create_secret));
+#ifdef _WIN32
+PSECURITY_DESCRIPTOR descriptor=nullptr;
+PACL dacl=nullptr;
+REQUIRE(GetNamedSecurityInfoW(path.c_str(),SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,&dacl,nullptr,&descriptor)==ERROR_SUCCESS);
+SECURITY_DESCRIPTOR_CONTROL control=0;
+DWORD revision=0;
+REQUIRE(GetSecurityDescriptorControl(descriptor,&control,&revision));
+// Protected: nothing inherited from the folder (whose entries grant Users or Authenticated Users access).
+CHECK((control&SE_DACL_PROTECTED)!=0);
+REQUIRE(dacl!=nullptr);
+const auto sid_of=[](WELL_KNOWN_SID_TYPE type){
+std::vector<BYTE> sid(SECURITY_MAX_SID_SIZE);
+DWORD size=static_cast<DWORD>(sid.size());
+REQUIRE(CreateWellKnownSid(type,nullptr,sid.data(),&size));
+return sid;
+};
+const std::vector<BYTE> users=sid_of(WinBuiltinUsersSid);
+const std::vector<BYTE> authenticated=sid_of(WinAuthenticatedUserSid);
+const std::vector<BYTE> everyone=sid_of(WinWorldSid);
+CHECK(dacl->AceCount==3);
+for(DWORD index=0;index<dacl->AceCount;++index){
+void* ace=nullptr;
+REQUIRE(GetAce(dacl,index,&ace));
+const auto* header=static_cast<const ACE_HEADER*>(ace);
+CHECK(header->AceType==ACCESS_ALLOWED_ACE_TYPE);
+PSID sid=&static_cast<ACCESS_ALLOWED_ACE*>(ace)->SidStart;
+CHECK_FALSE(EqualSid(sid,const_cast<BYTE*>(users.data())));
+CHECK_FALSE(EqualSid(sid,const_cast<BYTE*>(authenticated.data())));
+CHECK_FALSE(EqualSid(sid,const_cast<BYTE*>(everyone.data())));
+}
+LocalFree(descriptor);
+// A hard link is the same file, so it has the same descriptor.
+const fs::path link=temp.dir()/"link.key";
+fs::create_hard_link(path,link);
+PSECURITY_DESCRIPTOR linked=nullptr;
+PACL linked_dacl=nullptr;
+REQUIRE(GetNamedSecurityInfoW(link.c_str(),SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,&linked_dacl,nullptr,&linked)==ERROR_SUCCESS);
+CHECK(linked_dacl->AceCount==3);
+LocalFree(linked);
+#else
+struct stat info{};
+REQUIRE(::stat(path.c_str(),&info)==0);
+CHECK((info.st_mode&0777)==0600);
+#endif
 }
 
 TEST_CASE("replace_file works while the target is open for reading, which keeps the old bytes")

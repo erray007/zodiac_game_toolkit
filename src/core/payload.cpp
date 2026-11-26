@@ -1,5 +1,6 @@
 #include <core/payload.hpp>
 #include <core/path_utf8.hpp>
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstddef>
@@ -128,7 +129,7 @@ return ~crc;
 std::string serialize_payload(const GamePayload& payload)
 {
 const std::string file=generic_utf8(payload.diagnostics.file);
-std::size_t size=kMagic.size()+4+4+payload.kit_version.size()+4+payload.game_name.size()+strings_size(payload.requested)+4+strings_size(payload.core_exclude)+4+4+file.size()+4+4+4+4+4+payload.pack_key.size()+4+4;
+std::size_t size=kMagic.size()+4+4+payload.kit_version.size()+4+payload.game_name.size()+strings_size(payload.requested)+4+strings_size(payload.core_exclude)+4+4+file.size()+4+4+4+4+4+payload.pack_key.size()+4+payload.build_id.size()+4+4;
 for(const PayloadModule& module:payload.modules)size+=4+module.name.size()+4+module.version.size()+4;
 for(const PayloadScript& script:payload.scripts)size+=4+script.section.size()+4+4+script.bytecode.size();
 Writer out(size);
@@ -153,6 +154,7 @@ out.u32(static_cast<uint32_t>(payload.pack_mode));
 out.u32(payload.pack_writable?1u:0u);
 out.u32(payload.host_paths?1u:0u);
 out.str(payload.pack_key);
+out.str(payload.build_id);
 out.count(payload.scripts.size());
 for(const PayloadScript& script:payload.scripts){
 out.str(script.section);
@@ -200,10 +202,11 @@ payload.diagnostics.file=path_from_utf8(file);
 uint32_t pack_mode=0;
 uint32_t pack_writable=0;
 uint32_t host_paths=0;
-if(!in.u32(pack_mode)||!in.u32(pack_writable)||!in.u32(host_paths)||!in.str(payload.pack_key))return damaged("truncated");
+if(!in.u32(pack_mode)||!in.u32(pack_writable)||!in.u32(host_paths)||!in.str(payload.pack_key)||!in.str(payload.build_id))return damaged("truncated");
 if(pack_mode>static_cast<uint32_t>(PackMode::external))return damaged("invalid pack mode");
 if(pack_writable>1||host_paths>1)return damaged("invalid pack or file setting");
 if(!payload.pack_key.empty()&&payload.pack_key.size()!=kPayloadPackKeySize)return damaged("invalid pack key");
+if(!payload.build_id.empty()&&(payload.build_id.size()!=kPayloadBuildIdSize||!std::ranges::all_of(payload.build_id,[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');})))return damaged("invalid build id");
 payload.pack_mode=static_cast<PackMode>(pack_mode);
 payload.pack_writable=pack_writable==1;
 payload.host_paths=host_paths==1;

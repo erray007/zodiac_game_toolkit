@@ -5,14 +5,15 @@
 // left out) in two lists, both keeping their order: plain (copied next to the executable as plan 3 does) for each asset
 // packed_in_release refuses (core/project_file.hpp: [pack] enabled false, a [pack] exclude match, a *.zpk file), packed for the rest.
 //
+// new_build_id(): 32 lowercase hex digits of fresh random bytes (`error: cannot make a build id: the entropy source failed`). zodiac
+// build makes it before the link, so the payload carries it (GamePayload::build_id) and the release refuses a pack of another build.
 // write_release_pack(project, key, split, pack_file, build_id):
 // - Creates the pack pack_file (any file of that name is removed first: it is the build's own temporary file) through
 //   pack::PackStorage, sealed with key as a raw key (kdf 0), so every chunk and index follows the storage's nonce rule; no byte of
 //   it is written anywhere else. Each packed asset becomes one entry named by its project-relative path ('/'), with its source
 //   file's modification time (milliseconds, rounded down as the folder source rounds them), so file_modified gives the same in
 //   dev and in the release. The bytes are streamed from the file in the storage's batches and hashed (BLAKE2b-256) as they pass;
-//   no asset is ever held whole in memory. The metadata is `build=<build_id>`, where build_id (set here) is 32 lowercase hex
-//   digits of fresh random bytes.
+//   no asset is ever held whole in memory. The metadata is `build=<build_id>`.
 // - Writes the manifest to <root>/.zodiac/release.manifest.tmp: `zodiac-release-manifest 1`, `build <build_id>`,
 //   `next_patch <n>` (n from the current .zodiac/release.manifest when there is one, else 1), then one line per packed asset,
 //   sorted by path bytes: `<64 hex digits of its BLAKE2b-256> <size> <path>`, every line ending in "\n". commit_release_manifest
@@ -46,7 +47,8 @@ std::vector<std::filesystem::path> packed;
 std::vector<std::filesystem::path> plain;
 };
 AssetSplit split_assets(const Project& project,const std::vector<std::filesystem::path>& assets);
-std::expected<void,std::string> write_release_pack(const Project& project,const crypto::Key& key,const AssetSplit& split,const std::filesystem::path& pack_file,std::string& build_id);
+std::expected<std::string,std::string> new_build_id();
+std::expected<void,std::string> write_release_pack(const Project& project,const crypto::Key& key,const AssetSplit& split,const std::filesystem::path& pack_file,const std::string& build_id);
 std::expected<void,std::string> append_pack(const std::filesystem::path& executable,const std::filesystem::path& pack_file,std::uint32_t payload_crc);
 std::expected<void,std::string> commit_release_manifest(const Project& project);
 void discard_release_manifest(const Project& project) noexcept;

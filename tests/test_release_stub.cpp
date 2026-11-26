@@ -488,14 +488,16 @@ zodiac::crypto::Key key;
 for(std::size_t i=0;i<key.size();++i)key[i]=static_cast<std::uint8_t>(0x5Au^(i*29));
 return key;
 }
-// A release pack holding entries (name, bytes) under key, as bytes.
-std::string release_pack(const std::vector<std::pair<std::string,std::string>>& entries,const zodiac::crypto::Key& key)
+constexpr const char* kBuildId="00112233445566778899aabbccddeeff";
+// A release pack holding entries (name, bytes) under key, as bytes, written by the build build_id (its metadata).
+std::string release_pack(const std::vector<std::pair<std::string,std::string>>& entries,const zodiac::crypto::Key& key,std::string_view build_id=kBuildId)
 {
 const TempDir dir;
 const fs::path path=dir.dir()/"build.zpk";
 {
 auto storage=zodiac::pack::PackStorage::open(path,zodiac::pack::KeySource(key),true);
 REQUIRE(storage);
+REQUIRE((*storage)->set_metadata("build="+std::string(build_id)));
 for(const auto& [name,data]:entries)REQUIRE((*storage)->add(name,std::as_bytes(std::span(data)),0));
 REQUIRE((*storage)->close());
 }
@@ -508,6 +510,7 @@ payload.game_name="packed";
 payload.pack_mode=mode;
 payload.pack_writable=writable;
 payload.pack_key.assign(reinterpret_cast<const char*>(key.data()),key.size());
+payload.build_id=kBuildId;
 }
 // folder/game.exe as zodiac build lays out an embedded pack: 4096 bytes of filler (the linked image), the pack, alignment, the trailer.
 void write_embedded(const fs::path& folder,std::string_view pack_bytes,std::uint32_t payload_crc)
@@ -605,6 +608,29 @@ const Started refused=start_in(folder.dir(),writing);
 INFO(join(refused.lines));
 CHECK(refused.code==0);
 CHECK(read_file(folder.dir()/"packed.zpk")==before);
+}
+
+TEST_CASE("start refuses an external pack of another build")
+{
+const TempDir folder;
+const zodiac::crypto::Key key=release_key();
+zodiac::GamePayload payload=source_payload("",kPackedScript);
+set_pack(payload,zodiac::PackMode::external,key);
+// The same key (one game), another build: an old game.zpk put back, or one whose rename failed.
+write_file(folder.dir()/"packed.zpk",release_pack({{"data/a.txt","from the pack"}},key,"ffeeddccbbaa99887766554433221100"));
+const std::vector<std::string> stale{"error: the game data is damaged (pack \"packed.zpk\" is from another build)"};
+Started started=start_in(folder.dir(),payload);
+CHECK(started.code==2);
+CHECK(started.lines==stale);
+payload.pack_writable=true;
+started=start_in(folder.dir(),payload);
+CHECK(started.code==2);
+CHECK(started.lines==stale);
+// No build id in the payload is a contradiction no build writes.
+payload.build_id.clear();
+started=start_in(folder.dir(),payload);
+CHECK(started.code==2);
+CHECK(started.lines==std::vector<std::string>{"error: the game data is damaged (invalid build id)"});
 }
 
 TEST_CASE("start refuses a missing external pack")

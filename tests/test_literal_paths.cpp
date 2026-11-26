@@ -52,7 +52,8 @@ check(
 "p.open(\"maps.zpk\",\"secret\");\n"
 "p.add_file(\"disk.txt\",\"entry.txt\");\n"
 "p.extract(\"maps/1.txt\",\"data:/1.txt\");\n"
-"q.open(\"other.zpk\",key,false);\n",
+"q.open(\"other.zpk\",key,false);\n"
+"file f;\npack@ p=pack();\nvoid use(pack q){}\n",
 {{1,"r.txt"},{2,"e.txt"},{3,"a.txt"},{4,"s.txt"},{5,"m.txt"},{6,"sounds"},{7,"from.txt"},{8,"from2.txt"},{9,"b.txt"},{10,"maps.zpk"},{11,"disk.txt"},{12,"maps/1.txt",true,"maps.zpk","secret"},{13,"other.zpk"}});
 }
 
@@ -74,7 +75,13 @@ check(
 "p.open(\"new.zpk\",\"k\",true);\n"
 "q.extract(\"x.txt\",\"data:/x.txt\");\n"
 "x.read_file(\"member.txt\");\n"
-"f.open(\"one_argument.txt\");\n",
+"f.open(\"one_argument.txt\");\n"
+"f.open(\"computed_mode.txt\",mode);\n"
+"settings.open(\"config\",\"value\");\n"
+"db.open(\"x.zpk\",\"k\");\n"
+"db.add_file(\"y.txt\",\"y\");\n"
+"db.extract(\"z.txt\",\"data:/z.txt\");\n"
+"file f;\npack p;\npack q;\n",
 {});
 // copy_file's destination is never checked, the source still is.
 check("copy_file(from,\"to.txt\");\ncopy_file(\"from.txt\",\"to.txt\");\n",{{2,"from.txt"}});
@@ -82,14 +89,46 @@ check("copy_file(from,\"to.txt\");\ncopy_file(\"from.txt\",\"to.txt\");\n",{{2,"
 
 TEST_CASE("an extract names only its entry, paired with the nearest literal open of its receiver")
 {
-check("p.extract(\"maps/1.txt\",\"data:/1.txt\");\n",{});
-check("p.open(\"maps.zpk\",\"k\");\np.extract(\"maps/1.txt\",\"data:/1.txt\");\n",{{1,"maps.zpk"},{2,"maps/1.txt",true,"maps.zpk","k"}});
-// A computed key or path leaves nothing to pair with; a later file open of the name drops the pack; another receiver is another pack.
-check("p.open(\"maps.zpk\",key);\np.extract(\"a.txt\",\"b.txt\");\n",{{1,"maps.zpk"}});
-check("p.open(name,\"k\");\np.extract(\"a.txt\",\"b.txt\");\n",{});
-check("p.open(\"m.zpk\",\"k\");\np.open(\"x.txt\",\"w\");\np.extract(\"a.txt\",\"b.txt\");\n",{{1,"m.zpk"}});
-check("p.open(\"m.zpk\",\"k\");\nq.extract(\"a.txt\",\"b.txt\");\n",{{1,"m.zpk"}});
-check("p.open(\"m.zpk\",\"k\");\np.open(\"n.zpk\",\"j\");\np.extract(\"a.txt\",\"b.txt\");\n",{{1,"m.zpk"},{2,"n.zpk"},{3,"a.txt",true,"n.zpk","j"}});
+const std::string packs="pack p;\npack q;\n";
+check("p.extract(\"maps/1.txt\",\"data:/1.txt\");\n"+packs,{});
+check("p.open(\"maps.zpk\",\"k\");\np.extract(\"maps/1.txt\",\"data:/1.txt\");\n"+packs,{{1,"maps.zpk"},{2,"maps/1.txt",true,"maps.zpk","k"}});
+// A computed key or path leaves nothing to pair with; another receiver is another pack.
+check("p.open(\"maps.zpk\",key);\np.extract(\"a.txt\",\"b.txt\");\n"+packs,{{1,"maps.zpk"}});
+check("p.open(name,\"k\");\np.extract(\"a.txt\",\"b.txt\");\n"+packs,{});
+check("p.open(\"m.zpk\",\"k\");\nq.extract(\"a.txt\",\"b.txt\");\n"+packs,{{1,"m.zpk"}});
+check("p.open(\"m.zpk\",\"k\");\np.open(\"n.zpk\",\"j\");\np.extract(\"a.txt\",\"b.txt\");\n"+packs,{{1,"m.zpk"},{2,"n.zpk"},{3,"a.txt",true,"n.zpk","j"}});
+// An undeclared receiver is no pack: nothing is paired or reported. A name declared as a file and as a pack is neither.
+check("r.open(\"m.zpk\",\"k\");\nr.extract(\"a.txt\",\"b.txt\");\n",{});
+check("p.open(\"m.zpk\",\"k\");\np.extract(\"a.txt\",\"b.txt\");\nfile p;\npack p;\n",{});
+}
+
+TEST_CASE("the scan collects literal write targets and mount folders")
+{
+zodiac::cli::LiteralUses uses;
+const std::vector<LiteralPath> reads=find_literal_paths(
+"write_file(\"save.txt\",x);\n"
+"append_file(\"log.txt\",x);\n"
+"copy_file(\"a.txt\",\"copy.txt\");\n"
+"move_file(name,\"moved.txt\");\n"
+"f.open(\"out.txt\",\"w\");\n"
+"f.open(\"in.txt\",\"r\");\n"
+"p.open(\"new.zpk\",\"k\",true);\n"
+"p.extract(\"e.txt\",\"extracted.txt\");\n"
+"mount_pack(p,\"maps\");\n"
+"file f;\npack p;\n",&uses);
+CHECK(uses.written==std::vector<std::string>{"save.txt","log.txt","copy.txt","moved.txt","out.txt","new.zpk","extracted.txt"});
+CHECK(uses.mounted==std::vector<std::string>{"maps"});
+CHECK_FALSE(uses.mounted_at_root);
+REQUIRE(reads.size()==2);
+CHECK(reads[0].path=="a.txt");
+CHECK(reads[1].path=="in.txt");
+// The default folder, and a computed one, may hold any name.
+zodiac::cli::LiteralUses root;
+find_literal_paths("mount_pack(p);\n",&root);
+CHECK(root.mounted_at_root);
+zodiac::cli::LiteralUses computed;
+find_literal_paths("mount_pack(p,folder);\n",&computed);
+CHECK(computed.mounted_at_root);
 }
 
 TEST_CASE("literals decode as the compiler decodes them")

@@ -9,6 +9,7 @@
 #define NOMINMAX
 #include <platform/file.hpp>
 #include <windows.h>
+#include <sddl.h>
 #include <shlobj.h>
 #include <algorithm>
 #include <atomic>
@@ -186,11 +187,26 @@ disposition=OPEN_ALWAYS;
 break;
 case FileAccess::create_new:
 case FileAccess::create_private:
+case FileAccess::create_secret:
 desired|=GENERIC_WRITE;
 disposition=CREATE_NEW;
 break;
 }
-const HANDLE handle=CreateFileW(name.c_str(),desired,share_all,nullptr,disposition,FILE_ATTRIBUTE_NORMAL,nullptr);
+// A secret's own protected DACL: the owner, SYSTEM and Administrators only, nothing inherited from the folder.
+PSECURITY_DESCRIPTOR descriptor=nullptr;
+SECURITY_ATTRIBUTES attributes{};
+if(access==FileAccess::create_secret){
+if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)",SDDL_REVISION_1,&descriptor,nullptr))return std::unexpected(last_error());
+attributes.nLength=sizeof attributes;
+attributes.lpSecurityDescriptor=descriptor;
+attributes.bInheritHandle=FALSE;
+}
+const HANDLE handle=CreateFileW(name.c_str(),desired,share_all,descriptor?&attributes:nullptr,disposition,FILE_ATTRIBUTE_NORMAL,nullptr);
+if(descriptor){
+const DWORD saved=GetLastError();
+LocalFree(descriptor);
+SetLastError(saved);
+}
 if(handle!=INVALID_HANDLE_VALUE)return File(reinterpret_cast<std::intptr_t>(handle));
 const DWORD error=GetLastError();
 // A folder cannot be opened without FILE_FLAG_BACKUP_SEMANTICS, which reports it as access denied.
@@ -459,6 +475,17 @@ if(renamed)return true;
 }
 // File systems without POSIX renames (FAT, older Windows, some network shares).
 if(MoveFileExW(source.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))return true;
+error=last_error();
+return false;
+}
+
+bool rename_no_replace(const fs::path& from,const fs::path& to,std::error_code& error)
+{
+error.clear();
+const NativePath source(from);
+const NativePath target(to);
+// Without MOVEFILE_REPLACE_EXISTING an existing target fails the move (ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS: EEXIST).
+if(MoveFileExW(source.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH))return true;
 error=last_error();
 return false;
 }

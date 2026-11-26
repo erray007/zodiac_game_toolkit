@@ -25,7 +25,8 @@
 //    literal-path warnings of check_literal_paths (cli/literal_paths.hpp) follow, for every compiled script, against every asset
 //    and the files the build ships (warnings only). The payload (kit_version ZODIAC_VERSION; requested: static then dynamic names
 //    as the runtime loads them; modules: registration order with versions; pack_mode, pack_writable ([pack] writable, with a pack)
-//    and pack_key; host_paths) is written as <output>/<name>.zodpay.obj and linked by link_release to <output>/<name>.exe.tmp.
+//    and pack_key; host_paths; build_id, made by new_build_id with a pack) is written as <name>.zodpay.obj (in <root>/.zodiac with a
+//    pack, since it holds the key in clear, else in <output>) and linked by link_release to <output>/<name>.exe.tmp.
 //    Then the pack is written by write_release_pack to <output>/<name>.zpk.tmp (with .zodiac/release.manifest.tmp) and, embedded,
 //    appended to <name>.exe.tmp with its trailer by append_pack (pack/release_pack.hpp has the layout), before the signing, so the
 //    signature covers it. The key is wiped from every buffer the build made once it is done.
@@ -49,8 +50,11 @@
 //    replace "<file>": it is in use (is the game still running?)"; any other failure (a read-only file, a folder of that name): "error:
 //    cannot replace "<file>": <system reason>" (exit 2). A build that fails up to and including the executable's replace (a link, pack,
 //    copy or signing failure included) leaves the old executable, DLLs and pack untouched, and no temporary file (.tmp, .obj, .rsp,
-//    .zpk.tmp, .zodiac/release.manifest.tmp) is left behind, whatever happened. Once every rename is done, .zodiac/release.manifest.tmp
+//    .zpk.tmp, .zodiac/release.manifest.tmp, .zodiac/<name>.zodpay.obj) is left behind, whatever happened. Once every rename is done, .zodiac/release.manifest.tmp
 //    replaces .zodiac/release.manifest (commit_release_manifest), so the manifest changes only with a release that is in place.
+//    The executable goes first, so a game still running stops the build before anything changed; an external pack whose rename
+//    then fails leaves the new executable with the old <name>.zpk, which the release refuses ("pack "<name>.zpk" is from another
+//    build", pack/release_pack.hpp) rather than serving stale assets.
 // 7. The plain assets are copied keeping their project-relative paths. A failure from the DLL renames on leaves the new executable in
 //    place, with the files replaced before the failure (each copy replaces its file whole) and the rest as an earlier build left them.
 //    Stale files of earlier builds in the output folder are never removed (an earlier build's <name>.zpk next to an embedded one is

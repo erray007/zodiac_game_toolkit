@@ -19,6 +19,7 @@ constexpr std::size_t kHexDigits=64;
 constexpr std::size_t kLongestFile=kHexDigits+2;
 constexpr char kKeyName[]=".zodiac/pack.key";
 constexpr char kIgnoreName[]=".zodiac/.gitignore";
+constexpr char kCreatedLine[]="created .zodiac/pack.key; back it up, later builds and patches need it";
 
 std::string damaged()
 {
@@ -84,8 +85,9 @@ key[i]=static_cast<std::uint8_t>(high<<4|low);
 return key;
 }
 
-// Adds a "pack.key" line to .zodiac/.gitignore unless one is there.
-std::expected<void,std::string> ignore_key(const fs::path& folder)
+// Adds a "*" line to .zodiac/.gitignore unless one is there, so git ignores everything in .zodiac/: the key, a temporary name of
+// it a crash left behind, the payload object holding it, the manifest.
+std::expected<void,std::string> ignore_folder(const fs::path& folder)
 {
 const fs::path path=folder/".gitignore";
 auto file=platform::File::open(path,platform::FileAccess::create_or_open);
@@ -101,23 +103,32 @@ for(std::string_view rest=text;!rest.empty();){
 const std::size_t end=rest.find('\n');
 std::string_view line=rest.substr(0,end);
 if(line.ends_with('\r'))line.remove_suffix(1);
-if(line=="pack.key"||line=="/pack.key")return {};
+if(line=="*")return {};
 if(end==std::string_view::npos)break;
 rest.remove_prefix(end+1);
 }
 std::string added;
 if(!text.empty()&&!text.ends_with('\n'))added.push_back('\n');
-added.append("pack.key\n");
+added.append("*\n");
 if(auto written=file->write_at(text.size(),std::as_bytes(std::span(added)));!written)return std::unexpected(cannot("write",kIgnoreName,written.error()));
 return {};
 }
 
-std::expected<crypto::Key,std::string> create_key(const fs::path& folder,const fs::path& path)
+// The key in the file at path, read after another build made it (open_error as read_key's).
+std::expected<crypto::Key,std::string> read_made_key(const fs::path& path)
+{
+std::error_code open_error;
+auto existing=read_key(path,open_error);
+if(!existing&&existing.error().empty())return std::unexpected(cannot("read",kKeyName,open_error));
+return existing;
+}
+
+std::expected<crypto::Key,std::string> create_key(const fs::path& folder,const fs::path& path,const fs::path& temporary)
 {
 std::error_code error;
 fs::create_directories(folder,error);
 if(error)return std::unexpected(cannot("write",kKeyName,error));
-if(auto ignored=ignore_key(folder);!ignored)return std::unexpected(std::move(ignored.error()));
+if(auto ignored=ignore_folder(folder);!ignored)return std::unexpected(std::move(ignored.error()));
 crypto::Key key;
 try{
 crypto::random_bytes(std::as_writable_bytes(std::span(key)));
@@ -132,41 +143,38 @@ text.bytes[2*i]=digits[key[i]>>4];
 text.bytes[2*i+1]=digits[key[i]&0xFu];
 }
 text.bytes[kHexDigits]='\n';
-const fs::path temporary=folder/"pack.key.tmp";
-// A temporary file a crashed build left behind holds no key anyone used: it never got the real name.
-platform::discard_file(temporary);
 const auto fail=[&](std::string line)->std::expected<crypto::Key,std::string>{
 crypto::wipe(key.data(),key.size());
 platform::discard_file(temporary);
 return std::unexpected(std::move(line));
 };
+// Another build made the key in between: that one is the game's, and this one was never used.
+const auto made_elsewhere=[&]{
+crypto::wipe(key.data(),key.size());
+platform::discard_file(temporary);
+return read_made_key(path);
+};
 {
-auto file=platform::File::open(temporary,platform::FileAccess::create_private);
+auto file=platform::File::open(temporary,platform::FileAccess::create_secret);
 if(!file)return fail(cannot("write",kKeyName,file.error()));
 if(auto written=file->write_at(0,std::as_bytes(std::span(text.bytes)));!written)return fail(cannot("write",kKeyName,written.error()));
 if(auto synced=file->sync_data();!synced)return fail(cannot("write",kKeyName,synced.error()));
 }
 fs::create_hard_link(temporary,path,error);
 if(error){
-// Made by another build in between: that key is the game's, and this one was never used.
 std::error_code exists_error;
-if(fs::exists(path,exists_error)){
-crypto::wipe(key.data(),key.size());
-platform::discard_file(temporary);
-std::error_code open_error;
-auto existing=read_key(path,open_error);
-if(!existing&&existing.error().empty())return std::unexpected(cannot("read",kKeyName,open_error));
-return existing;
+if(fs::exists(path,exists_error))return made_elsewhere();
+// No hard links on this file system: a rename that never replaces (an existing key is never overwritten, even in a race).
+if(!platform::rename_no_replace(temporary,path,error)){
+if(platform::error_kind(error)==platform::ErrorKind::exists)return made_elsewhere();
+return fail(cannot("write",kKeyName,error));
 }
-// No hard links on this file system: a rename, now that the name was seen free.
-error.clear();
-fs::rename(temporary,path,error);
-if(error)return fail(cannot("write",kKeyName,error));
 }
+// Until this name goes the key has two (a crash here leaves it in .zodiac/, which .gitignore covers, and the next load removes it).
 platform::discard_file(temporary);
 const std::error_code synced=platform::sync_directory(folder);
 // The key has its name now, so the developer hears about it even when the folder's flush failed (and the build stops).
-platform::write_stdout_line("created .zodiac/pack.key; back it up, later builds and patches need it");
+platform::write_stdout_line(kCreatedLine);
 if(synced)return fail(cannot("write",kKeyName,synced));
 return key;
 }
@@ -176,10 +184,23 @@ std::expected<crypto::Key,std::string> load_or_create_pack_key(const fs::path& r
 {
 const fs::path folder=root/".zodiac";
 const fs::path path=folder/"pack.key";
+const fs::path temporary=folder/"pack.key.tmp";
 std::error_code open_error;
 auto key=read_key(path,open_error);
-if(key||!key.error().empty())return key;
+if(key){
+// A temporary name a crash left behind is a second name of this key (a crash after the link) or a key never used (one before
+// it): either way it goes, and the folder stays ignored by git (a project from before the "*" line gets it now).
+platform::discard_file(temporary);
+if(auto ignored=ignore_folder(folder);!ignored){
+crypto::wipe(key->data(),key->size());
+return std::unexpected(std::move(ignored.error()));
+}
+return key;
+}
+if(!key.error().empty())return key;
 if(platform::error_kind(open_error)!=platform::ErrorKind::not_found)return std::unexpected(cannot("read",kKeyName,open_error));
-return create_key(folder,path);
+// With no key, a temporary file holds a key that never got its name, so no build ever used it.
+platform::discard_file(temporary);
+return create_key(folder,path,temporary);
 }
 }

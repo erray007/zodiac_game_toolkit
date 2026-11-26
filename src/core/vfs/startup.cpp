@@ -15,10 +15,14 @@
 namespace zodiac::vfs {
 namespace {
 // The dev mode release pack check of mount_project (startup.hpp): what zodiac build would put into a read-only pack.
+// Every pattern and name is folded (fold_name), and so is the path asked about: the check matches as the VFS looks names up, so a
+// write spelled "Sounds/a.ogg" counts for "sounds/**" ('*', '?' and '/' fold to themselves).
 class ReleasePackCheck{
 public:
-explicit ReleasePackCheck(const Project& project):assets_(project.build.assets),pack_(project.pack)
+explicit ReleasePackCheck(const Project& project):zpk_(fold_name(".zpk"))
 {
+for(const std::string& pattern:project.build.assets)assets_.push_back(fold_name(pattern));
+for(const std::string& pattern:project.pack.exclude)exclude_.push_back(fold_name(pattern));
 // expand_assets never ships these, whatever the patterns say: zodiac.toml, the project file, release/ and .zodiac/ in the root.
 skipped_files_.push_back(fold_name("zodiac.toml"));
 if(!project.file.empty())skipped_files_.push_back(fold_name(path_to_utf8(project.file.filename())));
@@ -27,20 +31,27 @@ skipped_folders_.push_back(fold_name(".zodiac"));
 }
 bool operator()(std::string_view relative) const
 {
-if(std::ranges::none_of(assets_,[relative](const std::string& pattern){return glob_match(pattern,relative);}))return false;
-if(!packed_in_release(pack_,relative))return false;
-const std::size_t cut=relative.find('/');
-// Folded on the stack: a first segment too long for the buffer is longer than every skipped name.
-char buffer[256];
-const std::size_t length=fold_into(relative.substr(0,cut),buffer,sizeof buffer);
-if(length==SIZE_MAX)return true;
-const std::string_view first(buffer,length);
+// Folded on the stack for every usual path; a longer one into a string.
+char buffer[1024];
+std::string long_fold;
+std::size_t length=fold_into(relative,buffer,sizeof buffer);
+std::string_view fold;
+if(length==SIZE_MAX){
+long_fold=fold_name(relative);
+fold=long_fold;
+}
+else fold=std::string_view(buffer,length);
+const auto matches=[fold](const std::string& pattern){return glob_match(pattern,fold);};
+if(std::ranges::none_of(assets_,matches)||std::ranges::any_of(exclude_,matches)||fold.ends_with(zpk_))return false;
+const std::size_t cut=fold.find('/');
+const std::string_view first=fold.substr(0,cut);
 const std::vector<std::string>& skipped=cut==std::string_view::npos?skipped_files_:skipped_folders_;
 return std::ranges::find(skipped,first)==skipped.end();
 }
 private:
 std::vector<std::string> assets_;
-PackConfig pack_;
+std::vector<std::string> exclude_;
+std::string zpk_;
 std::vector<std::string> skipped_files_;
 std::vector<std::string> skipped_folders_;
 };

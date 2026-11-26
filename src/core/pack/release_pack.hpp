@@ -17,7 +17,9 @@
 //   before the trailer. The result is the window PackStorage::open takes. A file too short for a trailer is refused without a
 //   read outside it. The error names what is wrong (never shown to players: mount_release reports the damaged text).
 // - release_pack_key(payload): the pack key. It is the one function through which a release reads its key, so the protection
-//   plan can replace the payload's plain copy with a hidden form without touching anything else.
+//   plan can replace the payload's plain copy with a hidden form without touching anything else. Until that plan, the key sits
+//   in the payload of every packed executable in clear: the pack's encryption only keeps casual readers out (obfuscation),
+//   since anyone who has the shipped executable can extract the key and read or change every pack and patch of the game.
 // - mount_release(vfs, payload, payload_crc, executable, diagnostics): mount_game_folders(vfs, the executable's folder, the game
 //   name, payload.host_paths, release mode), then, unless pack_mode is none, opens the build pack (embedded: through the trailer,
 //   read only; external: "<game>.zpk" in the executable's folder) and mounts it at "/" in front of the folder, writable when
@@ -29,12 +31,16 @@
 //   - `error: the game data is damaged (pack: wrong key or damaged pack)`: no valid trailer, a trailer of another build, or a pack
 //     the key does not open (or that fails its checks); `(pack: unsupported pack (newer format))` for a pack of a newer format;
 //   - `error: the game data is damaged (pack "<game>.zpk" is missing)`;
+//   - `error: the game data is damaged (pack "<game>.zpk" is from another build)`: the external pack's metadata has no line
+//     `build=<payload.build_id>` (an embedded pack of another build has a trailer of another payload and is refused as damaged);
+//   - `error: the game data is damaged (invalid build id)`: a pack mode without a build id;
 //   - `error: "<game>.zpk" is in use by another program`: a writable pack another running copy of the game holds;
 //   - `error: cannot read "<file>": <reason>` (the executable's or the pack's file name) for any other system failure;
 //   - `error: the game data is damaged (invalid pack key)` or `(invalid pack or file setting)` for a payload whose pack fields
 //     contradict each other (a key that is not 32 bytes with a pack, writable without external);
 //   - `error: cannot mount the game data: out of memory`.
-// Notes for the user documentation (Task 14): a writable release pack ([pack] writable) is mounted at "/", so every write to a
+// Notes for the user documentation (Task 14): until the protection plan, a release pack is obfuscation, not protection: its key is
+// in clear in the executable it ships with. A writable release pack ([pack] writable) is mounted at "/", so every write to a
 // name outside data:/ goes into the pack; a game started twice with a writable pack refuses the second start ("in use").
 // Threads: the main thread, before the script runs.
 #pragma once

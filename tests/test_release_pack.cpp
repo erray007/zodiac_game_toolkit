@@ -8,7 +8,9 @@
 #include <core/pack/pack_storage.hpp>
 #include <core/pack/release_pack.hpp>
 #include <core/payload.hpp>
+#include <core/project_file.hpp>
 #include <core/vfs/folder_source.hpp>
+#include <core/vfs/startup.hpp>
 #include <core/vfs/vfs.hpp>
 #include <doctest/doctest.h>
 #include <platform/entropy.hpp>
@@ -343,4 +345,39 @@ REQUIRE(vfs.write_file("data/a.txt",std::as_bytes(std::span(text))));
 REQUIRE(vfs.write_file("data/a.txt",std::as_bytes(std::span(text))));
 CHECK(lines==std::vector<std::string>{"warning: \"data/a.txt\" is written in a folder here, but the release puts it in a read-only pack, where writing fails; save files in data:/ instead"});
 REQUIRE((*storage)->close());
+}
+
+TEST_CASE("zodiac run's release pack check matches names as the VFS does")
+{
+const TempDir temp;
+zodiac::Project project;
+project.root=temp.path/"game";
+project.name="game";
+project.build.assets={"sounds/**"};
+project.pack.exclude={"sounds/plain/**"};
+fs::create_directories(project.root/"Sounds"/"Plain");
+zodiac::vfs::Vfs vfs;
+std::vector<std::string> lines;
+vfs.set_log([&lines](zodiac_log_level,std::string_view line){lines.emplace_back(line);});
+zodiac::vfs::mount_project(vfs,project,true);
+const std::string_view text="x";
+// Spelled as on disk, so no spelling warning: only the release pack check speaks, matching "sounds/**" by fold.
+REQUIRE(vfs.write_file("Sounds/a.ogg",std::as_bytes(std::span(text))));
+// An excluded asset and a pack shipped as a plain file are no packed names; neither is a file outside the patterns.
+REQUIRE(vfs.write_file("Sounds/Plain/b.ogg",std::as_bytes(std::span(text))));
+REQUIRE(vfs.write_file("Sounds/extra.ZPK",std::as_bytes(std::span(text))));
+REQUIRE(vfs.write_file("notes.txt",std::as_bytes(std::span(text))));
+CHECK(lines==std::vector<std::string>{"warning: \"Sounds/a.ogg\" is written in a folder here, but the release puts it in a read-only pack, where writing fails; save files in data:/ instead"});
+// A writable release pack, or packing off, sets no check at all.
+for(const bool writable:{true,false}){
+zodiac::Project other=project;
+other.pack.writable=writable;
+other.pack.enabled=writable;
+zodiac::vfs::Vfs quiet;
+std::vector<std::string> said;
+quiet.set_log([&said](zodiac_log_level,std::string_view line){said.emplace_back(line);});
+zodiac::vfs::mount_project(quiet,other,true);
+REQUIRE(quiet.write_file("Sounds/c.ogg",std::as_bytes(std::span(text))));
+CHECK(said.empty());
+}
 }

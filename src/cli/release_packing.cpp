@@ -197,19 +197,24 @@ const std::string relative=relative_text(asset,project.root);
 return split;
 }
 
-std::expected<void,std::string> write_release_pack(const Project& project,const crypto::Key& key,const AssetSplit& split,const fs::path& pack_file,std::string& build_id)
+std::expected<std::string,std::string> new_build_id()
 {
-const auto patch=next_patch(project);
-if(!patch)return std::unexpected(patch.error());
 std::array<std::uint8_t,16> id;
 try{
 crypto::random_bytes(std::as_writable_bytes(std::span(id)));
 }
 catch(const std::runtime_error&){
-return std::unexpected(cannot("write",path_to_utf8(pack_file),"the entropy source failed"));
+return std::unexpected(std::string("error: cannot make a build id: the entropy source failed"));
 }
-build_id.clear();
-append_hex(build_id,id);
+std::string text;
+append_hex(text,id);
+return text;
+}
+
+std::expected<void,std::string> write_release_pack(const Project& project,const crypto::Key& key,const AssetSplit& split,const fs::path& pack_file,const std::string& build_id)
+{
+const auto patch=next_patch(project);
+if(!patch)return std::unexpected(patch.error());
 platform::discard_file(pack_file);
 auto storage=pack::PackStorage::open(pack_file,pack::KeySource(key),true);
 if(!storage)return std::unexpected("error: "+vfs::failure_text(storage.error().action,path_to_utf8(pack_file),storage.error().failure));

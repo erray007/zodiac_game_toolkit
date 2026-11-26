@@ -134,6 +134,8 @@ zodiac_add_test(test_pack SOURCES test_pack.cpp script_fixture.hpp LIBRARIES zod
 zodiac_add_test(test_pack_mount SOURCES test_pack_mount.cpp script_fixture.hpp sparse_file.cpp sparse_file.hpp LIBRARIES zodiac_core)
 zodiac_add_test(test_release_pack SOURCES test_release_pack.cpp LIBRARIES zodiac_core)
 zodiac_add_test(test_literal_paths SOURCES test_literal_paths.cpp LIBRARIES zodiac_cli)
+# Replaces the global operator new to see the largest allocation, so it is an executable of its own.
+zodiac_add_test(test_release_packing SOURCES test_release_packing.cpp sparse_file.cpp sparse_file.hpp LIBRARIES zodiac_cli)
 zodiac_add_test(test_script_literals SOURCES test_script_literals.cpp script_fixture.hpp LIBRARIES zodiac_core angelscript_literal_scanner)
 zodiac_add_test(test_module_registry SOURCES test_module_registry.cpp script_fixture.hpp LIBRARIES zodiac_core)
 target_compile_definitions(test_module_registry PRIVATE

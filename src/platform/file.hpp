@@ -31,8 +31,11 @@ namespace zodiac::platform {
 // read and read_write open an existing file; create_truncate creates it or empties it; create_or_open creates it or keeps its bytes;
 // create_new creates it and fails with EEXIST when anything is there (O_EXCL, CREATE_NEW: never through a link); create_private
 // is create_new with POSIX mode 0600 (a temporary file that takes another file's mode with copy_mode only once it is complete).
+// create_secret is create_new for a secret (the release pack key): POSIX mode 0600; on Windows a protected DACL (inherited entries
+// dropped) granting full access only to the owner, SYSTEM and the Administrators group ("D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)").
+// A rename or a hard link keeps it, since the descriptor belongs to the file.
 // Every mode but read opens the file for writing too. Opening a folder fails with EISDIR in every mode.
-enum class FileAccess{read,read_write,create_truncate,create_or_open,create_new,create_private};
+enum class FileAccess{read,read_write,create_truncate,create_or_open,create_new,create_private,create_secret};
 // Equal for two paths or handles of one file (links and other spellings included), different for different files.
 struct FileIdentity{
 std::uint64_t volume=0;
@@ -122,6 +125,11 @@ std::error_code remove_directory(const std::filesystem::path& path);
 enum class ErrorKind{not_found,not_a_directory,is_directory,access_denied,exists,not_empty,cross_device,disk_full,other};
 ErrorKind error_kind(const std::error_code& code) noexcept;
 bool replace_file(const std::filesystem::path& from,const std::filesystem::path& to,std::error_code& error);
+// Moves from to to only when nothing is at to: EEXIST (error_kind exists) otherwise, and nothing changes. MoveFileExW without
+// MOVEFILE_REPLACE_EXISTING (and with MOVEFILE_WRITE_THROUGH) on Windows; renameat2(RENAME_NOREPLACE) on Linux, renamex_np(RENAME_EXCL)
+// on macOS, and elsewhere (or where the file system refuses those) link() then unlink(), which never replaces either. A system
+// that can do none of them fails with its error, never with a replacing rename.
+bool rename_no_replace(const std::filesystem::path& from,const std::filesystem::path& to,std::error_code& error);
 // The identity of the file at path (links followed); a folder has one too.
 std::expected<FileIdentity,std::error_code> file_identity(const std::filesystem::path& path);
 struct CopyResult{
