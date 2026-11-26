@@ -105,6 +105,9 @@ std::int64_t modified_utc_ms=0;
 std::string name;
 // From a listing: fold_name(name) when the source already has it (Vfs::list folds the name itself otherwise); empty from stat.
 std::string fold;
+// From stat, for a directory: a deletion marker of this name lies in the same source too (a pack folder that is also a
+// deleted file's name), so the older files of the name stay hidden when the folder itself is not shown.
+bool marked=false;
 };
 enum class WriteMode{truncate,append,update};
 enum class ListKind{files,directories};
@@ -194,10 +197,16 @@ virtual EntriesBelow count_below(std::string_view relative);
 // Appends the name (below the source's root, as stored) of every deletion marker at any depth below folder relative, visiting
 // only that folder's markers. The default (a source without markers) appends nothing.
 virtual void markers_below(std::string_view relative,std::vector<std::string>& out);
-// Stores a deletion marker at relative (no file of this source is there), so an older mount's file of that name stays hidden:
-// true when stored, false from a source that holds no markers (the default; a folder). A recursive delete_directory asks it for
-// every older file below the folder it removed.
-virtual std::expected<bool,FileError> leave_marker(std::string_view relative);
+// True for a source that can hold deletion markers (a pack); the default (a host folder) is false.
+virtual bool holds_markers() const noexcept;
+// Appends the path below folder relative ("a.txt", "deep/b.txt") of every file at any depth below it, each source walking its
+// subtree once. The default walks list() folder by folder (a host folder); a pack scans its entries once.
+virtual void files_below(std::string_view relative,std::vector<std::string>& out);
+// A recursive remove_directory of relative that, at once (no change of this source can come between), also stores a deletion
+// marker for each of markers (names below the source's root, below relative) that has no entry here after the removal, so the
+// older files of those names stay hidden and a file another thread writes later is never replaced by one. Every name is checked
+// first: on any failure nothing has changed. Only asked of a source that holds_markers; the default is remove_directory.
+virtual std::expected<void,FileError> remove_directory_leaving(std::string_view relative,const std::vector<std::string>& markers);
 };
 struct Failure{
 FileError code=FileError::io;
@@ -297,8 +306,9 @@ std::expected<std::vector<std::string>,Failure> list(std::string_view path,ListK
 // Creates the folder (and, when recursive, every missing folder above it). An existing folder is a success.
 std::expected<void,Failure> create_directory(std::string_view path,bool recursive);
 // Removes the folder (with everything in it when recursive; it must be empty otherwise). A mount's own folder is never removed (access_denied).
-// Recursive, in a mount that holds deletion markers (a writable pack), it then leaves a marker (Source::leave_marker) for every
-// file below the folder that an older mount still provides, as remove does for one file: the folder's files stay deleted, an
+// Recursive, in a mount that holds deletion markers (a writable pack), it also leaves a marker, in the same change of that source
+// (Source::remove_directory_leaving: all or nothing, and never over a file written meanwhile), for every file below the folder
+// that an older mount still provides, as remove does for one file: the folder's files stay deleted, an
 // older pack's folder goes too (D1), and an older host folder stays as an empty folder (its files hidden, the folder itself
 // a host folder's own). In a host folder over older mounts their files show again (it cannot hold markers).
 std::expected<void,Failure> delete_directory(std::string_view path,bool recursive);
@@ -373,15 +383,18 @@ static bool visit_covering(const Table& table,const VfsPath& p,Visit&& visit);
 static bool leads_to_mount(const Table& table,const VfsPath& p);
 // What one mount answers in a lookup (decide): nothing there, a file, a folder, a deletion marker, or a failure (the caller's
 // ask kept it) that ends the lookup.
-enum class Seen{none,file,directory,marker,stop};
+// marked_directory is a folder of a source that also holds a marker of its name: decide gives it as directory when the folder is
+// shown, and as a marker (the older files of the name hidden) when it is not.
+enum class Seen{none,file,directory,marked_directory,marker,stop};
 struct Decided{
 Target target;
 Seen seen=Seen::none;
 };
-// What a source's stat result of kind kind is in a lookup.
-static constexpr Seen seen_of(EntryKind kind) noexcept
+// What a source's stat result is in a lookup.
+static constexpr Seen seen_of(const EntryInfo& info) noexcept
 {
-return kind==EntryKind::file?Seen::file:kind==EntryKind::directory?Seen::directory:kind==EntryKind::deleted?Seen::marker:Seen::none;
+const EntryKind kind=info.kind;
+return kind==EntryKind::file?Seen::file:kind==EntryKind::directory?(info.marked?Seen::marked_directory:Seen::directory):kind==EntryKind::deleted?Seen::marker:Seen::none;
 }
 // The lookup order of every reading operation (see Resolution): asks the mounts covering p newest first (only those older than
 // after, when after is set) through ask(Target)->Seen, until one decides: a file that no newer marker hides, a folder that
@@ -389,9 +402,13 @@ return kind==EntryKind::file?Seen::file:kind==EntryKind::directory?Seen::directo
 // passes the lookup on. seen is none when no mount decided.
 template<class Ask>
 static Decided decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask);
+// A source's folder that an open_read found (is_directory): marked_directory when a marker of its name lies there too (stat's
+// EntryInfo::marked), else directory. Asked only for folders, so file reads cost nothing more.
+static Seen folder_seen(Source& source,std::string_view sub);
 // Whether the folder p that mount holds (sub below it) is shown: always for a source without implied folders and for a mount's own
 // folder; otherwise when the folder holds more files than the newer mounts covering p hold markers below it, or, failing that,
-// more files than there are distinct names among those markers that are files of the folder (each hides exactly one).
+// more files than there are distinct names among those markers that are files of the folder and that a lookup (decide, as stat
+// does) does not give as this mount's file.
 static bool folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub);
 std::expected<VfsPath,Failure> parse_failure(std::string_view path) const;
 Failure ambiguous_failure(std::string_view path,const Target& target) const;

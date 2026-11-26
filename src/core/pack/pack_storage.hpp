@@ -84,6 +84,11 @@
 //   they keep their id, so no nonce is used again. from missing (or a marker) is not_found (MoveError::to false); to a folder
 //   of the pack is is_directory, an invalid to is bad_path (to true).
 // - remove_folder removes every file entry below a folder (markers stay) and returns how many; none is not_found.
+// - remove_folder_leaving does the same and, in that one change (under the writer mutex, published at once), stores a marker
+//   for every name of markers (canonical entry names below the folder, else bad_path) that has no entry left after the
+//   removal: a removed file's entry becomes the marker in place; an existing marker stays. Every name is checked, and every
+//   node made, before anything changes, so a failure changes nothing; a file another thread adds later replaces its marker as
+//   any add does, never the other way round. Its folder being a file is not_a_directory, no file below it not_found.
 // Lookups: names are compared by fold_name, as VFS paths are. stat gives the entry (EntryInfo::name its last segment as asked),
 // or a directory for a folder of the pack: a name that some file entry's name continues with '/' (folders hold no markers of
 // their own, and a folder holding only markers is none). A marker is a file's (it hides older files of its name, never a
@@ -195,6 +200,8 @@ std::uint64_t markers=0;
 };
 Below count_below(std::string_view folder) const;
 void markers_below(std::string_view folder,std::vector<std::string>& out) const;
+void files_below(std::string_view folder,std::vector<std::string>& out) const;
+std::expected<std::size_t,vfs::FileError> remove_folder_leaving(std::string_view folder,const std::vector<std::string>& markers);
 std::expected<void,vfs::MoveError> rename(std::string_view from,std::string_view to);
 std::expected<std::size_t,vfs::FileError> remove_folder(std::string_view folder);
 std::expected<void,vfs::FileError> flush();

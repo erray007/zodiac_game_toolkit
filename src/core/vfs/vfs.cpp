@@ -345,9 +345,32 @@ void Source::markers_below(std::string_view,std::vector<std::string>&)
 {
 }
 
-std::expected<bool,FileError> Source::leave_marker(std::string_view)
+bool Source::holds_markers() const noexcept
 {
 return false;
+}
+
+void Source::files_below(std::string_view relative,std::vector<std::string>& out)
+{
+// Depth first through an explicit stack of (the folder below the source's root, the same folder below relative).
+std::vector<std::pair<std::string,std::string>> folders{{std::string(relative),std::string()}};
+std::vector<EntryInfo> entries;
+while(!folders.empty()){
+auto [at,rest]=std::move(folders.back());
+folders.pop_back();
+entries.clear();
+if(!list(at,entries))continue;
+for(EntryInfo& entry:entries){
+std::string name=rest.empty()?entry.name:rest+"/"+entry.name;
+if(entry.kind==EntryKind::directory)folders.emplace_back(at.empty()?entry.name:at+"/"+entry.name,std::move(name));
+else if(entry.kind==EntryKind::file)out.push_back(std::move(name));
+}
+}
+}
+
+std::expected<void,FileError> Source::remove_directory_leaving(std::string_view relative,const std::vector<std::string>&)
+{
+return remove_directory(relative,true);
 }
 
 Vfs::Vfs():table_(std::make_shared<const Table>()),host_(std::make_shared<HostSource>()),checked_(std::make_unique<std::atomic<std::uint64_t>[]>(checked_slots))
@@ -408,6 +431,12 @@ return std::string_view(entry->at_fold).substr(0,prefix_end(entry->at_fold,count
 });
 }
 
+Vfs::Seen Vfs::folder_seen(Source& source,std::string_view sub)
+{
+const auto info=source.stat(sub);
+return info&&info->marked?Seen::marked_directory:Seen::directory;
+}
+
 template<class Ask>
 Vfs::Decided Vfs::decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask)
 {
@@ -433,6 +462,14 @@ break;
 case Seen::directory:
 if(!folder_shown(table,p,target.mount,target.sub))return false;
 break;
+case Seen::marked_directory:
+// Not shown, the folder is no folder, and its marker still hides the older files of the name.
+if(!folder_shown(table,p,target.mount,target.sub)){
+hidden=true;
+return false;
+}
+decided=Decided{target,Seen::directory};
+return true;
 case Seen::stop:
 break;
 }
@@ -457,29 +494,46 @@ markers+=target.mount->source->count_below(target.sub).markers;
 return false;
 });
 if(files>markers)return true;
-// Otherwise the newer markers below p (each mount visits only that folder's markers) are matched against this mount's files,
-// each name once; the folder is shown while a file is left.
-std::uint64_t hidden=0;
+// Otherwise only the files the newer markers below p name (each mount visits only that folder's markers; each name once) can
+// be hidden. Each one that is a file of this mount is decided as stat decides it (decide, so a newer folder that is also a
+// marker counts exactly as in a lookup), and the folder is shown while one file of it is left.
+std::vector<std::string> candidates;
 std::unordered_set<std::string> seen;
 std::vector<std::string> names;
-std::string relative;
 visit_covering(table,p,[&](const Target& target){
 if(target.mount==mount)return true;
 names.clear();
 target.mount->source->markers_below(target.sub,names);
 const std::size_t skip=segment_count(target.sub);
-for(const std::string& name:names){
+for(std::string& name:names){
 // The marker's name below p: its first segments are target.sub's (by fold).
 const std::size_t start=skip?prefix_end(name,skip):std::string::npos;
-const std::string_view rest=skip?(start<name.size()?std::string_view(name).substr(start+1):std::string_view()):std::string_view(name);
-if(rest.empty()||!seen.insert(fold_name(rest)).second)continue;
-relative.assign(sub).push_back('/');
-relative.append(rest);
-const auto info=mount->source->stat(relative);
-if(info&&info->kind==EntryKind::file)++hidden;
+if(skip&&start>=name.size())continue;
+std::string rest=skip?name.substr(start+1):std::move(name);
+if(!rest.empty()&&seen.insert(fold_name(rest)).second)candidates.push_back(std::move(rest));
 }
 return false;
 });
+std::uint64_t hidden=0;
+std::string relative;
+VfsPath file;
+file.mount=p.mount;
+for(const std::string& rest:candidates){
+relative.assign(sub).push_back('/');
+relative.append(rest);
+const auto info=mount->source->stat(relative);
+if(!info||info->kind!=EntryKind::file)continue;
+file.relative.assign(p.relative).push_back('/');
+file.relative.append(rest);
+// A failure decides nothing here: the file then counts as shown (a folder too many is safe).
+const Decided decided=decide(table,file,nullptr,[](const Target& target){
+const auto got=target.mount->source->stat(target.sub);
+if(!got)return fall_through(got.error())?Seen::none:Seen::stop;
+return seen_of(*got);
+});
+if(decided.seen==Seen::stop||(decided.seen==Seen::file&&decided.target.mount==mount))continue;
+++hidden;
+}
 return files>hidden;
 }
 
@@ -733,7 +787,7 @@ failure=got.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure
 return Seen::stop;
 }
 info=std::move(*got);
-return seen_of(info.kind);
+return seen_of(info);
 });
 if(mount_folder)return decided.seen==Seen::directory?info:as_folder();
 if(decided.seen==Seen::stop)return std::unexpected(std::move(*failure));
@@ -767,7 +821,7 @@ if(!*got)return Seen::marker;
 reader=std::move(*got);
 return Seen::file;
 }
-if(got.error()==FileError::is_directory)return Seen::directory;
+if(got.error()==FileError::is_directory)return folder_seen(*target.mount->source,target.sub);
 if(fall_through(got.error()))return Seen::none;
 failure=got.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{got.error(),{}};
 return Seen::stop;
@@ -866,8 +920,10 @@ failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failur
 return true;
 }
 if(info->kind==EntryKind::directory){
-if(!folder_shown(table,p,target.mount,target.sub))return false;
-failure=Failure{FileError::is_directory,{}};
+if(folder_shown(table,p,target.mount,target.sub))failure=Failure{FileError::is_directory,{}};
+// A folder not shown passes the write on, unless a marker of the name lies there too (as a marker alone would refuse it).
+else if(!info->marked)return false;
+else failure=Failure{FileError::read_only_pack,read_only_text(path)};
 return true;
 }
 failure=Failure{FileError::read_only_pack,read_only_text(path)};
@@ -895,8 +951,13 @@ if(fall_through(info.error()))return false;
 provides=true;
 return true;
 }
-// A folder of that fold is no file a marker would hide: the search goes on to the older mounts.
-if(info->kind==EntryKind::directory)return false;
+// A folder of that fold is no file a marker would hide: the search goes on to the older mounts, unless a marker of the name
+// lies there too (it hides them already).
+if(info->kind==EntryKind::directory){
+if(!info->marked)return false;
+provides=false;
+return true;
+}
 provides=info->kind==EntryKind::file;
 return true;
 });
@@ -914,7 +975,7 @@ if(!*got)return Seen::marker;
 reader=std::move(*got);
 return Seen::file;
 }
-if(got.error()==FileError::is_directory)return Seen::directory;
+if(got.error()==FileError::is_directory)return folder_seen(*target.mount->source,target.sub);
 if(fall_through(got.error()))return Seen::none;
 failure=got.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{got.error(),{}};
 return Seen::stop;
@@ -967,7 +1028,7 @@ if(fall_through(info.error()))return Seen::none;
 failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}};
 return Seen::stop;
 }
-return seen_of(info->kind);
+return seen_of(*info);
 });
 if(decided.seen==Seen::stop)return std::unexpected(std::move(*failure));
 if(decided.seen==Seen::none)return failed(FileError::not_found);
@@ -994,7 +1055,7 @@ if(fall_through(info.error()))return Seen::none;
 failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}};
 return Seen::stop;
 }
-return seen_of(info->kind);
+return seen_of(*info);
 });
 switch(decided.seen){
 case Seen::file:
@@ -1309,7 +1370,7 @@ if(fall_through(info.error()))return Seen::none;
 failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}};
 return Seen::stop;
 }
-return seen_of(info->kind);
+return seen_of(*info);
 });
 if(decided.seen==Seen::stop)return std::unexpected(std::move(*failure));
 if(decided.seen==Seen::file)return failed(FileError::not_a_directory);
@@ -1472,7 +1533,7 @@ if(fall_through(info.error()))return Seen::none;
 failure=info.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{info.error(),{}};
 return Seen::stop;
 }
-return seen_of(info->kind);
+return seen_of(*info);
 });
 switch(decided.seen){
 case Seen::directory:
@@ -1488,11 +1549,16 @@ const Target& target=decided.target;
 if(!target.mount->writable)return std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
 check_spelling(path,*p,target);
 Source& source=*target.mount->source;
-if(auto removed=source.remove_directory(target.sub,recursive);!removed)return std::unexpected(removed.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{removed.error(),{}});
-if(!recursive)return {};
+const auto removal_failed=[&](FileError error){return std::unexpected(error==FileError::ambiguous?ambiguous_failure(path,target):Failure{error,{}});};
+// A source without markers (a host folder) cannot keep older files hidden: a plain removal.
+if(!recursive||!source.holds_markers()){
+if(auto removed=source.remove_directory(target.sub,recursive);!removed)return removal_failed(removed.error());
+return {};
+}
 // As remove does for one file: every file below the folder that an older mount still provides gets a marker, so the folder's
-// older files stay deleted (an older pack's folder goes with them; an older host folder stays, empty). The paths below p,
-// each fold once, from every older mount's listing.
+// older files stay deleted (an older pack's folder goes with them; an older host folder stays, empty). Each older mount's
+// subtree is walked once (files_below), each fold taken once; the removal and the markers then happen as one change of the
+// source (remove_directory_leaving), so a file written there meanwhile is never replaced by a marker.
 std::vector<std::string> below;
 std::unordered_set<std::string> folds;
 bool past=false;
@@ -1501,36 +1567,31 @@ if(!past){
 past=older.mount==target.mount;
 return false;
 }
-// Depth first through an explicit stack of (the folder below the source's root, the same folder below p).
-std::vector<std::pair<std::string,std::string>> folders{{std::string(older.sub),std::string()}};
-std::vector<EntryInfo> entries;
-while(!folders.empty()){
-auto [at,rest]=std::move(folders.back());
-folders.pop_back();
-entries.clear();
-if(!older.mount->source->list(at,entries))continue;
-for(EntryInfo& entry:entries){
-std::string name=rest.empty()?entry.name:rest+"/"+entry.name;
-if(entry.kind==EntryKind::directory)folders.emplace_back(at.empty()?entry.name:at+"/"+entry.name,std::move(name));
-else if(entry.kind==EntryKind::file&&folds.insert(fold_name(name)).second)below.push_back(std::move(name));
+const std::size_t from=below.size();
+older.mount->source->files_below(older.sub,below);
+// Only the new folds are kept.
+std::size_t kept=from;
+for(std::size_t i=from;i<below.size();++i){
+if(!folds.insert(fold_name(below[i])).second)continue;
+if(kept!=i)below[kept]=std::move(below[i]);
+++kept;
 }
-}
+below.resize(kept);
 return false;
 });
+std::vector<std::string> markers;
+markers.reserve(below.size());
 VfsPath file;
 file.mount=p->mount;
-std::string sub;
 for(const std::string& name:below){
 file.relative.assign(p->relative).push_back('/');
 file.relative.append(name);
 if(!older_provides(*table,file,target.mount))continue;
-sub.assign(target.sub).push_back('/');
-sub.append(name);
-const auto left=source.leave_marker(sub);
-if(!left)return std::unexpected(Failure{left.error(),{}});
-// A source without markers (a host folder) cannot keep them hidden.
-if(!*left)break;
+std::string& marker=markers.emplace_back(target.sub);
+marker.push_back('/');
+marker.append(name);
 }
+if(auto removed=source.remove_directory_leaving(target.sub,markers);!removed)return removal_failed(removed.error());
 return {};
 });
 }

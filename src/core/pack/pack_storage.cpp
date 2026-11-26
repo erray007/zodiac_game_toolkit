@@ -808,6 +808,21 @@ if(counted==folders_.end())return {};
 return Below{counted->second.files,counted->second.markers};
 }
 
+void PackStorage::files_below(std::string_view folder,std::vector<std::string>& out) const
+{
+const std::string fold=vfs::fold_name(folder);
+const std::size_t depth=folder.empty()?0:static_cast<std::size_t>(std::ranges::count(folder,'/'))+1;
+const std::shared_lock lock(mutex_);
+if(closed_)return;
+if(!fold.empty()){
+const auto counted=folders_.find(std::string_view(fold));
+if(counted==folders_.end()||counted->second.files==0)return;
+out.reserve(out.size()+counted->second.files);
+}
+// One pass over the entries; each name is given below the folder, as stored.
+for(const auto& [key,entry]:entries_)if(!entry.record.deleted&&(fold.empty()||below(key,fold)))out.emplace_back(segments_after(entry.record.name,depth));
+}
+
 void PackStorage::markers_below(std::string_view folder,std::vector<std::string>& out) const
 {
 const std::string fold=vfs::fold_name(folder);
@@ -999,6 +1014,8 @@ if(closed_)return std::unexpected(FileError::not_found);
 const Entry* entry=nullptr;
 info.kind=kind_locked(fold.view(),&entry);
 if(info.kind==vfs::EntryKind::none)return std::unexpected(FileError::not_found);
+// A folder's fold has an entry only when it is a marker too.
+if(info.kind==vfs::EntryKind::directory)info.marked=entries_.find(fold.view())!=entries_.end();
 if(entry){
 info.size=entry->record.size;
 info.modified_utc_ms=entry->record.modified_utc_ms;
@@ -1151,6 +1168,99 @@ removed.push_back(entries_.extract(it));
 }
 dirty_=true;
 return removed.size();
+}
+
+std::expected<std::size_t,vfs::FileError> PackStorage::remove_folder_leaving(std::string_view folder,const std::vector<std::string>& markers)
+{
+const std::string fold=vfs::fold_name(folder);
+// Every marker's name is checked before anything changes: a canonical entry name below the folder.
+std::vector<std::string> marker_folds;
+marker_folds.reserve(markers.size());
+for(const std::string& name:markers){
+const auto canonical=canonical_entry_name(name);
+if(!canonical||*canonical!=name)return std::unexpected(FileError::bad_path);
+std::string marker_fold=vfs::fold_name(name);
+if(!below(marker_fold,fold))return std::unexpected(FileError::bad_path);
+marker_folds.push_back(std::move(marker_fold));
+}
+const std::lock_guard writing(writer_mutex_);
+if(auto writable=writable_writing();!writable)return std::unexpected(writable.error());
+// entries_ and folders_ change only under writer_mutex_, held here: everything is found and made without the shared mutex,
+// which is taken once, to publish the whole change.
+const auto counted=folders_.find(std::string_view(fold));
+if(counted==folders_.end()||counted->second.files==0){
+const auto found=entries_.find(fold);
+return std::unexpected(found!=entries_.end()&&!found->second.record.deleted?FileError::not_a_directory:FileError::not_found);
+}
+// The files below the folder, by their keys (node keys stay put when the table rehashes).
+std::vector<const std::string*> doomed;
+doomed.reserve(counted->second.files);
+for(const auto& [key,entry]:entries_)if(!entry.record.deleted&&below(key,fold))doomed.push_back(&key);
+// Each marker's place after the removal: a removed file's entry, turned into the marker in place; a marker already there (kept);
+// or nothing (a new entry). A fold given twice is taken once.
+std::unordered_map<std::string_view,std::size_t> in_place;
+std::vector<EntryNode> fresh;
+std::vector<MarkerNode> indexed;
+Folders made_folders;
+std::unordered_set<std::string_view> planned;
+for(std::size_t i=0;i<markers.size();++i){
+const std::string& marker_fold=marker_folds[i];
+if(!planned.insert(marker_fold).second)continue;
+const auto found=entries_.find(marker_fold);
+if(found!=entries_.end()&&found->second.record.deleted)continue;
+IndexEntry record;
+record.name=markers[i];
+record.deleted=true;
+// Every marker gets a made node holding its entry: a new name's node goes into the table; a removed file's entry is swapped
+// with it in place (the node then holds the file's entry, freed after unlocking).
+Entries made;
+EntryNode node=made.extract(made.try_emplace(marker_fold).first);
+node.mapped()=Entry{std::move(record),0};
+if(found!=entries_.end())in_place.emplace(found->first,fresh.size());
+else{
+// The folders a new marker needs that the pack lacks, each once.
+each_folder(marker_fold,[&](std::string_view part){
+if(folders_.find(part)==folders_.end())made_folders.try_emplace(std::string(part));
+});
+}
+fresh.push_back(std::move(node));
+Markers made_marker;
+indexed.push_back(made_marker.extract(made_marker.emplace(marker_fold).first));
+}
+FolderNodes folders;
+folders.reserve(made_folders.size());
+while(!made_folders.empty())folders.push_back(made_folders.extract(made_folders.begin()));
+// At most every folder there is, and every one made here, can go.
+FolderNodes dropped;
+dropped.reserve(folders_.size()+folders.size());
+std::vector<EntryNode> removed;
+removed.reserve(doomed.size());
+{
+const std::unique_lock lock(mutex_);
+// The reserves are all that can throw (growing a bucket array, rarely), and they come before any change.
+folders_.reserve(folders_.size()+folders.size());
+entries_.reserve(entries_.size()+fresh.size());
+add_folders_locked(folders);
+// The markers are counted in first, so the folders they share with the removed files never go in between.
+for(const EntryNode& node:fresh)count_locked(node.key(),true);
+for(MarkerNode& node:indexed)markers_.insert(std::move(node));
+for(const std::string* key:doomed){
+const auto it=entries_.find(std::string_view(*key));
+wasted_+=it->second.stored;
+--files_;
+uncount_locked(it->first,false,dropped);
+if(const auto place=in_place.find(std::string_view(it->first));place!=in_place.end()){
+// The file's node becomes the marker's: its entry swapped with the made one, which is freed after unlocking.
+std::swap(it->second,fresh[place->second].mapped());
+continue;
+}
+removed.push_back(entries_.extract(it));
+}
+// The new markers' nodes go in last (the in-place ones' made nodes now hold the removed files' entries, freed below).
+for(EntryNode& node:fresh)if(node.mapped().record.deleted)entries_.insert(std::move(node));
+}
+dirty_=true;
+return doomed.size();
 }
 
 std::vector<std::string> PackStorage::list() const

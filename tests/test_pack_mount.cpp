@@ -16,6 +16,7 @@
 #include <core/pack/pack_storage.hpp>
 #include <core/vfs/folder_source.hpp>
 #include <core/vfs/vfs.hpp>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -1035,7 +1036,8 @@ CHECK(older->stats==1);
 CHECK(m.vfs.stat("small").error().code==FileError::not_found);
 CHECK(newer->enumerations==1);
 CHECK(newer->enumerated==2);
-CHECK(older->stats==1+1+2);
+// The folder's stat, then for each of the 2 names: is it a file here, and the lookup that decides it (as stat would).
+CHECK(older->stats==1+1+2*2);
 CHECK(listed(m.vfs,"/",ListKind::directories)=="big");
 }
 
@@ -1084,6 +1086,114 @@ REQUIRE(fresh.vfs.mount("/",pack::make_pack_source(writable,true),true,&owner_b)
 REQUIRE(fresh.vfs.delete_directory("levels",true));
 CHECK(fresh.vfs.stat("levels").error().code==FileError::not_found);
 CHECK(listed(fresh.vfs,"/",ListKind::directories).empty());
+}
+
+TEST_CASE("remove_folder_leaving removes a folder and writes its markers as one change, or changes nothing")
+{
+TempDir dir;
+auto storage=pack_of(dir.path/"leave.zpk",77,{{"levels/a.txt","a"},{"levels/deep/b.txt","b"},{"keep.txt","k"}});
+REQUIRE(storage->add_deletion_marker("levels/old.txt"));
+// A name outside the folder, or one no entry can have, is refused before anything changes.
+for(const std::vector<std::string>& bad:{std::vector<std::string>{"levels/x.txt","keep.txt"},std::vector<std::string>{"levels/con"},std::vector<std::string>{"levels\\x.txt"}}){
+CHECK(storage->remove_folder_leaving("levels",bad).error()==FileError::bad_path);
+CHECK(storage->list()==std::vector<std::string>{"keep.txt","levels/a.txt","levels/deep/b.txt"});
+CHECK(storage->count_below("levels").markers==1);
+}
+CHECK(storage->remove_folder_leaving("keep.txt",{}).error()==FileError::not_a_directory);
+CHECK(storage->remove_folder_leaving("none",{}).error()==FileError::not_found);
+// a.txt's entry becomes its marker in place, x.txt and deep/y.txt get new ones (their folders made), old.txt's marker stays.
+const auto removed=storage->remove_folder_leaving("levels",{"levels/a.txt","levels/x.txt","Levels/X.TXT","levels/deep/y.txt","levels/old.txt"});
+REQUIRE(removed);
+CHECK(*removed==2);
+CHECK(storage->list()==std::vector<std::string>{"keep.txt"});
+for(const char* name:{"levels/a.txt","levels/x.txt","levels/deep/y.txt","levels/old.txt"}){
+INFO(name);
+CHECK(storage->stat(name)->kind==EntryKind::deleted);
+}
+CHECK(storage->stat("levels/deep/b.txt").error()==FileError::not_found);
+CHECK(storage->count_below("levels").files==0);
+CHECK(storage->count_below("levels").markers==4);
+CHECK(storage->count_below("levels/deep").markers==1);
+std::vector<std::string> marked;
+storage->markers_below("levels",marked);
+std::ranges::sort(marked);
+CHECK(marked==std::vector<std::string>{"levels/a.txt","levels/deep/y.txt","levels/old.txt","levels/x.txt"});
+// A file written after the change replaces its marker, as any add does: the write survives, and so it does after a reopen.
+add(*storage,"levels/a.txt","written later");
+CHECK(storage->stat("levels/a.txt")->kind==EntryKind::file);
+REQUIRE(storage->close());
+const auto reopened=reopen(dir.path/"leave.zpk",test_key(77));
+CHECK(reopened->list()==std::vector<std::string>{"keep.txt","levels/a.txt"});
+CHECK(reopened->stat("levels/x.txt")->kind==EntryKind::deleted);
+CHECK(reopened->count_below("levels").markers==3);
+}
+
+TEST_CASE("a file written into a writable pack after a recursive delete of its folder survives")
+{
+Mounted m;
+auto release=pack_of(m.packs()/"release.zpk",78,{{"levels/l1.txt","1"},{"levels/l2.txt","2"}});
+auto writable=pack_of(m.packs()/"save.zpk",79,{{"levels/mine.txt","mine"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(release,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(writable,true),true,&owner_b));
+REQUIRE(m.vfs.delete_directory("levels",true));
+CHECK(m.vfs.stat("levels").error().code==FileError::not_found);
+// The delete and its markers were one change of the pack, so nothing later is turned into a marker.
+REQUIRE(m.vfs.write_file("levels/l1.txt",span_of("new")));
+CHECK(read_ok(m.vfs,"levels/l1.txt")=="new");
+CHECK(m.vfs.stat("levels/l2.txt").error().code==FileError::not_found);
+CHECK(listed(m.vfs,"levels")=="l1.txt");
+// A delete in a host folder leaves nothing (it cannot hold markers): the older files show again.
+Mounted host;
+auto shipped=pack_of(host.packs()/"r.zpk",80,{{"maps/m.txt","m"}});
+REQUIRE(host.vfs.mount("/",pack::make_pack_source(shipped,false),false,&owner_a));
+TempDir newer;
+fs::create_directories(newer.path/"maps");
+put_bytes(newer.path/"maps"/"n.txt","n");
+REQUIRE(host.vfs.mount("/",std::make_shared<FolderSource>(newer.path,false),true,&owner_b));
+REQUIRE(host.vfs.delete_directory("maps",true));
+CHECK(read_ok(host.vfs,"maps/m.txt")=="m");
+}
+
+TEST_CASE("a folder with more newer markers than files is still shown when some markers name files it lacks")
+{
+Mounted m;
+auto base=pack_of(m.packs()/"base.zpk",81,{{"few/a.txt","a"},{"few/b.txt","b"}});
+auto patch=make(m.packs()/"patch.zpk",test_key(82));
+for(const char* name:{"few/a.txt","few/x.txt","few/y.txt","few/z/w.txt"})REQUIRE(patch->add_deletion_marker(name));
+REQUIRE(patch->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(base,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(patch,false),false,&owner_b));
+// 4 markers against 2 files, but only a.txt is one of them: b.txt is left.
+CHECK(m.vfs.stat("few")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"few")=="b.txt");
+CHECK(listed(m.vfs,"/",ListKind::directories)=="few");
+}
+
+TEST_CASE("a newer folder that is also a deleted file's name hides the older file as a marker when the folder is not shown")
+{
+Mounted m;
+// Oldest: the file p/X. Newer: a marker of p/X and a folder p/X with one file. Newest: a marker of that file.
+auto oldest=pack_of(m.packs()/"o.zpk",83,{{"p/X","old file"}});
+auto newer=make(m.packs()/"n.zpk",test_key(84));
+REQUIRE(newer->add_deletion_marker("p/X"));
+add(*newer,"p/X/inner.txt","inner");
+REQUIRE(newer->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(oldest,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(newer,false),false,&owner_b));
+// The newer folder is shown: it is the name, and the old file stays hidden.
+CHECK(m.vfs.stat("p/X")->kind==EntryKind::directory);
+CHECK(read_ok(m.vfs,"p/X/inner.txt")=="inner");
+auto newest=make(m.packs()/"m.zpk",test_key(85));
+REQUIRE(newest->add_deletion_marker("p/X/inner.txt"));
+REQUIRE(newest->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(newest,false),false,&owner_c));
+// The folder is not shown now, and its marker still hides the old file: stat, open_read, list and the folders above agree.
+CHECK(m.vfs.stat("p/X").error().code==FileError::not_found);
+CHECK(m.vfs.open_read("p/X").error().code==FileError::not_found);
+CHECK(m.vfs.stat("p").error().code==FileError::not_found);
+CHECK(m.vfs.list("p",ListKind::files).error().code==FileError::not_found);
+CHECK(listed(m.vfs,"/",ListKind::directories).empty());
+CHECK(m.vfs.write_file("p/X",span_of("w")).error().code==FileError::read_only_pack);
 }
 
 // D2 (vfs.hpp, Mount folders): no mount's file or marker hides a mount point or a folder above one.

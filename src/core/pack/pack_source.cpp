@@ -147,11 +147,14 @@ const PackStorage::Below below=storage_->count_below(relative);
 return vfs::EntriesBelow{below.files,below.markers};
 }
 void markers_below(std::string_view relative,std::vector<std::string>& out) override{storage_->markers_below(relative,out);}
-std::expected<bool,FileError> leave_marker(std::string_view relative) override
+bool holds_markers() const noexcept override{return true;}
+void files_below(std::string_view relative,std::vector<std::string>& out) override{storage_->files_below(relative,out);}
+std::expected<void,FileError> remove_directory_leaving(std::string_view relative,const std::vector<std::string>& markers) override
 {
-if(read_only_)return std::unexpected(FileError::access_denied);
-if(auto added=storage_->add_deletion_marker(relative);!added)return std::unexpected(added.error());
-return true;
+if(read_only_||relative.empty())return std::unexpected(FileError::access_denied);
+const auto removed=storage_->remove_folder_leaving(relative,markers);
+if(!removed)return std::unexpected(removed.error());
+return {};
 }
 private:
 std::shared_ptr<PackStorage> storage_;
