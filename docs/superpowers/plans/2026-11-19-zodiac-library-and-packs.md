@@ -41,6 +41,7 @@
   - `"<path>" is in use by another program` (a writable pack open while another process holds the pack open for writing).
   - `wrong key or damaged pack`; `integer overflow`; `file is not open`; `file is not open for writing`; `"<mode>" is not a file mode`; `random_choice on an empty array`; `clamp: low is greater than high`; `invalid date`.
   - `[release] run_as_admin must be a boolean` (a project file error, after `zodiac.toml: error: ` like the others).
+  - `error: .zodiac/release.manifest is damaged; restore it from your backup or delete it` (zodiac build, an earlier manifest whose first three lines are wrong); `error: "<game>.zpk" is in use by another program` (a release start whose writable pack another copy of the game holds); `error: the game data is damaged (pack: unsupported pack (newer format))`; `error: cannot mount the game data: out of memory`.
 
 ## Review Focus
 

@@ -5,6 +5,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,8 +23,10 @@ SCRIPT_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "scripts
 # and the kit ships no test modules, so these cannot be built. Every other fixture takes part in the identity test.
 FIXTURES_NEEDING_TEST_MODULES = {"holds_plugin_object"}
 # The fixtures that build; the identity test fails if this set changes, so a fixture can never drop out of it silently.
-BUILDABLE_FIXTURES = {"int_main", "non_ascii_include", "runtime_error", "uses_module", "void_main"}
+BUILDABLE_FIXTURES = {"blood_bath_style", "int_main", "non_ascii_include", "runtime_error", "uses_module", "void_main"}
 SIZE_LIMIT = 5242880
+KEY_CREATED = "created .zodiac/pack.key; back it up, later builds and patches need it"
+TRAILER_MAGIC = b"ZDTRAIL1"
 LONE_FILE_WARNING = "warning: no zodiac.toml; only the core is available (create a project file to add modules)"
 LONE_FILE_NOTE = "note: no zodiac.toml; only the core is available, so module functions are not declared (create a project file to add modules)"
 
@@ -230,10 +233,13 @@ class BuildTest(unittest.TestCase):
 
     def test_identity_with_run(self):
         built = set()
-        for fixture in sorted(p for p in SCRIPT_FIXTURES.iterdir() if p.is_dir()):
-            if fixture.name in FIXTURES_NEEDING_TEST_MODULES:
+        for source in sorted(p for p in SCRIPT_FIXTURES.iterdir() if p.is_dir()):
+            if source.name in FIXTURES_NEEDING_TEST_MODULES:
                 continue
-            with self.subTest(fixture=fixture.name):
+            with self.subTest(fixture=source.name):
+                # Run and built from a copy (times kept), so the build's .zodiac folder (a packing fixture's key) never lands in the source tree.
+                fixture = self.root / "fixtures" / source.name
+                shutil.copytree(source, fixture)
                 # The system's reason in some messages (missing_include) is UTF-8 like the rest, so both sides decode strictly.
                 run_code, run_out, run_err = zodiac("run", str(fixture), "--no-window", "--module-dir", MODULE_DIR)
                 output = self.root / fixture.name
@@ -319,18 +325,175 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(out.splitlines()[-1], "Build failed: %d %s" % (len(errors), "error" if len(errors) == 1 else "errors"))
         self.assertFalse((project / "release" / "game.exe").exists())
 
-    def test_build_assets_copied(self):
-        project = self.new_project(self.root / "game")
-        self.append_toml(project, '\n[build]\nassets = ["sounds/**/*.ogg"]\n')
-        write(project / "sounds" / "a.ogg", "a")
+    def release_files(self, release):
+        return sorted(p.relative_to(release).as_posix() for p in release.rglob("*") if p.is_file())
+
+    # A game that copies what it reads into data:/ (APPDATA/<game>/, isolate_user_data's folder), so a test compares the bytes exactly.
+    COPYING_SCRIPT = 'int main()\n{\nstring a=read_file("sounds/a.ogg");\nif(!write_file("data:/a.ogg",a))return 3;\nreturn file_exists("sounds/x/b.ogg")?0:4;\n}\n'
+
+    def copied(self, game, name="a.ogg"):
+        return (Path(os.environ["APPDATA"]) / game / name).read_bytes()
+
+    def packing_project(self, toml="", script=None):
+        project = self.new_project(self.root / "game", script=script or self.COPYING_SCRIPT)
+        self.append_toml(project, '\n[build]\nassets = ["sounds/**/*.ogg"]\n' + toml)
+        # Binary bytes, every value, so the pack carries them exactly and none shows through its encryption.
+        self.sound = bytes(range(256)) * 64 + os.urandom(4096)
+        (project / "sounds" / "x").mkdir(parents=True)
+        (project / "sounds" / "a.ogg").write_bytes(self.sound)
         write(project / "sounds" / "x" / "b.ogg", "b")
         write(project / "sounds" / "c.wav", "c")
         write(project / "music" / "d.ogg", "d")
+        return project
+
+    def build_packed(self, project):
+        code, out, err = self.build(str(project))
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(out.splitlines()[-1], "Build succeeded: %s" % (project / "release" / "game.exe"))
+        return out
+
+    def test_build_assets_packed(self):
+        project = self.packing_project()
         release = project / "release"
-        self.assert_built(self.build(str(project)), release / "game.exe")
-        files = sorted(p.relative_to(release).as_posix() for p in release.rglob("*") if p.is_file())
-        self.assertEqual(files, ["game.exe", "sounds/a.ogg", "sounds/x/b.ogg"])
+        out = self.build_packed(project)
+        # The key is made on the first build, announced on stdout before the summary, and kept out of git.
+        self.assertEqual(out.splitlines(), [KEY_CREATED, "Build succeeded: %s" % (release / "game.exe")])
+        key_file = project / ".zodiac" / "pack.key"
+        key = key_file.read_bytes()
+        self.assertRegex(key.decode("ascii"), r"\A[0-9a-f]{64}\n\Z")
+        self.assertIn("pack.key", (project / ".zodiac" / ".gitignore").read_text(encoding="utf-8").splitlines())
+        # One file: the assets are inside the executable, encrypted, after the linked image and before the trailer at the end.
+        self.assertEqual(self.release_files(release), ["game.exe"])
+        image = (release / "game.exe").read_bytes()
+        self.assertEqual(image[-8:], TRAILER_MAGIC)
+        self.assertEqual(len(image) % 8, 0)
+        self.assertNotIn(self.sound[:4096], image)
+        self.assertNotIn(key.strip(), image)
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), self.sound)
+        # The manifest of the build: the magic, the build id, the next patch, then one line per packed asset.
+        manifest = (project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(manifest[0], "zodiac-release-manifest 1")
+        self.assertRegex(manifest[1], r"\Abuild [0-9a-f]{32}\Z")
+        self.assertEqual(manifest[2], "next_patch 1")
+        self.assertEqual([line.split(" ", 2)[1:] for line in manifest[3:]], [[str(len(self.sound)), "sounds/a.ogg"], ["1", "sounds/x/b.ogg"]])
+        self.assertTrue(all(len(line.split(" ")[0]) == 64 for line in manifest[3:]))
+        # A second build reuses the key: the file is unchanged and nothing is announced.
+        out = self.build_packed(project)
+        self.assertEqual(out.splitlines(), ["Build succeeded: %s" % (release / "game.exe")])
+        self.assertEqual(key_file.read_bytes(), key)
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        # A damaged key is refused, never replaced.
+        key_file.write_bytes(b"not a key\n")
+        code, out, err = self.build(str(project))
+        self.assertEqual((code, err.splitlines()), (2, ["error: .zodiac/pack.key is damaged (expected 64 hex digits); restore it from your backup"]))
+        self.assertEqual(key_file.read_bytes(), b"not a key\n")
+
+    def test_build_pack_disabled_copies_assets(self):
+        project = self.packing_project('\n[pack]\nenabled = false\n')
+        release = project / "release"
+        out = self.build_packed(project)
+        self.assertNotIn(KEY_CREATED, out)
+        self.assertEqual(self.release_files(release), ["game.exe", "sounds/a.ogg", "sounds/x/b.ogg"])
         self.assertEqual((release / "sounds" / "x" / "b.ogg").read_text(encoding="utf-8"), "b")
+        self.assertNotEqual((release / "game.exe").read_bytes()[-8:], TRAILER_MAGIC)
+        self.assertFalse((project / ".zodiac").exists())
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), self.sound)
+
+    def test_build_pack_external(self):
+        project = self.packing_project('\n[pack]\nexternal = true\n')
+        release = project / "release"
+        self.build_packed(project)
+        self.assertEqual(self.release_files(release), ["game.exe", "game.zpk"])
+        self.assertNotEqual((release / "game.exe").read_bytes()[-8:], TRAILER_MAGIC)
+        self.assertNotIn(self.sound[:4096], (release / "game.zpk").read_bytes())
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), self.sound)
+        (release / "game.zpk").unlink()
+        code, out, err = run_exe(release / "game.exe")
+        self.assertEqual((code, out, err.splitlines()), (2, "", ['error: the game data is damaged (pack "game.zpk" is missing)']))
+
+    def test_build_pack_exclude_keeps_plain_files(self):
+        script = 'int main()\n{\nif(!write_file("data:/a.ogg",read_file("sounds/a.ogg")))return 3;\nreturn read_file("sounds/x/b.ogg")=="b"?0:4;\n}\n'
+        project = self.packing_project('\n[pack]\nexclude = ["sounds/x/**"]\n', script)
+        write(project / "sounds" / "bundled.zpk", "a pack the game opens itself")
+        toml = project / "zodiac.toml"
+        write(toml, toml.read_text(encoding="utf-8").replace('assets = ["sounds/**/*.ogg"]', 'assets = ["sounds/**/*.ogg", "sounds/*.zpk"]'))
+        release = project / "release"
+        self.build_packed(project)
+        # The excluded asset and every *.zpk stay plain files beside the executable; the rest is packed.
+        self.assertEqual(self.release_files(release), ["game.exe", "sounds/bundled.zpk", "sounds/x/b.ogg"])
+        self.assertEqual((release / "game.exe").read_bytes()[-8:], TRAILER_MAGIC)
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), self.sound)
+        manifest = (project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([line.split(" ", 2)[2] for line in manifest[3:]], ["sounds/a.ogg"])
+
+    def test_build_writable_pack_is_external(self):
+        # writable forces external (a running executable is locked); a save outside data:/ goes into the pack and survives a restart.
+        script = 'int main()\n{\nif(file_exists("save.txt"))return read_file("save.txt")=="level 2"?10:11;\nif(read_file("sounds/x/b.ogg")!="b")return 12;\nreturn write_file("save.txt","level 2")?0:13;\n}\n'
+        project = self.packing_project('\n[pack]\nwritable = true\n', script)
+        release = project / "release"
+        self.build_packed(project)
+        self.assertEqual(self.release_files(release), ["game.exe", "game.zpk"])
+        before = (release / "game.zpk").read_bytes()
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.release_files(release), ["game.exe", "game.zpk"])
+        self.assertNotEqual((release / "game.zpk").read_bytes(), before)
+        self.assertEqual(run_exe(release / "game.exe")[0], 10)
+
+    def test_build_signed_pack_still_found(self):
+        # The sign command appends an attribute certificate table (one empty WIN_CERTIFICATE, 8-aligned) and points the security
+        # directory at it, as signtool does: the trailer is then no longer at the end of the file, and the game still finds its pack.
+        signer = self.root / "sign.py"
+        write(signer, (
+            "import struct, sys\n"
+            "path = sys.argv[1]\n"
+            "data = bytearray(open(path, 'rb').read())\n"
+            "pe = struct.unpack_from('<I', data, 0x3C)[0]\n"
+            "optional = pe + 24\n"
+            "directories = optional + (112 if struct.unpack_from('<H', data, optional)[0] == 0x20B else 96)\n"
+            "while len(data) % 8:\n"
+            "    data.append(0)\n"
+            "offset = len(data)\n"
+            "data += struct.pack('<IHH', 16, 0x0200, 2) + bytes(8)\n"
+            "struct.pack_into('<II', data, directories + 4 * 8, offset, 16)\n"
+            "open(path, 'wb').write(data)\n"))
+        project = self.packing_project("\n[build.sign]\ncommand = [%s, %s, \"{file}\"]\n" % (toml_literal(sys.executable), toml_literal(str(signer))))
+        release = project / "release"
+        self.build_packed(project)
+        image = (release / "game.exe").read_bytes()
+        self.assertEqual(image[-16:-12], struct.pack("<I", 16))
+        self.assertEqual(image[-24:-16], TRAILER_MAGIC)
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), self.sound)
+
+    def test_build_warns_for_undeclared_literal_path(self):
+        script = 'void main()\n{\nread_file("sounds/a.ogg");\nfile_exists("notes.txt");\nwrite_file("log.txt","x");\nread_file("data:/save.txt");\nlist_files("sounds/x");\n}\n'
+        project = self.packing_project(script=script)
+        code, out, err = self.build(str(project))
+        self.assertEqual(code, 0, err)
+        # Only the read of an undeclared file: the declared one, the write, data:/ and a folder of assets are fine. Never an error.
+        self.assertEqual(err.splitlines(), ['warning: main.zs:4: "notes.txt" is not among the declared assets, so the release cannot open it'])
+        self.assertEqual(out.splitlines()[-1], "Build succeeded: %s" % (project / "release" / "game.exe"))
+
+    def test_run_warns_writing_a_packed_path(self):
+        script = 'void main()\n{\nwrite_file("sounds/a.ogg","x");\nwrite_file("sounds/a.ogg","y");\nwrite_file("data:/a.ogg","z");\nwrite_file("notes.txt","n");\n}\n'
+        project = self.packing_project(script=script)
+        code, out, err = zodiac("run", str(project), "--no-window", "--module-dir", MODULE_DIR)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err.splitlines(), ['warning: "sounds/a.ogg" is written in a folder here, but the release puts it in a read-only pack, where writing fails; save files in data:/ instead'])
+        # Not with a writable release pack, where the release can write it too.
+        self.append_toml(project, "\n[pack]\nwritable = true\n")
+        code, out, err = zodiac("run", str(project), "--no-window", "--module-dir", MODULE_DIR)
+        self.assertEqual((code, err), (0, ""))
+
+    def test_hello_has_no_pack(self):
+        exe = self.build_hello()
+        self.assertFalse((exe.parent.parent / ".zodiac").exists())
+        self.assertNotEqual(exe.read_bytes()[-8:], TRAILER_MAGIC)
+        self.assertEqual(sorted(p.name for p in exe.parent.iterdir()), ["hello.exe"])
 
     def test_build_sign_command_runs(self):
         self.assertTrue(ECHO_ARGS and Path(ECHO_ARGS).is_file(), ECHO_ARGS)
@@ -464,7 +627,8 @@ class BuildTest(unittest.TestCase):
     def test_build_config_file_of_any_name(self):
         project = self.root / "ayar klasörü"
         write(project / "sahne" / "menü.zs", 'int main()\n{\nexample_print("ayar");\nreturn 6;\n}\n')
-        write(project / "ayar.txt", '[game]\nname = "ayarlı"\nmain = "sahne/menü.zs"\n[modules]\nstatic = ["example"]\n[build]\nassets = ["**/*.txt"]\n')
+        # Packing off, so the assets are files the test can list.
+        write(project / "ayar.txt", '[game]\nname = "ayarlı"\nmain = "sahne/menü.zs"\n[modules]\nstatic = ["example"]\n[build]\nassets = ["**/*.txt"]\n[pack]\nenabled = false\n')
         write(project / "notlar.txt", "not")
         release = project / "release"
         exe = release / "ayarlı.exe"
@@ -481,7 +645,7 @@ class BuildTest(unittest.TestCase):
     def test_build_config_named_in_another_case_is_not_an_asset(self):
         project = self.root / "game"
         write(project / "main.zs", "void main()\n{\n}\n")
-        write(project / "ayar.txt", '[game]\nname = "oyun"\nmain = "main.zs"\n[build]\nassets = ["**"]\n')
+        write(project / "ayar.txt", '[game]\nname = "oyun"\nmain = "main.zs"\n[build]\nassets = ["**"]\n[pack]\nenabled = false\n')
         release = project / "release"
         self.assert_built(self.build("--config", str(project / "AYAR.TXT")), release / "oyun.exe")
         self.assertEqual(sorted(p.name for p in release.iterdir()), ["main.zs", "oyun.exe"])
@@ -707,7 +871,8 @@ class BuildTest(unittest.TestCase):
 
     def test_build_output_inside_project_is_not_an_asset(self):
         project = self.new_project(self.root / "game")
-        self.append_toml(project, '\n[build]\nassets = ["**/*"]\n')
+        # Packing off, so the assets are files the test can list; the packed case leaves the output folder out the same way.
+        self.append_toml(project, '\n[build]\nassets = ["**/*"]\n[pack]\nenabled = false\n')
         write(project / "data" / "a.txt", "a")
         # The same folder spelled with a different case: Windows paths compare case-insensitively.
         output = Path(str(project).upper()) / "Out"

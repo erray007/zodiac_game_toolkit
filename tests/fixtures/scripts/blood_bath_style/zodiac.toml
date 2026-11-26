@@ -1,0 +1,6 @@
+[game]
+main = "main.zs"
+[modules]
+static = ["example"]
+[build]
+assets = ["data/**", "sounds/**"]
