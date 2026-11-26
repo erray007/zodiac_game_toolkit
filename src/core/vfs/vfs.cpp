@@ -701,14 +701,15 @@ if(p->folder&&info->kind!=EntryKind::directory)return failed(FileError::not_a_di
 return std::move(*info);
 }
 const std::shared_ptr<const Table> table=snapshot();
-// A mount folder is a folder, whatever a source holds there.
-if(leads_to_mount(*table,*p)){
+// A mount folder is a folder, whatever a source holds there (with a source's time when one has the folder).
+const bool mount_folder=leads_to_mount(*table,*p);
+const auto as_folder=[&]{
 EntryInfo info;
 info.kind=EntryKind::directory;
 const std::size_t slash=p->relative.rfind('/');
 info.name=slash==std::string::npos?p->relative:p->relative.substr(slash+1);
 return info;
-}
+};
 EntryInfo info;
 std::optional<Failure> failure;
 const Decided decided=decide(*table,*p,nullptr,[&](const Target& target){
@@ -721,6 +722,7 @@ return Seen::stop;
 info=std::move(*got);
 return seen_of(info.kind);
 });
+if(mount_folder)return decided.seen==Seen::directory?info:as_folder();
 if(decided.seen==Seen::stop)return std::unexpected(std::move(*failure));
 if(decided.seen==Seen::none)return failed(FileError::not_found);
 if(p->folder&&decided.seen!=Seen::directory)return failed(FileError::not_a_directory);
