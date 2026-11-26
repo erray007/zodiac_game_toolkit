@@ -784,12 +784,40 @@ if(slot->second.files==0&&slot->second.markers==0)dropped.push_back(folders_.ext
 vfs::EntryKind PackStorage::kind_locked(std::string_view fold,const Entry** entry) const
 {
 const auto found=entries_.find(fold);
-if(found!=entries_.end()){
+if(found!=entries_.end()&&!found->second.record.deleted){
 *entry=&found->second;
-return found->second.record.deleted?vfs::EntryKind::deleted:vfs::EntryKind::file;
+return vfs::EntryKind::file;
 }
+// A folder with files is one even where a marker of its fold lies (the marker hides older files of the name, not this folder).
 const auto folder=folders_.find(fold);
-return folder!=folders_.end()&&folder->second.files?vfs::EntryKind::directory:vfs::EntryKind::none;
+if(folder!=folders_.end()&&folder->second.files)return vfs::EntryKind::directory;
+if(found==entries_.end())return vfs::EntryKind::none;
+*entry=&found->second;
+return vfs::EntryKind::deleted;
+}
+
+bool PackStorage::markers_below(std::string_view folder) const
+{
+const FoldKey fold(folder);
+const std::shared_lock lock(mutex_);
+if(closed_)return false;
+if(folder.empty())return entries_.size()!=files_;
+const auto counted=folders_.find(fold.view());
+return counted!=folders_.end()&&counted->second.markers>0;
+}
+
+void PackStorage::files_below(std::string_view folder,std::vector<std::string>& out) const
+{
+const std::string fold=vfs::fold_name(folder);
+const std::shared_lock lock(mutex_);
+if(closed_)return;
+if(!fold.empty()){
+const auto counted=folders_.find(std::string_view(fold));
+if(counted==folders_.end()||counted->second.files==0)return;
+out.reserve(out.size()+counted->second.files);
+}
+else out.reserve(out.size()+files_);
+for(const auto& [key,entry]:entries_)if(!entry.record.deleted&&(fold.empty()||below(key,fold)))out.push_back(entry.record.name);
 }
 
 bool PackStorage::below_file_locked(std::string_view fold) const

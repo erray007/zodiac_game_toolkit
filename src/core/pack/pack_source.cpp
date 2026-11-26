@@ -140,6 +140,9 @@ std::expected<bool,vfs::MoveError> rename(std::string_view from,std::string_view
 std::uint64_t max_file_size() const noexcept override{return kMaxPackWriteBytes;}
 bool read_only() const noexcept override{return read_only_;}
 bool real_spelling(std::string_view relative,std::string& real) override;
+bool implied_folders() const noexcept override{return true;}
+bool markers_below(std::string_view relative) override{return storage_->markers_below(relative);}
+void files_below(std::string_view relative,std::vector<std::string>& out) override{storage_->files_below(relative,out);}
 private:
 std::shared_ptr<PackStorage> storage_;
 bool read_only_;

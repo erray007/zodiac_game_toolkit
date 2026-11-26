@@ -456,7 +456,9 @@ REQUIRE_FALSE(opened);
 CHECK(zodiac::vfs::read_failure_text("m.txt",opened.error())=="cannot read \"m.txt\": file not found");
 CHECK(m.vfs.open_read("sub/x.txt").error().code==FileError::not_found);
 CHECK(listed(m.vfs,"/")=="kept.txt");
-CHECK(listed(m.vfs,"sub").empty());
+// Every file of sub is deleted, so sub is no folder any more.
+CHECK(m.vfs.list("sub",ListKind::files).error().code==FileError::not_found);
+CHECK(m.vfs.stat("sub").error().code==FileError::not_found);
 CHECK(m.vfs.remove("f.txt").error().code==FileError::not_found);
 CHECK(file_bytes(m.root()/"f.txt")=="folder f");
 CHECK(m.vfs.copy("m.txt","data:/c.txt").error().failure.code==FileError::not_found);
@@ -878,6 +880,136 @@ CHECK(listed(m.vfs,"/",ListKind::directories)=="Maps");
 CHECK(m.vfs.unmount(&owner_a)==1);
 CHECK(listed(m.vfs,"/")=="maps");
 CHECK(listed(m.vfs,"/",ListKind::directories)=="tiles");
+}
+
+// D1 (vfs.hpp, Resolution): a marker hides files only. A patch deletes a folder file by file, and a pack's folder every file of which
+// a newer marker hides is no folder at all; a host folder's folders, and a pack folder with one shown file, stay.
+TEST_CASE("a patch that deletes every file of a pack folder deletes the folder, and a host folder or one shown file keeps it")
+{
+Mounted m;
+auto base=pack_of(m.packs()/"base.zpk",61,{{"maps/a.txt","a"},{"maps/b.txt","b"},{"maps/sub/c.txt","c"},{"levels/l1.txt","l1"},{"levels/l2.txt","l2"},{"top.txt","t"}});
+auto patch=make(m.packs()/"patch.zpk",test_key(62));
+REQUIRE(patch->add_deletion_marker("maps/a.txt"));
+REQUIRE(patch->add_deletion_marker("MAPS/B.txt"));
+REQUIRE(patch->add_deletion_marker("maps/sub/c.txt"));
+REQUIRE(patch->add_deletion_marker("levels/l1.txt"));
+REQUIRE(patch->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(base,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(patch,false),false,&owner_b));
+// The whole folder, its subfolder included, is gone by stat, open_read, list (in the parent and as the folder) and delete_directory.
+CHECK(m.vfs.stat("maps").error().code==FileError::not_found);
+CHECK(m.vfs.stat("Maps/sub").error().code==FileError::not_found);
+CHECK(m.vfs.stat("maps/").error().code==FileError::not_found);
+CHECK(m.vfs.open_read("maps").error().code==FileError::not_found);
+CHECK(m.vfs.open_read("maps/sub/c.txt").error().code==FileError::not_found);
+CHECK(m.vfs.list("maps",ListKind::files).error().code==FileError::not_found);
+CHECK(m.vfs.list("maps/sub",ListKind::directories).error().code==FileError::not_found);
+CHECK(m.vfs.delete_directory("maps",true).error().code==FileError::not_found);
+CHECK(listed(m.vfs,"/",ListKind::directories)=="levels");
+CHECK(listed(m.vfs,"/")=="top.txt");
+// One file of levels is still shown, so levels stays, with only that file.
+CHECK(m.vfs.stat("levels")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"levels")=="l2.txt");
+// A host folder of that name exists on its own: the game folder's maps/ is found below the deleted pack folder, with its own files.
+REQUIRE(m.vfs.create_directory("maps",false));
+REQUIRE(m.vfs.write_file("maps/readme.txt",span_of("plain")));
+CHECK(file_bytes(m.root()/"maps"/"readme.txt")=="plain");
+CHECK(m.vfs.stat("maps")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"maps")=="readme.txt");
+CHECK(listed(m.vfs,"/",ListKind::directories)=="levels,maps");
+CHECK(m.vfs.stat("maps/sub").error().code==FileError::not_found);
+CHECK(read_ok(m.vfs,"maps/readme.txt")=="plain");
+// A newer pack that brings one file back brings its folders back.
+auto restore=pack_of(m.packs()/"restore.zpk",63,{{"maps/sub/c.txt","c again"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(restore,false),false,&owner_c));
+CHECK(m.vfs.stat("maps/sub")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"maps",ListKind::directories)=="sub");
+CHECK(read_ok(m.vfs,"maps/sub/c.txt")=="c again");
+CHECK(m.vfs.unmount(&owner_c)==1);
+CHECK(m.vfs.unmount(&owner_b)==1);
+CHECK(listed(m.vfs,"maps")=="a.txt,b.txt,readme.txt");
+}
+
+TEST_CASE("a deletion marker hides the older files of its name, never a folder of that fold")
+{
+Mounted m;
+// Oldest first: the game folder's folder tiles/, a pack's file TILES in front of it, then a patch's marker of that file.
+put_bytes(m.root()/"tiles"/"t.txt","t");
+auto files=pack_of(m.packs()/"files.zpk",64,{{"TILES","the file"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(files,false),false,&owner_a));
+CHECK(m.vfs.stat("tiles")->kind==EntryKind::file);
+auto patch=make(m.packs()/"patch.zpk",test_key(65));
+REQUIRE(patch->add_deletion_marker("tiles"));
+REQUIRE(patch->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(patch,false),false,&owner_b));
+// The file is hidden; the older folder of that fold is found, with its files, by every lookup and by list.
+CHECK(m.vfs.stat("tiles")->kind==EntryKind::directory);
+CHECK(m.vfs.open_read("tiles").error().code==FileError::is_directory);
+CHECK(read_ok(m.vfs,"tiles/t.txt")=="t");
+CHECK(listed(m.vfs,"/").empty());
+CHECK(listed(m.vfs,"/",ListKind::directories)=="tiles");
+CHECK(listed(m.vfs,"tiles")=="t.txt");
+CHECK(m.vfs.remove("tiles").error().code==FileError::is_directory);
+CHECK(m.vfs.unmount(&owner_b)==1);
+CHECK(m.vfs.unmount(&owner_a)==1);
+// A pack holding a marker and a folder of one fold has that folder.
+auto both=make(m.packs()/"both.zpk",test_key(66));
+REQUIRE(both->add_deletion_marker("maps"));
+add(*both,"maps/new.txt","new");
+REQUIRE(both->flush());
+CHECK(both->stat("maps")->kind==EntryKind::directory);
+CHECK(both->place("maps").value()==EntryKind::directory);
+CHECK(both->markers_below("")==true);
+CHECK(both->markers_below("maps")==false);
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(both,false),false,&owner_a));
+CHECK(m.vfs.stat("maps")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"/",ListKind::directories)=="maps,tiles");
+CHECK(listed(m.vfs,"maps")=="new.txt");
+CHECK(m.vfs.unmount(&owner_a)==1);
+// Removing a writable pack's file over an older folder of its fold leaves no marker: the folder shows again.
+auto writable=pack_of(m.packs()/"w.zpk",67,{{"Tiles","w"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(writable,true),true,&owner_a));
+CHECK(m.vfs.stat("tiles")->kind==EntryKind::file);
+REQUIRE(m.vfs.remove("tiles"));
+CHECK(writable->stat("tiles").error()==FileError::not_found);
+CHECK(m.vfs.stat("tiles")->kind==EntryKind::directory);
+CHECK(read_ok(m.vfs,"tiles/t.txt")=="t");
+}
+
+// D2 (vfs.hpp, Mount folders): no mount's file or marker hides a mount point or a folder above one.
+TEST_CASE("a mount point and the folders above it stay folders whatever a newer mount holds there")
+{
+Mounted m;
+auto extra=pack_of(m.packs()/"extra.zpk",68,{{"x.txt","x"}});
+REQUIRE(m.vfs.mount("mods/extra",pack::make_pack_source(extra,false),false,&owner_a));
+auto over=make(m.packs()/"over.zpk",test_key(69));
+add(*over,"MODS","a file");
+REQUIRE(over->add_deletion_marker("mods2"));
+REQUIRE(over->flush());
+auto marks=make(m.packs()/"marks.zpk",test_key(70));
+REQUIRE(marks->add_deletion_marker("mods/extra"));
+REQUIRE(marks->flush());
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(over,false),false,&owner_b));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(marks,false),false,&owner_c));
+for(const char* folder:{"mods","Mods/Extra"}){
+INFO(folder);
+CHECK(m.vfs.stat(folder)->kind==EntryKind::directory);
+CHECK(m.vfs.open_read(folder).error().code==FileError::is_directory);
+CHECK(m.vfs.write_file(folder,span_of("w")).error().code==FileError::is_directory);
+CHECK(m.vfs.remove(folder).error().code==FileError::is_directory);
+CHECK(m.vfs.delete_directory(folder,true).error().code==FileError::access_denied);
+REQUIRE(m.vfs.create_directory(folder,false));
+}
+CHECK(listed(m.vfs,"/").empty());
+CHECK(listed(m.vfs,"/",ListKind::directories)=="mods");
+CHECK(listed(m.vfs,"mods",ListKind::directories)=="extra");
+CHECK(listed(m.vfs,"mods/extra")=="x.txt");
+CHECK(read_ok(m.vfs,"MODS/EXTRA/x.txt")=="x");
+// Without the mount point, the newer pack's file is what the name is.
+CHECK(m.vfs.unmount(&owner_a)==1);
+CHECK(m.vfs.stat("mods")->kind==EntryKind::file);
+CHECK(listed(m.vfs,"/")=="MODS");
+CHECK(listed(m.vfs,"/",ListKind::directories).empty());
 }
 
 TEST_CASE("unmount cannot fail, a remount under the same owner works, and try_mount names its failures")

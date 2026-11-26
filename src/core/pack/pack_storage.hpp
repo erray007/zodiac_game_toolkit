@@ -86,8 +86,11 @@
 // - remove_folder removes every file entry below a folder (markers stay) and returns how many; none is not_found.
 // Lookups: names are compared by fold_name, as VFS paths are. stat gives the entry (EntryInfo::name its last segment as asked),
 // or a directory for a folder of the pack: a name that some file entry's name continues with '/' (folders hold no markers of
-// their own, and a folder holding only markers is none). list gives the names of the files sorted by bytes; count is the
-// number of files. For a mount (pack_source.hpp):
+// their own, and a folder holding only markers is none). A marker is a file's (it hides older files of its name, never a
+// folder: vfs.hpp), so a name that is both a marker and a folder with files is that folder. list gives the names of the files
+// sorted by bytes; count is the number of files. markers_below tells whether a marker lies anywhere below a folder ("" the
+// whole pack; a marker of the folder's own name is not below it), from the folder counts at once; files_below appends the
+// stored names of the files at any depth below a folder ("" every file), reading every entry. For a mount (pack_source.hpp):
 // - open_mounted is open_reader that gives a null reader for a deletion marker (the name is hidden below it) and is_directory
 //   for a folder; the reader holds holder (the storage, so a mounted file keeps it) for its life.
 // - stored_name is a file entry's name as stored.
@@ -183,6 +186,8 @@ std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> open_reader(std::stri
 std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> open_mounted(std::string_view name,std::shared_ptr<const void> holder) const;
 std::optional<std::string> stored_name(std::string_view name) const;
 std::expected<void,vfs::FileError> list_folder(std::string_view folder,std::vector<vfs::EntryInfo>& out) const;
+bool markers_below(std::string_view folder) const;
+void files_below(std::string_view folder,std::vector<std::string>& out) const;
 std::expected<void,vfs::MoveError> rename(std::string_view from,std::string_view to);
 std::expected<std::size_t,vfs::FileError> remove_folder(std::string_view folder);
 std::expected<void,vfs::FileError> flush();

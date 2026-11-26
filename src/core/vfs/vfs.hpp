@@ -4,22 +4,34 @@
 // Resolution: a path is served by the mounts of its mount ("" or "data:") whose mount point is the path or one of its folders, compared
 // by fold_name segment by segment; the part below the mount point, spelled as given, goes to the source. Mounts are tried newest
 // first, so every mount made after the start-up folders is in front of them: stat, open_read, remove and delete_directory take
-// the first mount that has the entry (a mount that lacks it, or meets a file where a folder should be, passes the request on).
-// A deletion marker (EntryKind::deleted, a patch pack's) found first means the name is gone: stat and open_read fail with
-// not_found, remove and delete_directory too, and the older mounts are not asked; list leaves the name out of every older
-// mount. rename, copy and move take both sides (see rename).
+// the first mount that decides the name (a mount that lacks it, or meets a file where a folder should be, passes the request on).
+// Mount folders: a mount point, and every folder above one, is a directory whatever any source holds there (stat, open_read,
+// writes, remove and list agree), so no mount's file or deletion marker of that fold (a patch's included) ever hides a mount
+// point: everything below it is served by its mount, and a script mounts its packs after the start-up mounts anyway.
+// Deletion markers (EntryKind::deleted, a patch pack's, or one a writable pack leaves on remove) hide files: a marker found
+// first means the file of that name is gone from every older mount (stat and open_read fail with not_found, remove and
+// delete_directory too, and list leaves the name out), but a folder of that fold in an older mount is still found, and nothing
+// below the name is hidden by it: deleting a file never hides an unrelated folder. A folder is deleted file by file (a patch
+// leaves a marker for every file of it): folders of a source with implied folders (a pack, Source::implied_folders) exist only
+// for the files below them, so such a folder is shown (by stat, open_read's is_directory, writes, remove, delete_directory and
+// list, in its parent's listing and as the listed folder itself) only while one of its files is: when a newer covering mount
+// holds markers below it (Source::markers_below), its files are checked one by one, and a folder every file of which a newer
+// marker hides is no folder at all, so the lookup goes on to older mounts. A mount's own folder (a pack's root) is always shown.
+// rename, copy and move take both sides (see rename).
 // Writes (open_write, write_file, the to side of rename, copy and move, host_file for writing) go, newest first, to the first
 // writable mount, unless a read-only mount before it has the name: then they fail with read_only_pack (a file or a deletion
-// marker there; a folder is is_directory), since the write would be hidden under it. When only read-only mounts cover a write,
-// it fails with read_only_pack. Opening "a" or "r+" on a name the mount written lacks but an older mount provides starts the
-// new file with the older one's bytes, so the file continues what the path read (a copy that fails removes the file it made).
+// marker there; a shown folder is is_directory), since the write would be hidden under it. When only read-only mounts cover a
+// write, it fails with read_only_pack. Opening "a" or "r+" on a name the mount written lacks but an older mount provides starts
+// the new file with the older one's bytes, so the file continues what the path read (a copy that fails removes the file it made).
 // A write target of a source without host files (a pack) stores its bytes only at commit. remove takes the file from the first
-// mount that has it, asking that source to leave a deletion marker when an older mount still provides the name (a pack does;
-// a folder cannot). create_directory goes to the newest writable mount. list merges every covering mount's entries (every
-// kind) and the folders that lead to deeper mount points by fold: each fold once, decided by the newest mount that has it (as
-// that mount spells it, every spelling it has), listed only when that mount's entry is of the kind asked for; a marker there
-// leaves it out. A path that only leads to a mount point is a directory. "host:" paths (only parsed when host paths are on)
-// go to the HostSource, which opens them exactly as given.
+// mount that has it, asking that source to leave a deletion marker when an older mount still provides a file of that name (an
+// older folder does not count: the marker would not hide it; a pack leaves one, a folder cannot). create_directory goes to the
+// newest writable mount. list merges every covering mount's entries (every kind) and the mount folders below the path by fold:
+// each fold once, decided by the newest mount that decides it as lookups do (a mount folder first, then each mount newest
+// first: a shown folder or a file no newer marker hides; listed as that mount spells it, every spelling it has), listed only
+// when that entry is of the kind asked for. list of a path that is no shown folder fails as stat would (not_found, or
+// not_a_directory for a file). "host:" paths (only parsed when host paths are on) go to the HostSource, which opens them exactly
+// as given.
 //
 // Failures: Failure::code is the FileError; Failure::message is set for the failures with a text of their own:
 // - the path rules (bad_path): `"<path>" leaves its mount`, `"<path>" is a host path; set [files] host_paths = true to use it`,
@@ -165,6 +177,15 @@ virtual bool read_only() const noexcept=0;
 virtual bool real_spelling(std::string_view relative,std::string& real);
 // After a lookup of relative failed with ambiguous: the two real paths (below the source's root) that matched first, sorted by bytes.
 virtual std::optional<std::pair<std::string,std::string>> ambiguous_names(std::string_view relative);
+// True for a source whose folders exist only for the files below them (a pack): the Vfs shows such a folder only while one of
+// those files is shown. The default (a host folder, whose folders exist on their own) is false.
+virtual bool implied_folders() const noexcept;
+// Whether a deletion marker lies anywhere below folder relative ("" the source's root). Asked only when an older mount's implied
+// folder is found, so it may cost a lookup. The default (a source without markers) is false.
+virtual bool markers_below(std::string_view relative);
+// Appends the name (below the source's root, as stored) of every file at any depth below folder relative ("" every file). Only
+// asked of a source with implied_folders; the default appends nothing.
+virtual void files_below(std::string_view relative,std::vector<std::string>& out);
 };
 struct Failure{
 FileError code=FileError::io;
@@ -307,10 +328,11 @@ std::string_view sub;
 std::shared_ptr<const Table> snapshot() const;
 // Where a write of a path goes (see Writes above).
 std::expected<Target,Failure> writing_route(const Table& table,std::string_view path,const VfsPath& p) const;
-// The reader of p in the first mount older than newer that has it: null when none has it or a deletion marker hides it.
+// The reader of p in the first mount older than newer that decides it (decide): null when none has it or a deletion marker hides
+// it; is_directory for a shown folder.
 std::expected<std::shared_ptr<Reader>,Failure> older_reader(const Table& table,std::string_view path,const VfsPath& p,const Mount* newer) const;
-// Whether a mount older than newer provides p (a file or folder before any deletion marker); an older mount that fails to
-// answer counts as providing it, so a marker is left rather than a file shown again.
+// Whether a mount older than newer provides a file p (before any deletion marker; folders are passed over, since a marker would not
+// hide them); an older mount that fails to answer counts as providing it, so a marker is left rather than a file shown again.
 static bool older_provides(const Table& table,const VfsPath& p,const Mount* newer);
 // Writes every byte of in into out from offset 0 on, in 256 KiB pieces; MoveError::to false for a failed read, true for a write.
 static std::expected<void,MoveError> fill(Reader& in,WriteTarget& out);
@@ -331,8 +353,30 @@ static std::expected<void,MoveFailure> pump(Reader& in,WriteTarget& out,bool syn
 // unless a mount point below the root has to be compared by fold.
 template<class Visit>
 static bool visit_covering(const Table& table,const VfsPath& p,Visit&& visit);
-// True when p is a folder above some mount point of its mount (a path that only leads to mounts).
+// True when p is a mount folder: a mount point of its mount, or a folder above one (always a directory). Allocates nothing.
 static bool leads_to_mount(const Table& table,const VfsPath& p);
+// What one mount answers in a lookup (decide): nothing there, a file, a folder, a deletion marker, or a failure (the caller's
+// ask kept it) that ends the lookup.
+enum class Seen{none,file,directory,marker,stop};
+struct Decided{
+Target target;
+Seen seen=Seen::none;
+};
+// What a source's stat result of kind kind is in a lookup.
+static constexpr Seen seen_of(EntryKind kind) noexcept
+{
+return kind==EntryKind::file?Seen::file:kind==EntryKind::directory?Seen::directory:kind==EntryKind::deleted?Seen::marker:Seen::none;
+}
+// The lookup order of every reading operation (see Resolution): asks the mounts covering p newest first (only those older than
+// after, when after is set) through ask(Target)->Seen, until one decides: a file that no newer marker hides, a folder that
+// folder_shown shows, or stop. A marker hides the older mounts' files of the name; a folder not shown and everything else
+// passes the lookup on. seen is none when no mount decided.
+template<class Ask>
+static Decided decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask);
+// Whether the folder p that mount holds (sub below it) is shown: always for a source without implied folders and for a mount's own
+// folder; otherwise when no newer mount covering p has deletion markers below it, or when one of the folder's files is shown
+// (the first newer mount that answers for it gives no marker; a failure counts as shown).
+static bool folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub);
 std::expected<VfsPath,Failure> parse_failure(std::string_view path) const;
 Failure ambiguous_failure(std::string_view path,const Target& target) const;
 // Both are advisory and never throw: whatever their work or the callbacks throw is reported by report_internal_error.
