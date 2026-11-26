@@ -19,6 +19,9 @@
 //   A failure removes the temporary file and gives `error: cannot write "<file>": <reason>` (".zodiac/pack.key" or
 //   ".zodiac/.gitignore"; "the entropy source failed" when there are no random bytes).
 // - Any other failure to read it: `error: cannot read ".zodiac/pack.key": <reason>`.
+// - load_pack_key(root) (zodiac build --patch) only reads the key, as above, and never makes one: a missing file is
+//   `error: cannot read ".zodiac/pack.key": <reason>`, since a new key would make a patch no shipped build accepts. It changes
+//   nothing in .zodiac/.
 // - The key is never logged or printed. Every copy made here is wiped; the caller wipes the one returned (crypto::wipe).
 // - expand_assets never returns anything under <root>/.zodiac (core/project_file.hpp), so the key is never an asset.
 // Notes for the user documentation (Task 14):
@@ -37,4 +40,5 @@
 
 namespace zodiac::cli {
 std::expected<crypto::Key,std::string> load_or_create_pack_key(const std::filesystem::path& root);
+std::expected<crypto::Key,std::string> load_pack_key(const std::filesystem::path& root);
 }

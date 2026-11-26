@@ -57,7 +57,7 @@ std::vector<std::string> skipped_folders_;
 };
 }
 
-void mount_game_folders(Vfs& vfs,const std::filesystem::path& root,std::string_view game_name,bool host_paths,bool dev_mode)
+std::filesystem::path mount_game_folders(Vfs& vfs,const std::filesystem::path& root,std::string_view game_name,bool host_paths,bool dev_mode)
 {
 vfs.set_host_paths(host_paths);
 vfs.set_dev_mode(dev_mode);
@@ -68,9 +68,11 @@ if(data.empty())reason="no per-user data folder was found";
 else if(!valid_name(game_name))reason="the game name \""+one_line(game_name)+"\" cannot be used as a folder name";
 if(!reason.empty()){
 if(const auto& log=vfs.log())log(ZODIAC_LOG_WARNING,"warning: data:/ is not available: "+reason);
-return;
+return {};
 }
-vfs.mount("data:/",std::make_shared<FolderSource>(data/path_from_utf8(game_name),false,true),true,nullptr);
+std::filesystem::path folder=data/path_from_utf8(game_name);
+if(!vfs.mount("data:/",std::make_shared<FolderSource>(folder,false,true),true,nullptr))return {};
+return folder;
 }
 
 void mount_project(Vfs& vfs,const Project& project,bool dev_mode)

@@ -59,8 +59,16 @@
 //    place, with the files replaced before the failure (each copy replaces its file whole) and the rest as an earlier build left them.
 //    Stale files of earlier builds in the output folder are never removed (an earlier build's <name>.zpk next to an embedded one is
 //    never read by it).
+// Patches (BuildOptions::patch, zodiac build --patch): step 1 loads the project as above (the game name must be a usable file name,
+// and the output folder is the same), then, with no module loaded, nothing compiled, linked, signed or copied, write_patch
+// (cli/release_packing.hpp) writes <output>/patches/patch_<n>.zpk with the asset changes since the last full release build. The
+// key is load_pack_key's (cli/pack_key.hpp: never made here), read only when [pack] is enabled and .zodiac/release.manifest
+// exists, so a project without them gets write_patch's own error instead. After a success standard output gets `patches carry
+// asset files only; script changes need a full build`, then, when nothing differs, `no files changed since the last release
+// build; no patch written`; the summary names the patch written (or the release's executable when none was). Exit 0, or 2
+// after any error.
 // Exit codes: 0 success, 1 script error, 2 project, module, link or file error. On hosts other than Windows the only result is
-// "error: release builds are not supported on this host yet" (exit 2).
+// "error: release builds are not supported on this host yet" (exit 2), for --patch too.
 // Result (spec 8.2a): every message goes to the console as it happens, and the last line on standard output is the summary ResultReport::summary
 // (verb build) gives. Without no_window, when platform::has_interactive_desktop() holds, the result window (platform/result_window.hpp) then
 // opens, titled "Zodiac build - <game name>" (when no project loaded, the target's own name, or the config file's folder without a target),
@@ -86,6 +94,8 @@ std::filesystem::path output;
 std::vector<std::filesystem::path> module_dirs;
 // --no-window: report on the console only, never open the result window.
 bool no_window=false;
+// --patch: write a patch pack instead of a release (see Patches above).
+bool patch=false;
 };
 int build_project(const BuildOptions& options,Diagnostics& diagnostics);
 }

@@ -180,6 +180,14 @@ return key;
 }
 }
 
+std::expected<crypto::Key,std::string> load_pack_key(const fs::path& root)
+{
+std::error_code open_error;
+auto key=read_key(root/".zodiac"/"pack.key",open_error);
+if(!key&&key.error().empty())return std::unexpected(cannot("read",kKeyName,open_error));
+return key;
+}
+
 std::expected<crypto::Key,std::string> load_or_create_pack_key(const fs::path& root)
 {
 const fs::path folder=root/".zodiac";

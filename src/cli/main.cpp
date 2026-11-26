@@ -53,6 +53,8 @@ fs::path output;
 bool output_given=false;
 // run and build: --no-window.
 bool no_window=false;
+// build only: --patch.
+bool patch=false;
 // Set when the command line is malformed; reported through Diagnostics once it exists.
 std::string error;
 };
@@ -93,6 +95,10 @@ continue;
 }
 if(arg=="--no-window"){
 options.no_window=true;
+continue;
+}
+if(arg=="--patch"){
+options.patch=true;
 continue;
 }
 if(arg=="--config"||arg.starts_with("--config=")){
@@ -162,6 +168,7 @@ platform::write_stdout_line("options for run, build and modules: --module-dir <d
 platform::write_stdout_line("options for run and build: --config <file> (or --config=<file>) names the project file, of any name; its folder is the project root, and a script given with it replaces main");
 platform::write_stdout_line("options for run and build: --no-window reports on the console only (without it, build always and run after an error also show the result in a window when a desktop is available)");
 platform::write_stdout_line("options for build: --output <dir> writes the release there");
+platform::write_stdout_line("options for build: --patch writes <output>/patches/patch_<n>.zpk with the packed assets changed since the last full release build (no script changes)");
 platform::write_stdout_line("exit codes: 0 success, 1 script error, 2 usage/project/module error, otherwise the value returned by int main() (0-255)");
 return exit_ok;
 }
@@ -295,6 +302,7 @@ build.config=options.config;
 build.output=options.output;
 build.module_dirs=search_dirs(options);
 build.no_window=options.no_window;
+build.patch=options.patch;
 return build_project(build,diagnostics);
 }
 
@@ -433,6 +441,10 @@ return exit_usage_error;
 }
 if(options.output_given&&options.command!="build"){
 fail(diagnostics,"error: --output applies to build only; run zodiac help");
+return exit_usage_error;
+}
+if(options.patch&&options.command!="build"){
+fail(diagnostics,"error: --patch applies to build only; run zodiac help");
 return exit_usage_error;
 }
 if(options.no_window&&options.command!="run"&&options.command!="build"){

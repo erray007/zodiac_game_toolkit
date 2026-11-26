@@ -743,6 +743,30 @@ if(!copy_into(asset,output/asset.lexically_relative(project.root),diagnostics))r
 return exit_ok;
 }
 
+// zodiac build --patch once the project is loaded (build_command.hpp, Patches). Returns 0 or 2.
+int build_patch(const Project& project,const fs::path& output,BuildOutcome& outcome,Diagnostics& diagnostics)
+{
+crypto::Key key{};
+const WipeOnExit key_wipe{key.data(),key.size()};
+// The key only where write_patch will use it: without packing or a manifest, its own error is the one that tells what is missing.
+std::error_code ec;
+if(project.pack.enabled&&fs::exists(project.root/".zodiac"/"release.manifest",ec)){
+auto loaded=load_pack_key(project.root);
+if(!loaded)return fail(diagnostics,loaded.error());
+key=*loaded;
+crypto::wipe(loaded->data(),loaded->size());
+}
+const auto patched=write_patch(project,key,output);
+if(!patched)return fail(diagnostics,patched.error());
+platform::write_stdout_line("patches carry asset files only; script changes need a full build");
+if(!patched->written){
+platform::write_stdout_line("no files changed since the last release build; no patch written");
+return exit_ok;
+}
+outcome.exe=output/"patches"/path_from_utf8(pack::patch_file_name(static_cast<std::uint64_t>(patched->number)));
+return exit_ok;
+}
+
 // Step 1: the project to build, as build_command.hpp describes it. Reports its own errors and the lone-file warning.
 std::expected<Project,int> project_of(const BuildOptions& options,Diagnostics& diagnostics)
 {
@@ -789,6 +813,7 @@ if(!usable_file_name(project->name))return fail(diagnostics,"error: the game nam
 // Every path is absolute before the project root becomes the working directory.
 const fs::path output=options.output.empty()?project->root/"release":absolute_normal(options.output);
 outcome.exe=output/path_from_utf8(project->name+".exe");
+if(options.patch)return build_patch(*project,output,outcome,diagnostics);
 const fs::path& exe=outcome.exe;
 // Spec item 7, before anything loads: a third-party DLL missing next to a dynamic module would otherwise surface as the loader's
 // "module could not be found" at the compile; the build names it instead.

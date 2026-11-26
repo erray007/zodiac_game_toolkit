@@ -7,12 +7,15 @@
 #include <core/vfs/startup.hpp>
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstring>
 #include <memory>
 #include <new>
 #include <optional>
 #include <span>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 namespace zodiac::pack {
 namespace {
@@ -85,17 +88,86 @@ result.append(one_line(text)).push_back('"');
 return result;
 }
 
-// True when metadata (key=value lines, "\n" between them) holds the line "build=<build_id>".
-bool names_build(std::string_view metadata,std::string_view build_id) noexcept
+// True when metadata (key=value lines, "\n" between them) holds the line "<key>=<value>".
+bool has_line(std::string_view metadata,std::string_view key,std::string_view value) noexcept
 {
 while(!metadata.empty()){
 const std::size_t end=metadata.find('\n');
 const std::string_view line=metadata.substr(0,end);
-if(line.size()==6+build_id.size()&&line.starts_with("build=")&&line.substr(6)==build_id)return true;
+if(line.size()==key.size()+1+value.size()&&line.starts_with(key)&&line[key.size()]=='='&&line.substr(key.size()+1)==value)return true;
 if(end==std::string_view::npos)break;
 metadata.remove_prefix(end+1);
 }
 return false;
+}
+bool names_build(std::string_view metadata,std::string_view build_id) noexcept
+{
+return has_line(metadata,"build",build_id);
+}
+
+// A file found in a patches/ folder: its number, 0 for the executable's folder and 1 for the data folder, and its path.
+struct PatchFile{
+std::uint64_t number;
+int folder;
+std::filesystem::path path;
+};
+
+// Every entry of <folder>/patches, as patch files into out or, in name order, as the naming warning. A missing folder has none.
+void collect_patches(const fs::path& folder,int order,std::vector<PatchFile>& out,Diagnostics& diagnostics)
+{
+const fs::path patches=folder/"patches";
+std::vector<std::pair<std::string,fs::path>> others;
+std::error_code error;
+fs::directory_iterator entry(patches,error);
+if(error){
+if(platform::error_kind(error)!=platform::ErrorKind::not_found)diagnostics.report(ZODIAC_LOG_ERROR,"error: cannot use patch "+in_quotes(path_to_utf8(patches))+": "+std::string(vfs::reason_text(vfs::detail::file_error(error))));
+return;
+}
+for(const fs::directory_iterator end;entry!=end;entry.increment(error)){
+fs::path path=entry->path();
+std::string name=path_to_utf8(path.filename());
+if(const auto number=patch_number(name))out.push_back(PatchFile{*number,order,std::move(path)});
+else others.emplace_back(std::move(name),std::move(path));
+}
+if(error)diagnostics.report(ZODIAC_LOG_ERROR,"error: cannot use patch "+in_quotes(path_to_utf8(patches))+": "+std::string(vfs::reason_text(vfs::detail::file_error(error))));
+std::ranges::sort(others,{},&std::pair<std::string,fs::path>::first);
+for(const auto& [name,path]:others)diagnostics.report(ZODIAC_LOG_WARNING,"warning: ignoring "+in_quotes(path_to_utf8(path))+": patch packs are named patch_<n>.zpk");
+}
+
+// Opens and mounts one patch (mount_patches' checks); reports why when it is not used.
+void mount_patch(vfs::Vfs& vfs,const crypto::Key& key,std::string_view build_id,const PatchFile& patch,Diagnostics& diagnostics)
+{
+const std::string shown=in_quotes(path_to_utf8(patch.path));
+const auto cannot=[&](std::string_view reason){diagnostics.report(ZODIAC_LOG_ERROR,"error: cannot use patch "+shown+": "+std::string(reason));};
+std::uint64_t size=0;
+{
+auto file=platform::File::open(patch.path,platform::FileAccess::read);
+if(!file)return cannot(vfs::reason_text(vfs::detail::file_error(file.error())));
+size=file->size();
+}
+// Through a window over the whole file: read only and without a lock, so copies of the game run side by side.
+crypto::Key copy=key;
+auto storage=PackStorage::open(patch.path,KeySource(copy),false,{},PackLocation{0,size});
+crypto::wipe(copy.data(),copy.size());
+if(!storage){
+const vfs::Failure& failure=storage.error().failure;
+return cannot(!failure.message.empty()?std::string_view(failure.message):vfs::reason_text(failure.code));
+}
+const std::string metadata=(*storage)->metadata();
+if(!has_line(metadata,"base_build",build_id)){
+diagnostics.report(ZODIAC_LOG_WARNING,"warning: patch "+shown+" belongs to another release of the game; it is not used");
+return;
+}
+if(!has_line(metadata,"patch",std::to_string(patch.number))){
+diagnostics.report(ZODIAC_LOG_WARNING,"warning: ignoring "+shown+": patch packs are named patch_<n>.zpk");
+return;
+}
+try{
+if(vfs.mount("/",make_pack_source(std::move(*storage),false),false,nullptr))return;
+}
+catch(const std::bad_alloc&){
+}
+cannot("out of memory");
 }
 
 // The line for a failed open of the build pack, named file (the pack's or the executable's file name).
@@ -171,6 +243,35 @@ return PackLocation{offset,size};
 return std::unexpected(std::string("the executable holds no pack"));
 }
 
+std::string patch_file_name(std::uint64_t n)
+{
+return "patch_"+std::to_string(n)+".zpk";
+}
+
+std::optional<std::uint64_t> patch_number(std::string_view file_name) noexcept
+{
+constexpr std::string_view prefix="patch_";
+constexpr std::string_view suffix=".zpk";
+if(file_name.size()<=prefix.size()+suffix.size()||!file_name.starts_with(prefix)||!file_name.ends_with(suffix))return std::nullopt;
+const std::string_view digits=file_name.substr(prefix.size(),file_name.size()-prefix.size()-suffix.size());
+// Decimal, at least 1, no leading zero: one name per number.
+if(digits.front()<'1'||digits.front()>'9')return std::nullopt;
+std::uint64_t value=0;
+const auto [end,error]=std::from_chars(digits.data(),digits.data()+digits.size(),value);
+if(error!=std::errc()||end!=digits.data()+digits.size())return std::nullopt;
+return value;
+}
+
+void mount_patches(vfs::Vfs& vfs,const crypto::Key& key,std::string_view build_id,const fs::path& exe_dir,const fs::path& data_dir,Diagnostics& diagnostics)
+{
+std::vector<PatchFile> patches;
+collect_patches(exe_dir,0,patches,diagnostics);
+if(!data_dir.empty())collect_patches(data_dir,1,patches,diagnostics);
+// Oldest first, as they are mounted: the highest number in front, of one number the data folder's.
+std::ranges::sort(patches,[](const PatchFile& a,const PatchFile& b){return a.number!=b.number?a.number<b.number:a.folder<b.folder;});
+for(const PatchFile& patch:patches)mount_patch(vfs,key,build_id,patch,diagnostics);
+}
+
 crypto::Key release_pack_key(const GamePayload& payload) noexcept
 {
 crypto::Key key{};
@@ -181,7 +282,7 @@ return key;
 int mount_release(vfs::Vfs& vfs,const GamePayload& payload,std::uint32_t payload_crc,const fs::path& executable,Diagnostics& diagnostics)
 {
 const fs::path folder=executable.parent_path();
-vfs::mount_game_folders(vfs,folder,payload.game_name,payload.host_paths,false);
+const fs::path data_dir=vfs::mount_game_folders(vfs,folder,payload.game_name,payload.host_paths,false);
 if(payload.pack_mode==PackMode::none)return 0;
 const auto refuse=[&diagnostics](const std::string& line){
 diagnostics.report(ZODIAC_LOG_ERROR,line);
@@ -207,9 +308,12 @@ window=*location;
 }
 }
 crypto::Key key=release_pack_key(payload);
-// open wipes its own copy of the key.
+// Wiped on every way out; open wipes its own copy.
+struct Wipe{
+crypto::Key& key;
+~Wipe(){crypto::wipe(key.data(),key.size());}
+} wipe{key};
 auto storage=PackStorage::open(host,KeySource(key),false,{},window);
-crypto::wipe(key.data(),key.size());
 if(!storage)return refuse(open_failure(storage.error(),shown,external));
 // The pack must be the one this executable was built with: an external pack left from another build (a failed rename of the new
 // one, an old copy put back) would otherwise serve stale assets without a word. An embedded one is tied by the trailer already.
@@ -225,6 +329,8 @@ return refuse("error: cannot mount the game data: out of memory");
 }
 // After mount_game_folders, so the pack is in front of the folder at "/"; permanent (no owner) for the game's life.
 if(!vfs.mount("/",std::move(source),writable,nullptr))return refuse("error: cannot mount the game data: out of memory");
+// In front of the build pack: the patches made for this build (each checked on its own; a bad one never stops the game).
+mount_patches(vfs,key,payload.build_id,folder,data_dir,diagnostics);
 return 0;
 }
 }

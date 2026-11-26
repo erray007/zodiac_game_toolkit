@@ -26,8 +26,9 @@
 //   pack_writable (an external pack the system will not let the game write is mounted read only instead, so writes to its names
 //   fail with the read-only pack text rather than at commit). A read-only external pack is opened through a window over the
 //   whole file, so it takes no lock and any number of copies of the game may run at once; a writable one takes the pack's lock
-//   for the game's life. Task 11 adds the patch mounts after this step. The storage's closing flush reports a failure to
-//   diagnostics. Returns 0, or 2 after one of:
+//   for the game's life. Then mount_patches(vfs, the key, payload.build_id, the executable's folder, the data folder
+//   mount_game_folders mounted at data:/ (none when it is not mounted), diagnostics). The storage's closing flush reports a
+//   failure to diagnostics. Returns 0, or 2 after one of:
 //   - `error: the game data is damaged (pack: wrong key or damaged pack)`: no valid trailer, a trailer of another build, or a pack
 //     the key does not open (or that fails its checks); `(pack: unsupported pack (newer format))` for a pack of a newer format;
 //   - `error: the game data is damaged (pack "<game>.zpk" is missing)`;
@@ -39,9 +40,33 @@
 //   - `error: the game data is damaged (invalid pack key)` or `(invalid pack or file setting)` for a payload whose pack fields
 //     contradict each other (a key that is not 32 bytes with a pack, writable without external);
 //   - `error: cannot mount the game data: out of memory`.
+// - mount_patches(vfs, key, build_id, exe_dir, data_dir, diagnostics): the patch packs zodiac build --patch writes
+//   (cli/release_packing.hpp), each cumulative against the full release build it was made for. It collects every file named
+//   patch_<n>.zpk (n decimal, at least 1, no leading zeros, at most 2^64-1) in <exe_dir>/patches/ and <data_dir>/patches/
+//   (an empty data_dir, or a missing folder, has none), orders them by n ascending, the data folder's after the executable
+//   folder's at an equal n, and mounts each read only at "/" in that order, in front of the build pack (so the highest n
+//   decides a name, and of two of one n the data folder's). Patches are matched to the release by their `base_build=` metadata
+//   against build_id (payload.build_id, which the build pack's own `build=` line equals), never by `build=`; every check below
+//   leaves the patch unmounted and the game going on:
+//   - any other name in either patches/ folder (folders included), and a patch whose `patch=` metadata is not its n:
+//     `warning: ignoring "<path>": patch packs are named patch_<n>.zpk`, in name order per folder;
+//   - a patch the key does not open, or a damaged one: `error: cannot use patch "<path>": wrong key or damaged pack`
+//     (`unsupported pack (newer format)` for a newer format; the system's reason when the file cannot be opened);
+//   - a patch whose `base_build=` is not build_id (no such line included): `warning: patch "<path>" belongs to another release of
+//     the game; it is not used`, so an old patch never overrides a newer full release;
+//   - a folder that cannot be listed: `error: cannot use patch "<folder>": <reason>`; memory running out while mounting one:
+//     `error: cannot use patch "<path>": out of memory`.
+//   <path> is the patch's host path, one_line. A gap in the numbers is fine (each patch holds every change since the release);
+//   two patches of one n are both mounted, the data folder's in front. Patches open through a window over the whole file: read
+//   only, without a lock, so copies of the game run side by side. A patch's marker hides the older mounts' files of its name,
+//   never a folder or a mount point (vfs.hpp), and a pack folder every file of which a patch deletes is gone.
 // Notes for the user documentation (Task 14): until the protection plan, a release pack is obfuscation, not protection: its key is
 // in clear in the executable it ships with. A writable release pack ([pack] writable) is mounted at "/", so every write to a
-// name outside data:/ goes into the pack; a game started twice with a writable pack refuses the second start ("in use").
+// name outside data:/ goes into the pack; a game started twice with a writable pack refuses the second start ("in use"). Patches
+// go in a patches/ folder next to the executable, or in data:/patches/ (where a game's own updater may save them); a patch
+// holds every change since its full release, so only the newest needs shipping, and a new full release ignores the old ones.
+// With a writable release pack, a name a patch holds cannot be written any more (read-only pack text), since the patch is in
+// front of the pack.
 // Threads: the main thread, before the script runs.
 #pragma once
 #include <core/diagnostics.hpp>
@@ -54,6 +79,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -69,4 +95,9 @@ std::uint64_t image_end(const platform::File& file);
 std::expected<PackLocation,std::string> find_embedded_pack(const platform::File& file,std::uint32_t payload_crc);
 crypto::Key release_pack_key(const GamePayload& payload) noexcept;
 int mount_release(vfs::Vfs& vfs,const GamePayload& payload,std::uint32_t payload_crc,const std::filesystem::path& executable,Diagnostics& diagnostics);
+void mount_patches(vfs::Vfs& vfs,const crypto::Key& key,std::string_view build_id,const std::filesystem::path& exe_dir,const std::filesystem::path& data_dir,Diagnostics& diagnostics);
+// "patch_<n>.zpk" for n, the name of a patch pack (zodiac build --patch writes it, mount_patches reads it); the number such a
+// name gives, nullopt for any other name.
+std::string patch_file_name(std::uint64_t n);
+std::optional<std::uint64_t> patch_number(std::string_view file_name) noexcept;
 }

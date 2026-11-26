@@ -1,11 +1,13 @@
 // Calls zodiac::release::start directly with payloads made from fixture projects (build + save_bytecode), using a temporary folder as the executable's folder.
 // The release pack cases lay game.exe out as zodiac build does (filler for the linked image, the pack, its trailer) or put <game>.zpk beside it.
+// The patch cases put patch packs in patches/ beside it and in the data folder's patches/ (pack::mount_patches).
 // start() writes its diagnostics to the console sink, so standard error is redirected to a file while it runs.
 #include <core/diagnostics.hpp>
 #include <core/module_registry.hpp>
 #include <core/pack/crypto.hpp>
 #include <core/pack/pack_storage.hpp>
 #include <core/pack/release_pack.hpp>
+#include <core/path_utf8.hpp>
 #include <core/payload.hpp>
 #include <core/project_file.hpp>
 #include <core/script_runtime.hpp>
@@ -678,4 +680,121 @@ const Started second=start_in(folder.dir(),payload);
 INFO(join(second.lines));
 CHECK(second.code==10);
 CHECK(second.lines.empty());
+}
+
+namespace {
+// A patch pack at path as zodiac build --patch writes one: entries and deletion markers under key, metadata base_build and patch.
+void write_patch_pack(const fs::path& path,const std::vector<std::pair<std::string,std::string>>& entries,const std::vector<std::string>& markers,const zodiac::crypto::Key& key,std::uint64_t number,std::string_view base_build=kBuildId)
+{
+fs::create_directories(path.parent_path());
+auto storage=zodiac::pack::PackStorage::open(path,zodiac::pack::KeySource(key),true);
+REQUIRE(storage);
+REQUIRE((*storage)->set_metadata("base_build="+std::string(base_build)+"\npatch="+std::to_string(number)));
+for(const auto& [name,data]:entries)REQUIRE((*storage)->add(name,std::as_bytes(std::span(data)),0));
+for(const std::string& name:markers)REQUIRE((*storage)->add_deletion_marker(name));
+REQUIRE((*storage)->close());
+}
+// A game with an external build pack holding a.txt, b.txt and sub/c.txt, whose main returns 0 when a.txt reads a_bytes and its
+// other checks hold.
+zodiac::GamePayload patched_game(const fs::path& folder,const zodiac::crypto::Key& key,std::string_view checks)
+{
+zodiac::GamePayload payload=source_payload("","int main(){"+std::string(checks)+"return 0;}\n");
+set_pack(payload,zodiac::PackMode::external,key);
+write_file(folder/"packed.zpk",release_pack({{"a.txt","release a"},{"b.txt","release b"},{"sub/c.txt","c"}},key));
+return payload;
+}
+std::string quoted(const fs::path& path)
+{
+return "\""+zodiac::path_to_utf8(path)+"\"";
+}
+}
+
+TEST_CASE("patches mount by number, the newest in front: a deletion hides a file and its folder, and a later patch shows it again")
+{
+const TempDir folder;
+const TempDir user_data;
+const ScopedEnv data_home(data_variable,user_data.dir());
+const zodiac::crypto::Key key=release_key();
+const fs::path patches=folder.dir()/"patches";
+// patch_1 marks b.txt and the only file of sub, patch_2 changes a.txt again: the newest wins.
+write_patch_pack(patches/"patch_1.zpk",{{"a.txt","one"}},{"b.txt","sub/c.txt"},key,1);
+write_patch_pack(patches/"patch_2.zpk",{{"a.txt","two"}},{},key,2);
+const char* deleted=
+"if(read_file(\"a.txt\")!=\"two\")return 3;"
+"if(file_exists(\"b.txt\"))return 4;"
+"string e;try{read_file(\"b.txt\");}catch{e=exception_info();}"
+"if(e!=\"cannot read \\\"b.txt\\\": file not found\")return 5;"
+"array<string>@ files=list_files(\"\");"
+"if(files.length()!=2||files[0]!=\"a.txt\"||files[1]!=\"packed.zpk\")return 6;"
+"if(directory_exists(\"sub\")||file_exists(\"sub/c.txt\"))return 7;"
+"array<string>@ folders=list_directories(\"\");"
+"if(folders.length()!=1||folders[0]!=\"patches\")return 8;";
+Started started=start_in(folder.dir(),patched_game(folder.dir(),key,deleted));
+INFO(join(started.lines));
+CHECK(started.code==0);
+CHECK(started.lines.empty());
+// patch_3 gives b.txt again; patch_10 comes after patch_9 (by number, not by name), and the gap between 3 and 9 is fine.
+write_patch_pack(patches/"patch_3.zpk",{{"a.txt","three"},{"b.txt","back"}},{},key,3);
+write_patch_pack(patches/"patch_9.zpk",{{"a.txt","nine"}},{},key,9);
+write_patch_pack(patches/"patch_10.zpk",{{"a.txt","ten"}},{},key,10);
+started=start_in(folder.dir(),patched_game(folder.dir(),key,"if(read_file(\"a.txt\")!=\"ten\")return 3;if(read_file(\"b.txt\")!=\"back\")return 4;if(directory_exists(\"sub\"))return 5;"));
+INFO(join(started.lines));
+CHECK(started.code==0);
+CHECK(started.lines.empty());
+// Two patches of one number: the data folder's is mounted after (in front of) the executable folder's.
+write_patch_pack(user_data.dir()/"packed"/"patches"/"patch_10.zpk",{{"a.txt","data ten"}},{},key,10);
+started=start_in(folder.dir(),patched_game(folder.dir(),key,"if(read_file(\"a.txt\")!=\"data ten\")return 3;if(read_file(\"b.txt\")!=\"back\")return 4;"));
+INFO(join(started.lines));
+CHECK(started.code==0);
+CHECK(started.lines.empty());
+}
+
+TEST_CASE("a patch of another key, of another release, or misnamed is not used, and the game goes on with the build pack")
+{
+const TempDir folder;
+const TempDir user_data;
+const ScopedEnv data_home(data_variable,user_data.dir());
+const zodiac::crypto::Key key=release_key();
+zodiac::crypto::Key other=key;
+other[3]^=0x40;
+const fs::path patches=folder.dir()/"patches";
+write_patch_pack(patches/"patch_1.zpk",{{"a.txt","foreign key"}},{"b.txt"},other,1);
+write_patch_pack(patches/"patch_2.zpk",{{"a.txt","old release"}},{},key,2,"ffeeddccbbaa99887766554433221100");
+// Named patch_3 but made as patch 4: renamed by hand, so it could override a newer patch.
+write_patch_pack(patches/"patch_3.zpk",{{"a.txt","renamed"}},{},key,4);
+write_patch_pack(patches/"patch_01.zpk",{{"a.txt","leading zero"}},{},key,1);
+write_patch_pack(patches/"patch_0.zpk",{{"a.txt","zero"}},{},key,0);
+write_file(patches/"notes.txt","not a patch");
+const Started started=start_in(folder.dir(),patched_game(folder.dir(),key,"if(read_file(\"a.txt\")!=\"release a\")return 3;if(read_file(\"b.txt\")!=\"release b\")return 4;"));
+INFO(join(started.lines));
+CHECK(started.code==0);
+const std::vector<std::string> expected{
+"warning: ignoring "+quoted(patches/"notes.txt")+": patch packs are named patch_<n>.zpk",
+"warning: ignoring "+quoted(patches/"patch_0.zpk")+": patch packs are named patch_<n>.zpk",
+"warning: ignoring "+quoted(patches/"patch_01.zpk")+": patch packs are named patch_<n>.zpk",
+"error: cannot use patch "+quoted(patches/"patch_1.zpk")+": wrong key or damaged pack",
+"warning: patch "+quoted(patches/"patch_2.zpk")+" belongs to another release of the game; it is not used",
+"warning: ignoring "+quoted(patches/"patch_3.zpk")+": patch packs are named patch_<n>.zpk"};
+CHECK(started.lines==expected);
+// A damaged patch is refused the same way.
+std::string bytes=read_file(patches/"patch_2.zpk");
+bytes[bytes.size()-20]=static_cast<char>(bytes[bytes.size()-20]^0x01);
+fs::remove_all(patches);
+fs::create_directories(patches);
+write_file(patches/"patch_5.zpk",bytes);
+const Started damaged=start_in(folder.dir(),patched_game(folder.dir(),key,"if(read_file(\"a.txt\")!=\"release a\")return 3;"));
+CHECK(damaged.code==0);
+CHECK(damaged.lines==std::vector<std::string>{"error: cannot use patch "+quoted(patches/"patch_5.zpk")+": wrong key or damaged pack"});
+}
+
+TEST_CASE("patch_number reads only patch_<n>.zpk with a decimal n from 1 without leading zeros")
+{
+CHECK(zodiac::pack::patch_number("patch_1.zpk")==1);
+CHECK(zodiac::pack::patch_number("patch_10.zpk")==10);
+CHECK(zodiac::pack::patch_number("patch_18446744073709551615.zpk")==UINT64_MAX);
+for(const char* name:{"patch_0.zpk","patch_01.zpk","patch_.zpk","patch_1.ZPK","Patch_1.zpk","patch_1.zpk.tmp","patch_-1.zpk","patch_+1.zpk","patch_1a.zpk","patch_18446744073709551616.zpk"}){
+INFO(name);
+CHECK_FALSE(zodiac::pack::patch_number(name));
+}
+CHECK(zodiac::pack::patch_file_name(12)=="patch_12.zpk");
 }

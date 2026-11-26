@@ -29,12 +29,49 @@
 // append_pack(executable, pack_file, payload_crc): appends the bytes of pack_file to the file executable in 1 MiB pieces, then
 // zero bytes so the trailer ends on a multiple of pack::kTrailerAlignment, then pack::trailer_bytes(the pack's offset, its size,
 // payload_crc), and flushes the file. `error: cannot read "<pack_file>": <reason>` or `error: cannot write "<executable>": <reason>`.
+// write_patch(project, key, output) is zodiac build --patch (spec 8.4): a patch pack against the last full release build, made
+// without compiling or linking anything (patches carry asset files only; the caller says so).
+// - `error: --patch needs [pack] enabled` when [pack] enabled is false; `error: no release manifest in .zodiac; build a full
+//   release first` without .zodiac/release.manifest; the damaged text for a manifest whose lines are not as described below
+//   (a line of a kind not listed, a path given twice by fold, a deleted entry line without its patched line, ...).
+// - The manifest after a full build holds the release's packed assets (`<hash> <size> <path>`, as above). After a patch it also
+//   holds, for every path a patch has ever given a deletion marker, `deleted marker <path>` or `deleted entry <path>` (the state
+//   the newest patch gave it), and for every entry the newest patch holds `patched <64 hex digits of its BLAKE2b-256> <size>
+//   <path>`. Those lines are kept for the life of the release (a full build writes a new manifest without them). Together they
+//   are what the game sees now: a path's newest patch state (marker, or entry with its hash and size) when a patch holds it,
+//   else the release's entry.
+// - The current assets are expand_assets' (those inside output left out, compared as the file system does) split by split_assets;
+//   names are checked as write_release_pack checks them (not a valid file name, two of one fold). A path the manifest knows (a
+//   release entry or a patched path) that is still declared but no longer packed (moved to [pack] exclude, or packing it is off
+//   otherwise) is `error: "<path>" moved out of the pack; that needs a full release build`: a patch cannot turn a packed file
+//   plain (its entry or marker would hide the plain file).
+// - Patches are cumulative against the release, never against the previous patch: patch n holds every packed asset whose path,
+//   size or hash differs from the release's entry, or that the release lacks; a deletion marker (spelled as the manifest has the
+//   path) for every path the manifest knows that is not declared at all any more; and again every path an earlier patch holds,
+//   as the entry the project has now (bytes equal to the release's included) or as a marker, so no older patch's entry or marker
+//   ever shows through it, whichever patches lie next to the game.
+// - Something has changed when one path's desired state (an entry with its current path spelling, size and hash, a marker, or
+//   nothing) differs from what the game sees now; only then is a patch written. Hashes are made only where size and spelling
+//   agree, streamed through one 1 MiB buffer; nothing is held whole in memory, and an asset written into the patch is read again
+//   as write_release_pack reads one (hashed on the way, for its patched line).
+// - With nothing changed nothing is written: PatchResult{n, 0, 0, false}. Otherwise <output>/patches/patch_<n>.zpk
+//   (pack::patch_file_name, n the manifest's next_patch) is made through pack::PackStorage under key as a raw key (the nonce
+//   rule holds for every chunk and index), entries by project-relative path with their files' modification times and markers in
+//   path order, metadata `base_build=<the manifest's build id>` and `patch=<n>`; as <name>.tmp first, then renamed over any file
+//   of that name. The manifest's .tmp is written before that rename and committed after it (next_patch n+1 and the lines
+//   above), so a failure leaves the manifest as it was (the next patch then takes the same number again, harmlessly).
+//   PatchResult: number n, changed the entries and deleted the markers the patch holds, written true.
+// - Other errors: `error: cannot read "<asset>": <reason>`, `error: cannot write "<file>": <reason>` (the patch, its folder, or
+//   ".zodiac/release.manifest"), `error: cannot read ".zodiac/release.manifest": <reason>`. Temporary files go on every failure.
 // Notes for the user documentation (Task 14): a packed asset is found by its project-relative path, case-insensitively, exactly as
 // in zodiac run; .zodiac/release.manifest records the last release build, and patches (zodiac build --patch) are made against it.
+// A patch holds every change since the full release build, so shipping the newest patch alone is enough; scripts and modules
+// never change in a patch, and an asset moved out of the pack, or newly excluded, needs a full release build.
 // Threads: main thread.
 #pragma once
 #include <core/pack/crypto.hpp>
 #include <core/project_file.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -52,4 +89,11 @@ std::expected<void,std::string> write_release_pack(const Project& project,const 
 std::expected<void,std::string> append_pack(const std::filesystem::path& executable,const std::filesystem::path& pack_file,std::uint32_t payload_crc);
 std::expected<void,std::string> commit_release_manifest(const Project& project);
 void discard_release_manifest(const Project& project) noexcept;
+struct PatchResult{
+int number;
+std::size_t changed;
+std::size_t deleted;
+bool written;
+};
+std::expected<PatchResult,std::string> write_patch(const Project& project,const crypto::Key& key,const std::filesystem::path& output);
 }

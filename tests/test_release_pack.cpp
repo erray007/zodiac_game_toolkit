@@ -3,6 +3,9 @@
 // a generated PE image followed by an attribute certificate table (what a signing tool appends) is found and read whole through its
 // window, also when the signer aligned the table itself; a security directory that does not end at the file's end leaves the end
 // where the file ends. Also the dev mode release pack check (vfs.hpp): a write that lands in a writable pack is not warned about.
+// And zodiac build --patch's write_patch (cli/release_packing.hpp): the changed, new and removed assets, the numbering, a file
+// deleted and restored with the release's bytes, one set back after a patch changed it, a file moved out of the pack, the manifest.
+#include <cli/release_packing.hpp>
 #include <core/pack/crypto.hpp>
 #include <core/pack/pack_source.hpp>
 #include <core/pack/pack_storage.hpp>
@@ -15,6 +18,7 @@
 #include <doctest/doctest.h>
 #include <platform/entropy.hpp>
 #include <platform/file.hpp>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -380,4 +384,159 @@ zodiac::vfs::mount_project(quiet,other,true);
 REQUIRE(quiet.write_file("Sounds/c.ogg",std::as_bytes(std::span(text))));
 CHECK(said.empty());
 }
+}
+
+namespace {
+// The lines of the project's release manifest.
+std::vector<std::string> manifest_lines(const zodiac::Project& project)
+{
+std::vector<std::string> lines;
+std::string_view text;
+const std::string all=read_all(project.root/".zodiac"/"release.manifest");
+text=all;
+while(!text.empty()){
+const std::size_t end=text.find('\n');
+lines.emplace_back(text.substr(0,end));
+if(end==std::string_view::npos)break;
+text.remove_prefix(end+1);
+}
+return lines;
+}
+bool has(const std::vector<std::string>& lines,std::string_view line)
+{
+return std::ranges::find(lines,line)!=lines.end();
+}
+// The entry's bytes in the pack.
+std::string entry_bytes(pack::PackStorage& storage,std::string_view name)
+{
+const auto reader=storage.open_reader(name);
+REQUIRE(reader);
+std::string bytes(static_cast<std::size_t>((*reader)->size()),'\0');
+REQUIRE((*reader)->read_at(0,std::as_writable_bytes(std::span(bytes)))==static_cast<std::int64_t>(bytes.size()));
+return bytes;
+}
+}
+
+TEST_CASE("write_patch holds the changed and new assets and a marker for a removed one, and numbers the patches")
+{
+const TempDir temp;
+zodiac::Project project;
+project.root=temp.path/"game";
+project.name="game";
+project.build.assets={"assets/**"};
+const fs::path assets=project.root/"assets";
+fs::create_directories(assets/"sub");
+write_all(assets/"a.txt","a");
+write_all(assets/"same.txt","same");
+write_all(assets/"sub"/"gone.txt","gone");
+const crypto::Key key=test_key(31);
+const fs::path output=project.root/"release";
+const auto patch_of=[&]{return zodiac::cli::write_patch(project,key,output);};
+// Without a full release there is nothing to patch against.
+const auto no_manifest=patch_of();
+REQUIRE_FALSE(no_manifest);
+CHECK(no_manifest.error()=="error: no release manifest in .zodiac; build a full release first");
+zodiac::Project unpacked=project;
+unpacked.pack.enabled=false;
+CHECK(zodiac::cli::write_patch(unpacked,key,output).error()=="error: --patch needs [pack] enabled");
+// The full release: its pack and manifest, as zodiac build writes them.
+const std::string build_id="0123456789abcdef0123456789abcdef";
+{
+const auto expanded=zodiac::expand_assets(project);
+REQUIRE(expanded);
+const auto split=zodiac::cli::split_assets(project,*expanded);
+fs::create_directories(project.root/".zodiac");
+REQUIRE(zodiac::cli::write_release_pack(project,key,split,temp.path/"game.zpk",build_id));
+REQUIRE(zodiac::cli::commit_release_manifest(project));
+}
+// Nothing differs yet.
+const auto unchanged=patch_of();
+REQUIRE(unchanged);
+CHECK(unchanged->number==1);
+CHECK_FALSE(unchanged->written);
+CHECK_FALSE(fs::exists(output/"patches"));
+// One asset changed, one is new, one was removed.
+write_all(assets/"a.txt","a2");
+write_all(assets/"new.txt","new");
+fs::remove(assets/"sub"/"gone.txt");
+const auto first=patch_of();
+INFO(first.error_or(""));
+REQUIRE(first);
+CHECK(first->number==1);
+CHECK(first->written);
+CHECK(first->changed==2);
+CHECK(first->deleted==1);
+{
+auto storage=pack::PackStorage::open(output/"patches"/"patch_1.zpk",pack::KeySource(key),false);
+REQUIRE(storage);
+CHECK((*storage)->list()==std::vector<std::string>{"assets/a.txt","assets/new.txt"});
+CHECK((*storage)->stat("assets/sub/gone.txt")->kind==zodiac::vfs::EntryKind::deleted);
+CHECK((*storage)->metadata()=="base_build="+build_id+"\npatch=1");
+CHECK(entry_bytes(**storage,"assets/a.txt")=="a2");
+REQUIRE((*storage)->close());
+}
+CHECK_FALSE(fs::exists(output/"patches"/"patch_1.zpk.tmp"));
+std::vector<std::string> lines=manifest_lines(project);
+REQUIRE(lines.size()>=3);
+CHECK(lines[1]=="build "+build_id);
+CHECK(lines[2]=="next_patch 2");
+CHECK(has(lines,"deleted marker assets/sub/gone.txt"));
+// The release's own lines stay.
+CHECK(std::ranges::count_if(lines,[](const std::string& line){return line.size()>65&&line[64]==' ';})==3);
+CHECK(std::ranges::count_if(lines,[](const std::string& line){return line.starts_with("patched ");})==2);
+// The same state again is no change: the game already sees it.
+const auto again=patch_of();
+REQUIRE(again);
+CHECK_FALSE(again->written);
+CHECK(again->number==2);
+CHECK(manifest_lines(project)==lines);
+// The removed file comes back with the release's very bytes: patch 2 holds it, so patch 1's marker cannot hide it.
+write_all(assets/"sub"/"gone.txt","gone");
+const auto second=patch_of();
+REQUIRE(second);
+CHECK(second->number==2);
+CHECK(second->written);
+CHECK(second->changed==3);
+CHECK(second->deleted==0);
+{
+auto storage=pack::PackStorage::open(output/"patches"/"patch_2.zpk",pack::KeySource(key),false);
+REQUIRE(storage);
+CHECK((*storage)->list()==std::vector<std::string>{"assets/a.txt","assets/new.txt","assets/sub/gone.txt"});
+CHECK(entry_bytes(**storage,"assets/sub/gone.txt")=="gone");
+CHECK((*storage)->metadata()=="base_build="+build_id+"\npatch=2");
+REQUIRE((*storage)->close());
+}
+lines=manifest_lines(project);
+CHECK(lines[2]=="next_patch 3");
+CHECK(has(lines,"deleted entry assets/sub/gone.txt"));
+CHECK_FALSE(has(lines,"deleted marker assets/sub/gone.txt"));
+// An asset an earlier patch changed, set back to the release's bytes, is given again so no older patch shows through.
+write_all(assets/"a.txt","a");
+const auto third=patch_of();
+REQUIRE(third);
+CHECK(third->written);
+CHECK(third->number==3);
+{
+auto storage=pack::PackStorage::open(output/"patches"/"patch_3.zpk",pack::KeySource(key),false);
+REQUIRE(storage);
+CHECK(entry_bytes(**storage,"assets/a.txt")=="a");
+REQUIRE((*storage)->close());
+}
+// A file the manifest knows that is still declared but no longer packed needs a full build; nothing is written.
+const std::vector<std::string> before=manifest_lines(project);
+zodiac::Project excluding=project;
+excluding.pack.exclude={"assets/same.txt"};
+write_all(assets/"new.txt","newer");
+const auto moved=zodiac::cli::write_patch(excluding,key,output);
+REQUIRE_FALSE(moved);
+CHECK(moved.error()=="error: \"assets/same.txt\" moved out of the pack; that needs a full release build");
+CHECK_FALSE(fs::exists(output/"patches"/"patch_4.zpk"));
+CHECK(manifest_lines(project)==before);
+// A damaged manifest line is refused as the whole manifest is.
+{
+std::ofstream out(project.root/".zodiac"/"release.manifest",std::ios::binary|std::ios::app);
+out<<"no such line\n";
+}
+CHECK(patch_of().error()=="error: .zodiac/release.manifest is damaged; restore it from your backup or delete it");
+CHECK_FALSE(fs::exists(output/"patches"/"patch_4.zpk"));
 }

@@ -132,7 +132,7 @@ target_compile_definitions(test_crypto PRIVATE "ZODIAC_TEST_CRYPTO_VECTORS=\"${C
 # The nonce stress test inside needs a ZODIAC_TEST_HOOKS tree; CI builds test_pack in one too (ci.yml).
 zodiac_add_test(test_pack SOURCES test_pack.cpp script_fixture.hpp LIBRARIES zodiac_core)
 zodiac_add_test(test_pack_mount SOURCES test_pack_mount.cpp script_fixture.hpp sparse_file.cpp sparse_file.hpp LIBRARIES zodiac_core)
-zodiac_add_test(test_release_pack SOURCES test_release_pack.cpp LIBRARIES zodiac_core)
+zodiac_add_test(test_release_pack SOURCES test_release_pack.cpp LIBRARIES zodiac_cli)
 zodiac_add_test(test_literal_paths SOURCES test_literal_paths.cpp LIBRARIES zodiac_cli)
 # Replaces the global operator new to see the largest allocation, so it is an executable of its own.
 zodiac_add_test(test_release_packing SOURCES test_release_packing.cpp sparse_file.cpp sparse_file.hpp LIBRARIES zodiac_cli)
