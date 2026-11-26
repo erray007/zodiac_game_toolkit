@@ -571,9 +571,11 @@ report_internal_error("the spelling check",path);
 }
 }
 
-void Vfs::check_release_pack(std::string_view path,const VfsPath& p) noexcept
+void Vfs::check_release_pack(std::string_view path,const VfsPath& p,const Source* written) noexcept
 {
 if(!dev_mode()||!release_pack_check_||!p.mount.empty())return;
+// Only a write that lands in a folder is one the release would refuse: a write a writable pack the script mounted takes works there too.
+if(!dynamic_cast<const FolderSource*>(written))return;
 try{
 if(!release_pack_check_(p.relative))return;
 {
@@ -728,7 +730,7 @@ auto made=source.open_write(target.sub,mode);
 if(!made)return fail(made.error());
 writer=std::move(*made);
 }
-check_release_pack(path,*p);
+check_release_pack(path,*p,&source);
 check_spelling(path,*p,target);
 return writer;
 });
@@ -920,7 +922,7 @@ report_internal_error("the copy's metadata reset",path);
 
 void Vfs::written(std::string_view path,const VfsPath& p,const End& end) noexcept
 {
-check_release_pack(path,p);
+check_release_pack(path,p,end.source);
 if(end.mount)check_spelling(path,p,Target{end.mount,end.sub});
 }
 

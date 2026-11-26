@@ -9,7 +9,7 @@ target_link_libraries(zodiac_cli_linker PUBLIC zodiac_core)
 zodiac_target_warnings(zodiac_cli_linker)
 # zodiac_cli: the whole command line front end (cli::run and the build result window), compiled once and linked into both executables
 # (zodiac, console subsystem, and on Windows zodiacw, its GUI-subsystem twin) and into the tests of its parts.
-add_library(zodiac_cli STATIC main.cpp templates.hpp build_command.cpp build_command.hpp build_report.cpp build_report.hpp ${PROJECT_SOURCE_DIR}/src/platform/result_window.hpp ${PROJECT_SOURCE_DIR}/src/platform/${ZODIAC_CLI_PLATFORM_DIR}/result_window.cpp)
+add_library(zodiac_cli STATIC main.cpp templates.hpp build_command.cpp build_command.hpp build_report.cpp build_report.hpp pack_key.cpp pack_key.hpp release_packing.cpp release_packing.hpp literal_paths.cpp literal_paths.hpp ${PROJECT_SOURCE_DIR}/src/platform/result_window.hpp ${PROJECT_SOURCE_DIR}/src/platform/${ZODIAC_CLI_PLATFORM_DIR}/result_window.cpp)
 target_compile_definitions(zodiac_cli PRIVATE "ZODIAC_VERSION=\"${PROJECT_VERSION}\"" "ZODIAC_MODULE_SUFFIX=\"${CMAKE_SHARED_LIBRARY_SUFFIX}\"")
 target_link_libraries(zodiac_cli PUBLIC zodiac_cli_linker zodiac_core)
 if(WIN32)

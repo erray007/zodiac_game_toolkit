@@ -12,8 +12,8 @@
 //     at the UAC prompt (ERROR_CANCELLED); failed: anything else (no error dialog is shown, SEE_MASK_FLAG_NO_UI). The UAC prompt names
 //     its owner as the process's own foreground window (only when user32 is already loaded, so no game imports user32 for this) or its
 //     console window. An elevated process cannot share its parent's console: started from a console, the copy opens a console of its own.
-//     Before the launch the process takes the restart guard (below) and keeps it to its exit on started; on declined and failed it
-//     gives the guard back at once.
+//     Before the launch the process takes the restart guard (below) and keeps it on started, until release_held_restart_guard or
+//     its exit; on declined and failed it gives the guard back at once.
 //   - POSIX: already when euid is 0 (the owner's ruling: true for an elevated process on every platform), failed otherwise: there is
 //     no portable way to elevate (sudo, pkexec and doas all differ and all need a terminal or a desktop agent), so a game asks its
 //     player to start it as root.
@@ -26,6 +26,12 @@
 //   carries on anyway (a hung old process must not keep the game from starting; its unsaved data is then its own). The mutex lives
 //   in the session's Local\ namespace, so the elevated copy in the same session finds it, with a security descriptor granting
 //   SYNCHRONIZE to everyone (an administrator who elevates with other credentials is another user).
+//   release_held_restart_guard() gives back a guard a started restart keeps, at once (nothing when there is none, and on POSIX):
+//   zodiac run and the release call it as soon as the game has shut down (its runtime gone, so its files are committed and its
+//   packs flushed and unlocked), so the copy does not wait while the old process shows its result window or exits.
+//   The guard is named after the executable: in dev mode every `zodiac run` uses the one of zodiac.exe's own path, so an unrelated
+//   game started with `zodiac run` while another game run by the same zodiac.exe restarts elevated waits for that restart too
+//   (at most kRestartWaitMs).
 // - restart_parameters (Windows): every argument the process received after the program name, from the C runtime's __wargv (the
 //   arguments main or wmain actually got; the UCRT and CommandLineToArgvW read "" inside quotes differently), each quoted again by
 //   append_argument, so each arrives in the copy exactly as given. A process whose runtime has no wide argv (a narrow main) falls
@@ -49,6 +55,8 @@ enum class Elevation{already,started,declined,failed};
 Elevation restart_elevated() noexcept;
 // Waits for the restart guard of this executable, as described above. Returns at once when there is none (and on POSIX).
 void wait_for_restart() noexcept;
+// Releases the restart guard a started restart_elevated keeps, as described above.
+void release_held_restart_guard() noexcept;
 inline constexpr unsigned kRestartWaitMs=10000;
 // "Local\zodiac-restart-" and 16 lowercase hex digits: FNV-1a (64 bits) over the path's UTF-16 (or UTF-32) units with ASCII letters
 // folded to upper case, so one executable spelt in two cases has one guard. Deterministic, portable (the tests check it everywhere).

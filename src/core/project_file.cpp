@@ -482,4 +482,23 @@ std::ranges::sort(files);
 files.erase(std::ranges::unique(files).begin(),files.end());
 return files;
 }
+
+bool packed_in_release(const PackConfig& pack,std::string_view relative) noexcept
+{
+if(!pack.enabled)return false;
+constexpr std::string_view extension=".zpk";
+if(relative.size()>=extension.size())
+{
+bool zpk=true;
+const std::string_view tail=relative.substr(relative.size()-extension.size());
+for(std::size_t i=0;i<extension.size();++i)
+{
+char c=tail[i];
+if(c>='A'&&c<='Z')c=static_cast<char>(c-'A'+'a');
+if(c!=extension[i])zpk=false;
+}
+if(zpk)return false;
+}
+return std::ranges::none_of(pack.exclude,[relative](const std::string& pattern){return glob_match(pattern,relative);});
+}
 }

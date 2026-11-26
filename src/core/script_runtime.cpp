@@ -234,6 +234,8 @@ diagnostics_.report(ZODIAC_LOG_ERROR,line);
 return -1;
 }
 const std::string_view text=without_bom(*code);
+// Before the section is added: its #include directives are followed inside AddSectionFromMemory, so the list is depth first.
+script_files_.push_back({file,section});
 return builder.AddSectionFromMemory(section.c_str(),text.data(),static_cast<unsigned>(text.size()),0)<0?-1:0;
 }
 
@@ -273,6 +275,7 @@ int ScriptRuntime::prepare(const Project& project,std::span<const zodiac_module_
 {
 main_=nullptr;
 debug_info_stripped_=false;
+script_files_.clear();
 if(context_)context_->Unprepare();
 root_=project.root;
 if(const int modules=load_modules(project,linked,check))return modules;

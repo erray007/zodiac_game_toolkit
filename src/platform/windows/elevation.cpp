@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include <shellapi.h>
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <string>
@@ -16,6 +17,9 @@
 
 namespace zodiac::platform {
 namespace {
+// The guard a started restart keeps, until release_held_restart_guard (or the process's exit) gives it back.
+std::atomic<void*> g_held_guard{nullptr};
+
 bool query_elevated() noexcept
 {
 HANDLE token=nullptr;
@@ -170,6 +174,11 @@ CloseHandle(mutex);
 return result;
 }
 
+void release_held_restart_guard() noexcept
+{
+release_restart_guard(g_held_guard.exchange(nullptr));
+}
+
 void wait_for_restart() noexcept
 {
 try{
@@ -203,7 +212,10 @@ info.lpParameters=parameters.empty()?nullptr:parameters.c_str();
 info.lpDirectory=g_start_directory.empty()?nullptr:g_start_directory.c_str();
 info.nShow=SW_SHOWNORMAL;
 if(ShellExecuteExW(&info)){
-// Kept to the process's exit, which releases it (abandoned) once everything was written.
+// Kept until the game has shut down (release_held_restart_guard), or to the process's exit, which releases it (abandoned).
+// A second started restart holds no guard of its own (hold_restart_guard gives nullptr for a name already held), so the
+// first one is never replaced here.
+if(guard)release_restart_guard(g_held_guard.exchange(guard));
 return Elevation::started;
 }
 const DWORD error=GetLastError();

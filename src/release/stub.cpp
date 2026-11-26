@@ -6,7 +6,7 @@
 #include <core/project_file.hpp>
 #include <core/script_runtime.hpp>
 #include <core/static_modules.hpp>
-#include <core/vfs/startup.hpp>
+#include <core/pack/release_pack.hpp>
 #include <platform/elevation.hpp>
 #include <zodiac/plugin.h>
 #include <algorithm>
@@ -152,8 +152,10 @@ std::vector<const zodiac_module_info*> linked;
 if(const int code=collect_modules(*payload,root,linked,diagnostics))return code;
 if(const int code=enter_root(root,diagnostics))return code;
 ScriptRuntime runtime(diagnostics,ModuleSearchPaths{{root}});
-// The same mounts as zodiac run, for the executable's folder, before global initializers run: release mode, host paths as [files] host_paths was at build time.
-vfs::mount_game_folders(runtime.vfs(),root,payload->game_name,payload->host_paths,false);
+// The same mounts as zodiac run, for the executable's folder, then the build pack over it at "/" (pack/release_pack.hpp), before
+// global initializers run: release mode, host paths as [files] host_paths was at build time. This must stay after
+// wait_for_restart above: the process that restarted this one may still hold a writable pack's lock and its data:/ files.
+if(const int code=pack::mount_release(runtime.vfs(),*payload,pack::payload_checksum(payload_bytes),root/executable.filename(),diagnostics))return code;
 const ScriptRuntime::ModuleCheck check=[&payload,&diagnostics](std::span<const zodiac_module_info* const> loaded){return check_modules(*payload,loaded,diagnostics);};
 if(const int code=runtime.load_bytecode(project,main->bytecode,linked,check))return code;
 return exit_code_of(runtime.run(),diagnostics);
@@ -193,7 +195,10 @@ return exit_script_error;
 
 int start(std::string_view payload_bytes,const std::filesystem::path& executable)
 {
-return guarded([payload_bytes,&executable](Diagnostics& diagnostics,bool& sinks_ready){return run_game(payload_bytes,executable,diagnostics,sinks_ready);});
+const int code=guarded([payload_bytes,&executable](Diagnostics& diagnostics,bool& sinks_ready){return run_game(payload_bytes,executable,diagnostics,sinks_ready);});
+// The game has shut down (its files committed, its pack flushed and unlocked): a copy restart_as_admin started stops waiting now.
+platform::release_held_restart_guard();
+return code;
 }
 
 int start_linked(const unsigned char* begin,const unsigned char* end,const std::filesystem::path& executable)

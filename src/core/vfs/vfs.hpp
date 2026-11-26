@@ -36,7 +36,8 @@
 // Dev mode: a lookup whose spelling differs from the names on disk only by case (a FolderSource found it case-insensitively, or
 // the file system itself ignores case) warns once per path through the log:
 // `warning: "<path>" was found as "<real path>"; use the real name, other systems may not find it`. With a release pack check set
-// (Task 10), the first write to each path of the root mount that the check names warns once:
+// (zodiac run, vfs/startup.hpp), the first write to each path of the root mount that the check names, and that lands in a folder
+// source (FolderSource; not a writable pack the script mounted, where the release can write too), warns once:
 // `warning: "<path>" is written in a folder here, but the release puts it in a read-only pack, where writing fails; save files in data:/ instead`.
 // A system copy (Windows) whose bytes are right but whose time, attributes or Zone.Identifier could not be reset warns:
 // `warning: "<path>" was copied, but the time and attributes it took from its source could not be reset: <reason>`.
@@ -336,7 +337,8 @@ std::expected<VfsPath,Failure> parse_failure(std::string_view path) const;
 Failure ambiguous_failure(std::string_view path,const Target& target) const;
 // Both are advisory and never throw: whatever their work or the callbacks throw is reported by report_internal_error.
 void check_spelling(std::string_view path,const VfsPath& p,const Target& target) noexcept;
-void check_release_pack(std::string_view path,const VfsPath& p) noexcept;
+// written: the source the write went to; only a FolderSource is checked.
+void check_release_pack(std::string_view path,const VfsPath& p,const Source* written) noexcept;
 void warn(std::string_view line) const;
 mutable std::shared_mutex table_mutex_;
 std::shared_ptr<const Table> table_;

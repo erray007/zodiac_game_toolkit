@@ -16,8 +16,12 @@ Elevation restart_elevated() noexcept
 return is_elevated()?Elevation::already:Elevation::failed;
 }
 
-// No process here ever restarts itself, so there is no guard to wait for.
+// No process here ever restarts itself, so there is no guard to wait for or to give back.
 void wait_for_restart() noexcept
+{
+}
+
+void release_held_restart_guard() noexcept
 {
 }
 }

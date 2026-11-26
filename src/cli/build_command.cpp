@@ -11,7 +11,12 @@
 #include <utility>
 #ifdef _WIN32
 #include <cli/linker.hpp>
+#include <cli/literal_paths.hpp>
+#include <cli/pack_key.hpp>
+#include <cli/release_packing.hpp>
 #include <core/coff_object.hpp>
+#include <core/pack/crypto.hpp>
+#include <core/pack/release_pack.hpp>
 #include <core/kit_layout.hpp>
 #include <core/module_registry.hpp>
 #include <core/payload.hpp>
@@ -24,6 +29,7 @@
 #include <zodiac/plugin.h>
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -243,7 +249,8 @@ libraries.push_back({std::string(name),std::move(*archive)});
 return result;
 }
 
-GamePayload payload_of(const Project& project,const ScriptRuntime& runtime,std::string bytecode)
+// The payload of the release: with a pack (pack_mode not none), key is its key.
+GamePayload payload_of(const Project& project,const ScriptRuntime& runtime,std::string bytecode,PackMode pack_mode,const crypto::Key& key)
 {
 GamePayload payload;
 payload.kit_version=ZODIAC_VERSION;
@@ -258,7 +265,10 @@ payload.modules.push_back({std::string(name),std::string(or_empty(info->version)
 payload.core_exclude=project.core_exclude;
 payload.diagnostics=project.diagnostics;
 if(!payload.diagnostics.file.empty())payload.diagnostics.file=payload.diagnostics.file.lexically_relative(project.root);
-// pack_mode, pack_writable and pack_key keep their defaults (no pack) until the release packing (Task 10) fills them.
+// A release without packed assets has no pack, so nothing is mounted writable either.
+payload.pack_mode=pack_mode;
+payload.pack_writable=pack_mode!=PackMode::none&&project.pack.writable;
+if(pack_mode!=PackMode::none)payload.pack_key.assign(reinterpret_cast<const char*>(key.data()),key.size());
 payload.host_paths=project.files.host_paths;
 const std::u8string section=project.main_script.lexically_relative(project.root).generic_u8string();
 payload.scripts.push_back({std::string(reinterpret_cast<const char*>(section.data()),section.size()),true,std::move(bytecode)});
@@ -563,18 +573,82 @@ report_indented(diagnostics,!program?program.error():!ran?ran.error():ran->outpu
 return exit_build_error;
 }
 
-// Everything after the compile: the payload object, the link and the signing of the executable and the DLL copies (dynamic modules and
-// the third-party DLLs they import) under temporary names, the renames, then the assets. Returns 0 or 2.
+// Wipes a key, or the bytes of a string holding one, when it goes out of scope.
+struct WipeOnExit{
+void* bytes;
+std::size_t size;
+~WipeOnExit(){crypto::wipe(bytes,size);}
+};
+
+// Removes the manifest's temporary file on every exit but a committed one.
+class ManifestGuard{
+public:
+explicit ManifestGuard(const Project& project) noexcept:project_(project){}
+~ManifestGuard(){if(!committed_)discard_release_manifest(project_);}
+ManifestGuard(const ManifestGuard&)=delete;
+ManifestGuard& operator=(const ManifestGuard&)=delete;
+void committed() noexcept{committed_=true;}
+private:
+const Project& project_;
+bool committed_=false;
+};
+
+// The file names the build itself puts at the top of the output folder, besides the assets: the executable, the external pack and the
+// DLLs the dynamic modules ship. nullopt after a module's DLLs could not be walked (reported).
+std::optional<std::vector<std::string>> shipped_names(const GamePayload& payload,const fs::path& exe,ModuleDlls& module_dlls,Diagnostics& diagnostics)
+{
+std::vector<std::string> names{path_to_utf8(exe.filename())};
+if(payload.pack_mode==PackMode::external)names.push_back(payload.game_name+".zpk");
+for(const PayloadModule& module:payload.modules){
+if(module.link!=LinkMode::dynamic_link)continue;
+const std::vector<fs::path>* files=module_dlls.files(module.name,diagnostics);
+if(!files)return std::nullopt;
+for(const fs::path& file:*files)names.push_back(path_to_utf8(file.filename()));
+}
+return names;
+}
+
+// Everything after the compile: the asset split and the literal-path warnings, the payload object, the link, the pack (appended to
+// the executable or written beside it), the signing of the executable and the DLL copies (dynamic modules and the third-party DLLs
+// they import) under temporary names, the renames, the release manifest, then the plain assets. Returns 0 or 2.
 int write_release(const Project& project,const ScriptRuntime& runtime,const KitLayout& kit,const std::vector<StaticLibrary>& libraries,ModuleDlls& module_dlls,const fs::path& output,const fs::path& exe,Diagnostics& diagnostics)
 {
 auto bytecode=runtime.save_bytecode(project.build.strip_debug_info);
 if(!bytecode)return fail(diagnostics,bytecode.error());
-const GamePayload payload=payload_of(project,runtime,std::move(*bytecode));
+auto expanded=expand_assets(project);
+if(!expanded)return fail(diagnostics,expanded.error());
+// An output folder inside the project never feeds a later build's assets.
+std::erase_if(*expanded,[&output](const fs::path& asset){return is_inside(asset,output);});
+const AssetSplit split=split_assets(project,*expanded);
+crypto::Key key{};
+const WipeOnExit key_wipe{key.data(),key.size()};
+PackMode pack_mode=PackMode::none;
+// No packed asset: no pack, no key, no .zodiac folder (a hello stays one plain executable).
+if(!split.packed.empty()){
+auto loaded=load_or_create_pack_key(project.root);
+if(!loaded)return fail(diagnostics,loaded.error());
+key=*loaded;
+crypto::wipe(loaded->data(),loaded->size());
+pack_mode=project.pack.external?PackMode::external:PackMode::embedded;
+}
+GamePayload payload=payload_of(project,runtime,std::move(*bytecode),pack_mode,key);
+const WipeOnExit payload_key_wipe{payload.pack_key.data(),payload.pack_key.size()};
+const std::optional<std::vector<std::string>> shipped=shipped_names(payload,exe,module_dlls,diagnostics);
+if(!shipped)return exit_build_error;
+// The compiled scripts' literal paths against what the release holds: warnings only.
+check_literal_paths(project,runtime.script_files(),*expanded,*shipped,diagnostics);
 std::error_code ec;
 fs::create_directories(output,ec);
 if(ec)return fail(diagnostics,"error: cannot create directory "+quoted_path(output)+": "+error_text(ec));
+std::string serialized=serialize_payload(payload);
+const WipeOnExit serialized_wipe{serialized.data(),serialized.size()};
+const std::uint32_t payload_crc=pack::payload_checksum(serialized);
 const TemporaryFile object(output/path_from_utf8(project.name+".zodpay.obj"),diagnostics);
-if(!write_binary(object.path(),write_payload_object(serialize_payload(payload))))return fail(diagnostics,"error: cannot write "+quoted_path(object.path()));
+{
+std::string object_bytes=write_payload_object(serialized);
+const WipeOnExit object_wipe{object_bytes.data(),object_bytes.size()};
+if(!write_binary(object.path(),object_bytes))return fail(diagnostics,"error: cannot write "+quoted_path(object.path()));
+}
 fs::path tmp_path=exe;
 tmp_path+=".tmp";
 const TemporaryFile tmp(std::move(tmp_path),diagnostics);
@@ -595,6 +669,18 @@ request.inputs.push_back(kit.release_lib/"libzodiac_core_release.a");
 request.inputs.push_back(kit.release_lib/"libangelscript.a");
 // link_release reports its own failures.
 if(!link_release(kit,request,diagnostics))return exit_build_error;
+// The pack, before the signing so the signature covers it: appended to the executable (the pack written beside it first, since a
+// pack file starts at its own offset 0), or kept beside it as <name>.zpk.tmp until the renames.
+std::optional<TemporaryFile> pack_tmp;
+ManifestGuard manifest(project);
+if(pack_mode!=PackMode::none){
+pack_tmp.emplace(output/path_from_utf8(project.name+".zpk.tmp"),diagnostics);
+std::string build_id;
+if(auto written=write_release_pack(project,key,split,pack_tmp->path(),build_id);!written)return fail(diagnostics,written.error());
+if(pack_mode==PackMode::embedded){
+if(auto appended=append_pack(tmp.path(),pack_tmp->path(),payload_crc);!appended)return fail(diagnostics,appended.error());
+}
+}
 const bool signing=!project.build.sign_command.empty();
 if(signing){
 if(const int code=sign(project.build.sign_command,tmp.path(),exe,project.root,diagnostics))return code;
@@ -636,11 +722,15 @@ if(const int code=sign(project.build.sign_command,copy.copy.path(),copy.target,p
 }
 if(const int code=replace_file(tmp.path(),exe,diagnostics))return code;
 for(const Library& copy:copies)if(const int code=replace_file(copy.copy.path(),copy.target,diagnostics))return code;
-auto assets=expand_assets(project);
-if(!assets)return fail(diagnostics,assets.error());
-for(const fs::path& asset:*assets){
-// An output folder inside the project never feeds a later build's assets.
-if(is_inside(asset,output))continue;
+if(pack_mode==PackMode::external){
+if(const int code=replace_file(pack_tmp->path(),output/path_from_utf8(project.name+".zpk"),diagnostics))return code;
+}
+// The release is in place, so the manifest now describes what was shipped (patches compare against it).
+if(pack_mode!=PackMode::none){
+if(auto committed=commit_release_manifest(project);!committed)return fail(diagnostics,committed.error());
+manifest.committed();
+}
+for(const fs::path& asset:split.plain){
 if(!copy_into(asset,output/asset.lexically_relative(project.root),diagnostics))return exit_build_error;
 }
 return exit_ok;

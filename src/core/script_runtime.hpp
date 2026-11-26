@@ -62,6 +62,14 @@ int load_bytecode(const Project& project,std::string_view bytecode,std::span<con
 std::span<const std::string> module_order() const noexcept{return registry_.ordered_names();}
 // The loaded module infos, parallel to module_order(); same lifetime.
 std::span<const zodiac_module_info* const> modules() const noexcept{return registry_.ordered();}
+// A script file the last build compiled: its path (absolute, normalized) and its section name (as messages name it).
+struct ScriptFile{
+std::filesystem::path path;
+std::string section;
+};
+// The files the last build compiled, main first, then each included file in the order its #include was met (depth first, each
+// once); empty after load_bytecode. zodiac build's literal-path warnings read them. Invalidated by the next build or load_bytecode.
+std::span<const ScriptFile> script_files() const noexcept{return script_files_;}
 int run();
 private:
 friend struct RuntimeCallbacks;
@@ -91,6 +99,7 @@ asIScriptFunction* main_=nullptr;
 std::filesystem::path root_;
 std::string main_section_;
 std::unordered_set<std::string> included_;
+std::vector<ScriptFile> script_files_;
 // True when the script module came from bytecode saved without debug info.
 bool debug_info_stripped_=false;
 // While set, engine messages are kept here instead of being reported (load_bytecode decides afterwards whether they are meaningful).

@@ -72,6 +72,20 @@ void seal(const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::
 [[nodiscard]] Key derive_file_key(const Key& master,std::span<const std::uint8_t,16> salt) noexcept;
 [[nodiscard]] Key derive_index_key(const Key& file_key) noexcept;
 [[nodiscard]] std::array<std::uint8_t,32> hash(std::span<const std::byte> data) noexcept;
+// hash() in pieces: update with the data in any number of spans, then digest() gives hash() of their concatenation (once; the
+// state is wiped then, and by the destructor). A file is hashed while it is streamed, never held whole.
+class Hasher{
+public:
+Hasher() noexcept;
+~Hasher();
+Hasher(const Hasher&)=delete;
+Hasher& operator=(const Hasher&)=delete;
+void update(std::span<const std::byte> data) noexcept;
+[[nodiscard]] std::array<std::uint8_t,32> digest() noexcept;
+private:
+// Monocypher's crypto_blake2b_ctx (crypto.cpp checks the size and alignment), kept opaque so monocypher.h stays in crypto.cpp.
+alignas(8) std::byte state_[224];
+};
 void random_bytes(std::span<std::byte> out);
 // Zeroes size bytes at secret in a way the optimizer cannot remove (Monocypher's crypto_wipe).
 void wipe(void* secret,std::size_t size) noexcept;

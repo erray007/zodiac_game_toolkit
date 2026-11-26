@@ -1,16 +1,22 @@
 // Calls zodiac::release::start directly with payloads made from fixture projects (build + save_bytecode), using a temporary folder as the executable's folder.
+// The release pack cases lay game.exe out as zodiac build does (filler for the linked image, the pack, its trailer) or put <game>.zpk beside it.
 // start() writes its diagnostics to the console sink, so standard error is redirected to a file while it runs.
 #include <core/diagnostics.hpp>
 #include <core/module_registry.hpp>
+#include <core/pack/crypto.hpp>
+#include <core/pack/pack_storage.hpp>
+#include <core/pack/release_pack.hpp>
 #include <core/payload.hpp>
 #include <core/project_file.hpp>
 #include <core/script_runtime.hpp>
 #include <doctest/doctest.h>
 #include <platform/console.hpp>
+#include <platform/file.hpp>
 #include <release/stub.hpp>
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +25,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -472,4 +479,177 @@ INFO(join(started.lines));
 CHECK(started.code==0);
 CHECK(started.lines.empty());
 CHECK(read_file(user_data.dir()/"stub_game"/"s.txt")=="from the game folder!");
+}
+
+namespace {
+zodiac::crypto::Key release_key()
+{
+zodiac::crypto::Key key;
+for(std::size_t i=0;i<key.size();++i)key[i]=static_cast<std::uint8_t>(0x5Au^(i*29));
+return key;
+}
+// A release pack holding entries (name, bytes) under key, as bytes.
+std::string release_pack(const std::vector<std::pair<std::string,std::string>>& entries,const zodiac::crypto::Key& key)
+{
+const TempDir dir;
+const fs::path path=dir.dir()/"build.zpk";
+{
+auto storage=zodiac::pack::PackStorage::open(path,zodiac::pack::KeySource(key),true);
+REQUIRE(storage);
+for(const auto& [name,data]:entries)REQUIRE((*storage)->add(name,std::as_bytes(std::span(data)),0));
+REQUIRE((*storage)->close());
+}
+return read_file(path);
+}
+// payload set up for a pack: the game name "packed", the mode, the key and writable.
+void set_pack(zodiac::GamePayload& payload,zodiac::PackMode mode,const zodiac::crypto::Key& key,bool writable=false)
+{
+payload.game_name="packed";
+payload.pack_mode=mode;
+payload.pack_writable=writable;
+payload.pack_key.assign(reinterpret_cast<const char*>(key.data()),key.size());
+}
+// folder/game.exe as zodiac build lays out an embedded pack: 4096 bytes of filler (the linked image), the pack, alignment, the trailer.
+void write_embedded(const fs::path& folder,std::string_view pack_bytes,std::uint32_t payload_crc)
+{
+std::string image(4096,'\x90');
+image.append(pack_bytes);
+while((image.size()+zodiac::pack::kTrailerSize)%zodiac::pack::kTrailerAlignment)image.push_back('\0');
+image.append(zodiac::pack::trailer_bytes(4096,pack_bytes.size(),payload_crc));
+write_file(folder/"game.exe",image);
+}
+constexpr const char* kPackedScript="int main(){if(read_file(\"data/a.txt\")!=\"from the pack\")return 3;return file_exists(\"DATA/A.TXT\")?0:4;}\n";
+}
+
+TEST_CASE("start runs a game whose pack is embedded")
+{
+const TempDir folder;
+const zodiac::crypto::Key key=release_key();
+zodiac::GamePayload payload=source_payload("",kPackedScript);
+set_pack(payload,zodiac::PackMode::embedded,key);
+const std::string bytes=zodiac::serialize_payload(payload);
+const std::string pack_bytes=release_pack({{"data/a.txt","from the pack"}},key);
+write_embedded(folder.dir(),pack_bytes,zodiac::pack::payload_checksum(bytes));
+// The pack lies in its window at offset 4096 of the executable; the file around it is no pack.
+{
+auto file=zodiac::platform::File::open(folder.dir()/"game.exe",zodiac::platform::FileAccess::read);
+REQUIRE(file);
+const auto location=zodiac::pack::find_embedded_pack(*file,zodiac::pack::payload_checksum(bytes));
+REQUIRE(location);
+CHECK(location->offset==4096);
+CHECK(location->size==pack_bytes.size());
+}
+const Started started=start_in(folder.dir(),bytes);
+INFO(join(started.lines));
+CHECK(started.code==0);
+CHECK(started.lines.empty());
+// Nothing was unpacked into the game folder.
+CHECK_FALSE(fs::exists(folder.dir()/"data"));
+}
+
+TEST_CASE("start refuses an embedded pack of another build, of another key or with no trailer")
+{
+const TempDir folder;
+const zodiac::crypto::Key key=release_key();
+zodiac::GamePayload payload=source_payload("",kPackedScript);
+set_pack(payload,zodiac::PackMode::embedded,key);
+const std::string bytes=zodiac::serialize_payload(payload);
+const std::vector<std::string> damaged{"error: the game data is damaged (pack: wrong key or damaged pack)"};
+const std::string pack_bytes=release_pack({{"data/a.txt","from the pack"}},key);
+// Another build's payload.
+write_embedded(folder.dir(),pack_bytes,zodiac::pack::payload_checksum(bytes)^1u);
+Started started=start_in(folder.dir(),bytes);
+CHECK(started.code==2);
+CHECK(started.lines==damaged);
+// Another key.
+zodiac::crypto::Key other=key;
+other[0]^=0x01;
+write_embedded(folder.dir(),release_pack({{"data/a.txt","from the pack"}},other),zodiac::pack::payload_checksum(bytes));
+started=start_in(folder.dir(),bytes);
+CHECK(started.code==2);
+CHECK(started.lines==damaged);
+// No trailer at all.
+write_file(folder.dir()/"game.exe",std::string(4096,'\x90'));
+started=start_in(folder.dir(),bytes);
+CHECK(started.code==2);
+CHECK(started.lines==damaged);
+// A pack mode without a key, and writable without external, are contradictions no build writes.
+zodiac::GamePayload keyless=payload;
+keyless.pack_key.clear();
+started=start_in(folder.dir(),keyless);
+CHECK(started.code==2);
+CHECK(started.lines==std::vector<std::string>{"error: the game data is damaged (invalid pack key)"});
+zodiac::GamePayload writable=payload;
+writable.pack_writable=true;
+started=start_in(folder.dir(),writable);
+CHECK(started.code==2);
+CHECK(started.lines==std::vector<std::string>{"error: the game data is damaged (invalid pack or file setting)"});
+}
+
+TEST_CASE("start reads an external pack")
+{
+const TempDir folder;
+const zodiac::crypto::Key key=release_key();
+zodiac::GamePayload payload=source_payload("",kPackedScript);
+set_pack(payload,zodiac::PackMode::external,key);
+write_file(folder.dir()/"packed.zpk",release_pack({{"data/a.txt","from the pack"}},key));
+const Started started=start_in(folder.dir(),payload);
+INFO(join(started.lines));
+CHECK(started.code==0);
+CHECK(started.lines.empty());
+// Read only, so a script's write to a packed name fails with the read-only pack text, and the pack is unchanged.
+zodiac::GamePayload writing=source_payload("","int main(){if(write_file(\"data/a.txt\",\"x\"))return 3;return last_file_error()==\"\\\"data/a.txt\\\" is in a read-only pack; save files in data:/ instead\"?0:4;}\n");
+set_pack(writing,zodiac::PackMode::external,key);
+const std::string before=read_file(folder.dir()/"packed.zpk");
+const Started refused=start_in(folder.dir(),writing);
+INFO(join(refused.lines));
+CHECK(refused.code==0);
+CHECK(read_file(folder.dir()/"packed.zpk")==before);
+}
+
+TEST_CASE("start refuses a missing external pack")
+{
+const TempDir folder;
+zodiac::GamePayload payload=source_payload("",kPackedScript);
+set_pack(payload,zodiac::PackMode::external,release_key());
+const Started started=start_in(folder.dir(),payload);
+CHECK(started.code==2);
+CHECK(started.lines==std::vector<std::string>{"error: the game data is damaged (pack \"packed.zpk\" is missing)"});
+// The writable one too.
+payload.pack_writable=true;
+const Started writable=start_in(folder.dir(),payload);
+CHECK(writable.code==2);
+CHECK(writable.lines==std::vector<std::string>{"error: the game data is damaged (pack \"packed.zpk\" is missing)"});
+}
+
+TEST_CASE("start mounts the pack before global initializers run")
+{
+const TempDir folder;
+const zodiac::crypto::Key key=release_key();
+// The build that makes the payload runs the initializer too, with nothing mounted: file_exists keeps it from throwing there.
+zodiac::GamePayload payload=source_payload("","string g=file_exists(\"data/a.txt\")?read_file(\"data/a.txt\"):\"\";\nint main(){return g==\"from the pack\"?0:3;}\n");
+set_pack(payload,zodiac::PackMode::external,key);
+write_file(folder.dir()/"packed.zpk",release_pack({{"data/a.txt","from the pack"}},key));
+const Started started=start_in(folder.dir(),payload);
+INFO(join(started.lines));
+CHECK(started.code==0);
+CHECK(started.lines.empty());
+}
+
+TEST_CASE("a writable release pack keeps a script's write across two starts")
+{
+const TempDir folder;
+const zodiac::crypto::Key key=release_key();
+zodiac::GamePayload payload=source_payload("","int main(){if(file_exists(\"save.txt\"))return read_file(\"save.txt\")==\"level 2\"?10:11;return write_file(\"save.txt\",\"level 2\")?0:12;}\n");
+set_pack(payload,zodiac::PackMode::external,key,true);
+write_file(folder.dir()/"packed.zpk",release_pack({{"data/a.txt","from the pack"}},key));
+const Started first=start_in(folder.dir(),payload);
+INFO(join(first.lines));
+CHECK(first.code==0);
+// The write went into the pack, not into the game folder.
+CHECK_FALSE(fs::exists(folder.dir()/"save.txt"));
+const Started second=start_in(folder.dir(),payload);
+INFO(join(second.lines));
+CHECK(second.code==10);
+CHECK(second.lines.empty());
 }

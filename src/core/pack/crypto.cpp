@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <new>
 #include <stdexcept>
 
 namespace zodiac::crypto {
@@ -190,6 +191,31 @@ std::array<std::uint8_t,32> hash(std::span<const std::byte> data) noexcept
 {
 std::array<std::uint8_t,32> digest;
 crypto_blake2b(digest.data(),digest.size(),bytes_of(data),data.size());
+return digest;
+}
+
+static_assert(sizeof(crypto_blake2b_ctx)<=224&&alignof(crypto_blake2b_ctx)<=8,"Hasher's state must hold a crypto_blake2b_ctx");
+
+Hasher::Hasher() noexcept
+{
+crypto_blake2b_init(::new(static_cast<void*>(state_)) crypto_blake2b_ctx,32);
+}
+
+Hasher::~Hasher()
+{
+wipe(state_,sizeof state_);
+}
+
+void Hasher::update(std::span<const std::byte> data) noexcept
+{
+crypto_blake2b_update(std::launder(reinterpret_cast<crypto_blake2b_ctx*>(state_)),bytes_of(data),data.size());
+}
+
+std::array<std::uint8_t,32> Hasher::digest() noexcept
+{
+std::array<std::uint8_t,32> digest;
+// crypto_blake2b_final wipes the context.
+crypto_blake2b_final(std::launder(reinterpret_cast<crypto_blake2b_ctx*>(state_)),digest.data());
 return digest;
 }
 

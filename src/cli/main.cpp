@@ -194,13 +194,12 @@ std::string game_name;
 std::optional<platform::ResultAction> create;
 };
 
-// Loads, builds and runs the game; info is filled as RunInfo says. The caller has checked the command line and opened --log-file.
+// Loads, builds and runs the game; info is filled as RunInfo says. The caller has checked the command line, waited for a restart
+// (wait_for_restart) and opened --log-file.
 // A script without a project file (and without --config) runs with the core only; when its scripts fail to compile (exit 1), the warning-level
 // line lone_script_compile_note follows the compiler's errors (not for a missing main() or a failing global initializer).
 int run_game(const Options& options,Diagnostics& diagnostics,RunInfo& info)
 {
-// A copy restart_as_admin started waits until the process that started it has finished writing (platform/elevation.hpp).
-platform::wait_for_restart();
 const fs::path directory=options.positional.empty()?fs::path("."):path_from_utf8(options.positional.front());
 const std::vector<fs::path> dirs=search_dirs(options);
 std::expected<Project,std::string> project=std::unexpected(std::string());
@@ -257,14 +256,23 @@ fail(diagnostics,"error: run takes at most one project directory or script; run 
 return exit_usage_error;
 }
 if(!check_config_target(options,diagnostics))return exit_usage_error;
+// A copy restart_as_admin started waits until the process that started it has finished writing (platform/elevation.hpp), before
+// anything is touched: the log file (--log-file or the project's), the project's folders, data:/ and its packs.
+platform::wait_for_restart();
 // --log-file goes first so that a project file error is captured as well.
 if(!add_log_file(diagnostics,options.log_file))return exit_usage_error;
 RunInfo info;
-if(options.no_window)return run_game(options,diagnostics,info);
+// The game's runtime is gone once run_game returns, so a restart's copy may start at once, not after the result window.
+const auto run=[&]{
+const int code=run_game(options,diagnostics,info);
+platform::release_held_restart_guard();
+return code;
+};
+if(options.no_window)return run();
 auto owned=std::make_unique<ResultReport>(ResultVerb::run);
 const ResultReport& report=*owned;
 diagnostics.add_sink(std::move(owned));
-const int code=run_game(options,diagnostics,info);
+const int code=run();
 if(report.errors()==0)return code;
 platform::write_stdout_line(report.summary(false,{}));
 if(!platform::has_interactive_desktop())return code;

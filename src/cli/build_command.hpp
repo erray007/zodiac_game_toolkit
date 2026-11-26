@@ -1,4 +1,5 @@
-// zodiac::cli::build_project is "zodiac build": it turns a project into a release folder holding <name>.exe, its dynamic module DLLs and its assets.
+// zodiac::cli::build_project is "zodiac build": it turns a project into a release folder holding <name>.exe (with its assets packed into it,
+// or beside it in <name>.zpk), its dynamic module DLLs and its plain assets.
 //
 // Steps (release-and-kit spec 8.2), each failure reported as one line through Diagnostics:
 // 1. With config, the project is load_project_file(config), and a target (a .zs script) becomes its main script through set_main_script (a missing
@@ -17,8 +18,17 @@
 //    ("error: plugin "<name>" was not built with this kit's toolchain; list it under dynamic"). Every static module is checked before the build stops (exit 2).
 // 3. The scripts compile exactly as in zodiac run (errors exit 1), in the project root as working directory, and the bytecode is saved
 //    (without debug info when [build] strip_debug_info is set).
-// 4. The payload (kit_version ZODIAC_VERSION; requested: static then dynamic names as the runtime loads them; modules: registration order with versions)
-//    is written as <output>/<name>.zodpay.obj and linked by link_release to <output>/<name>.exe.tmp.
+// 4. The expanded [build] assets (except files inside the output folder, compared case-insensitively, as Windows does) are split by
+//    split_assets (cli/release_packing.hpp): plain ones ([pack] enabled false, [pack] exclude, *.zpk) and packed ones. With packed
+//    assets the key is load_or_create_pack_key(root) (cli/pack_key.hpp; its errors exit 2), and the pack mode is external with
+//    [pack] external (forced by writable), else embedded; without any, there is no pack, no key and no .zodiac folder. The
+//    literal-path warnings of check_literal_paths (cli/literal_paths.hpp) follow, for every compiled script, against every asset
+//    and the files the build ships (warnings only). The payload (kit_version ZODIAC_VERSION; requested: static then dynamic names
+//    as the runtime loads them; modules: registration order with versions; pack_mode, pack_writable ([pack] writable, with a pack)
+//    and pack_key; host_paths) is written as <output>/<name>.zodpay.obj and linked by link_release to <output>/<name>.exe.tmp.
+//    Then the pack is written by write_release_pack to <output>/<name>.zpk.tmp (with .zodiac/release.manifest.tmp) and, embedded,
+//    appended to <name>.exe.tmp with its trailer by append_pack (pack/release_pack.hpp has the layout), before the signing, so the
+//    signature covers it. The key is wiped from every buffer the build made once it is done.
 // 5. With [build.sign] command, the command runs on <name>.exe.tmp with {file} replaced by that temporary path; the program is an absolute path,
 //    a path relative to the project root, or a name searched on PATH. Every dynamic module (a registered module not listed as static, so also an
 //    undeclared dependency) is then copied from the folder it was loaded from to <output>/<dll>.tmp and signed the same way, followed by its
@@ -34,15 +44,17 @@
 //    loader; the copy reuses it, walking only modules found while loading (undeclared dependencies). A failed signing:
 //    "error: signing "<final file>" failed" (the .exe or .dll path the file is built for) followed by the tool's output, each line indented by
 //    two spaces (exit 2).
-// 6. <name>.exe.tmp is renamed over <output>/<name>.exe, then each <dll>.tmp over its DLL. A rename that fails because another process holds the
-//    old file open (a sharing or lock violation): "error: cannot replace "<file>": it is in use (is the game still running?)"; any other failure
-//    (a read-only file, a folder of that name): "error: cannot replace "<file>": <system reason>" (exit 2). A build that fails up to and including
-//    the executable's replace (a link, copy or signing failure included) leaves the old executable and DLLs untouched, and no temporary file
-//    (.tmp, .obj, .rsp) is left behind, whatever happened.
-// 7. The expanded [build] assets are copied keeping their project-relative paths, except files inside the output folder (compared
-//    case-insensitively, as Windows does). A failure from the DLL renames on leaves the new executable in place, with the files replaced
-//    before the failure (each copy replaces its file whole) and the rest as an earlier build left them. Stale files of earlier builds in the
-//    output folder are never removed.
+// 6. <name>.exe.tmp is renamed over <output>/<name>.exe, then each <dll>.tmp over its DLL, then (external) <name>.zpk.tmp over
+//    <output>/<name>.zpk. A rename that fails because another process holds the old file open (a sharing or lock violation): "error: cannot
+//    replace "<file>": it is in use (is the game still running?)"; any other failure (a read-only file, a folder of that name): "error:
+//    cannot replace "<file>": <system reason>" (exit 2). A build that fails up to and including the executable's replace (a link, pack,
+//    copy or signing failure included) leaves the old executable, DLLs and pack untouched, and no temporary file (.tmp, .obj, .rsp,
+//    .zpk.tmp, .zodiac/release.manifest.tmp) is left behind, whatever happened. Once every rename is done, .zodiac/release.manifest.tmp
+//    replaces .zodiac/release.manifest (commit_release_manifest), so the manifest changes only with a release that is in place.
+// 7. The plain assets are copied keeping their project-relative paths. A failure from the DLL renames on leaves the new executable in
+//    place, with the files replaced before the failure (each copy replaces its file whole) and the rest as an earlier build left them.
+//    Stale files of earlier builds in the output folder are never removed (an earlier build's <name>.zpk next to an embedded one is
+//    never read by it).
 // Exit codes: 0 success, 1 script error, 2 project, module, link or file error. On hosts other than Windows the only result is
 // "error: release builds are not supported on this host yet" (exit 2).
 // Result (spec 8.2a): every message goes to the console as it happens, and the last line on standard output is the summary ResultReport::summary

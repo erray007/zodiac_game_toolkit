@@ -94,4 +94,9 @@ std::expected<Project,std::string> load_project_for_script(const std::filesystem
 // the file system compares names (same_path_text: case-insensitively on Windows). A pattern matching nothing is not an error; a missing or unreadable directory is: the error is one line, `zodiac.toml: error: cannot read directory "<path>": <reason>`.
 // A link whose target no longer exists is skipped (there is nothing to copy); any other entry whose type cannot be read is an error: `zodiac.toml: error: cannot read "<entry path>": <reason>`.
 std::expected<std::vector<std::filesystem::path>,std::string> expand_assets(const Project& project);
+// True when a release build puts the asset relative (project-relative, '/' separators, as expand_assets' patterns see it) into its
+// pack: [pack] enabled, no [pack] exclude pattern matches it, and it is no ".zpk" file (ASCII case-insensitively; a pack shipped as
+// an asset stays a plain file, so a script opens it with its own key). Shared by zodiac build's asset split and zodiac run's
+// release pack check, so both agree.
+bool packed_in_release(const PackConfig& pack,std::string_view relative) noexcept;
 }
