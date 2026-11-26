@@ -636,6 +636,7 @@ entries_.emplace(std::move(folds[i]),std::move(entry));
 // Not shared yet: the folders are counted without the lock.
 for(const auto& [fold,entry]:entries_){
 const bool marker=entry.record.deleted;
+if(marker)markers_.insert(fold);
 each_folder(fold,[&](std::string_view folder){
 auto slot=folders_.find(folder);
 if(slot==folders_.end())slot=folders_.try_emplace(std::string(folder)).first;
@@ -796,28 +797,28 @@ if(found==entries_.end())return vfs::EntryKind::none;
 return vfs::EntryKind::deleted;
 }
 
-bool PackStorage::markers_below(std::string_view folder) const
+PackStorage::Below PackStorage::count_below(std::string_view folder) const
 {
 const FoldKey fold(folder);
 const std::shared_lock lock(mutex_);
-if(closed_)return false;
-if(folder.empty())return entries_.size()!=files_;
+if(closed_)return {};
+if(folder.empty())return Below{files_,entries_.size()-files_};
 const auto counted=folders_.find(fold.view());
-return counted!=folders_.end()&&counted->second.markers>0;
+if(counted==folders_.end())return {};
+return Below{counted->second.files,counted->second.markers};
 }
 
-void PackStorage::files_below(std::string_view folder,std::vector<std::string>& out) const
+void PackStorage::markers_below(std::string_view folder,std::vector<std::string>& out) const
 {
 const std::string fold=vfs::fold_name(folder);
+// Every fold below the folder starts with "<fold>/", and they lie together in the ordered index: only those are visited.
+const std::string prefix=fold.empty()?std::string():fold+"/";
 const std::shared_lock lock(mutex_);
 if(closed_)return;
-if(!fold.empty()){
-const auto counted=folders_.find(std::string_view(fold));
-if(counted==folders_.end()||counted->second.files==0)return;
-out.reserve(out.size()+counted->second.files);
+for(auto it=markers_.lower_bound(std::string_view(prefix));it!=markers_.end()&&it->starts_with(prefix);++it){
+const auto found=entries_.find(std::string_view(*it));
+if(found!=entries_.end())out.push_back(found->second.record.name);
 }
-else out.reserve(out.size()+files_);
-for(const auto& [key,entry]:entries_)if(!entry.record.deleted&&(fold.empty()||below(key,fold)))out.push_back(entry.record.name);
 }
 
 bool PackStorage::below_file_locked(std::string_view fold) const
@@ -848,17 +849,28 @@ FolderNodes folders=new_folders_writing(fold);
 FolderNodes dropped;
 dropped.reserve(folder_depth(fold));
 const auto existing=entries_.find(fold);
+const bool marker=record.deleted;
+const bool was_marker=existing!=entries_.end()&&existing->second.record.deleted;
+// The marker index changes when a marker comes or goes: a new node made here, an old one freed after the lock.
+MarkerNode marker_node;
+MarkerNode dropped_marker;
+if(marker&&!was_marker){
+Markers made;
+marker_node=made.extract(made.emplace(fold).first);
+}
 EntryNode node;
 if(existing==entries_.end()){
 Entries made;
 node=made.extract(made.try_emplace(std::move(fold)).first);
 }
 const bool fresh=static_cast<bool>(node);
-const bool marker=record.deleted;
 // The entry replaced, freed after the shared mutex is released.
 Entry previous;
 {
 const std::unique_lock lock(mutex_);
+// A set's insert and extract of a node allocate nothing.
+if(marker_node)markers_.insert(std::move(marker_node));
+else if(was_marker&&!marker)dropped_marker=markers_.extract(existing->first);
 // The reserves are all that can throw (growing a bucket array, rarely), and they come before any change.
 folders_.reserve(folders_.size()+folders.size());
 if(fresh)entries_.reserve(entries_.size()+1);
@@ -1084,10 +1096,12 @@ FolderNodes folders=new_folders_writing(to_fold);
 FolderNodes dropped;
 dropped.reserve(folder_depth(from_fold)+folder_depth(to_fold));
 EntryNode moved;
-// The file to replaced, freed after the shared mutex is released.
+// The file to replaced, and a marker of to's name leaving the marker index, freed after the shared mutex is released.
 EntryNode replaced;
+MarkerNode dropped_marker;
 {
 const std::unique_lock lock(mutex_);
+if(const auto old=entries_.find(to_fold);old!=entries_.end()&&old->second.record.deleted)dropped_marker=markers_.extract(to_fold);
 // The reserve is all that can throw (growing the bucket array, rarely), and it comes before any change. entries_ never grows
 // here: one node leaves before it (or another) goes back.
 folders_.reserve(folders_.size()+folders.size());
@@ -1435,6 +1449,7 @@ result=std::unexpected(FileError::io);
 }
 Entries dropped;
 Folders dropped_folders;
+Markers dropped_markers;
 // The storage lets go of the file here; readers may keep it open, but not its lock, which is released below.
 std::shared_ptr<platform::File> file;
 {
@@ -1442,6 +1457,7 @@ const std::unique_lock lock(mutex_);
 closed_=true;
 entries_.swap(dropped);
 folders_.swap(dropped_folders);
+markers_.swap(dropped_markers);
 files_=0;
 file_.swap(file);
 }

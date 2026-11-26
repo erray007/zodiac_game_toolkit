@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <tuple>
+#include <unordered_set>
 
 namespace zodiac::vfs {
 namespace {
@@ -335,13 +336,18 @@ bool Source::implied_folders() const noexcept
 return false;
 }
 
-bool Source::markers_below(std::string_view)
+EntriesBelow Source::count_below(std::string_view)
 {
-return false;
+return {};
 }
 
-void Source::files_below(std::string_view,std::vector<std::string>&)
+void Source::markers_below(std::string_view,std::vector<std::string>&)
 {
+}
+
+std::expected<bool,FileError> Source::leave_marker(std::string_view)
+{
+return false;
 }
 
 Vfs::Vfs():table_(std::make_shared<const Table>()),host_(std::make_shared<HostSource>()),checked_(std::make_unique<std::atomic<std::uint64_t>[]>(checked_slots))
@@ -440,34 +446,41 @@ bool Vfs::folder_shown(const Table& table,const VfsPath& p,const Mount* mount,st
 {
 // A mount's own folder is a mount folder; a host folder's folders exist on their own.
 if(sub.empty()||!mount->source->implied_folders())return true;
-// The usual case, a folder no newer mount deletes anything in, costs one marker lookup per newer mount.
-bool marked=false;
+// A newer mount that answered nothing for p holds no shown file below it (it would have the folder then), so a file of mount
+// below p is hidden exactly when a newer mount holds a marker of its name. One lookup per mount decides the usual case: more
+// files here than newer markers below p, so at least one file is shown whatever they hide.
+const std::uint64_t files=mount->source->count_below(sub).files;
+std::uint64_t markers=0;
 visit_covering(table,p,[&](const Target& target){
 if(target.mount==mount)return true;
-marked=target.mount->source->markers_below(target.sub);
-return marked;
+markers+=target.mount->source->count_below(target.sub).markers;
+return false;
 });
-if(!marked)return true;
-std::vector<std::string> files;
-mount->source->files_below(sub,files);
-// Each file's path below the mount's mount point (reused for every file), looked up in the mounts newer than mount.
-VfsPath file;
-file.mount=p.mount;
-for(const std::string& name:files){
-file.relative.assign(mount->at);
-if(!file.relative.empty())file.relative.push_back('/');
-file.relative.append(name);
-bool hidden=false;
-visit_covering(table,file,[&](const Target& target){
+if(files>markers)return true;
+// Otherwise the newer markers below p (each mount visits only that folder's markers) are matched against this mount's files,
+// each name once; the folder is shown while a file is left.
+std::uint64_t hidden=0;
+std::unordered_set<std::string> seen;
+std::vector<std::string> names;
+std::string relative;
+visit_covering(table,p,[&](const Target& target){
 if(target.mount==mount)return true;
-const auto info=target.mount->source->stat(target.sub);
-if(!info)return !fall_through(info.error());
-hidden=info->kind==EntryKind::deleted;
-return true;
-});
-if(!hidden)return true;
+names.clear();
+target.mount->source->markers_below(target.sub,names);
+const std::size_t skip=segment_count(target.sub);
+for(const std::string& name:names){
+// The marker's name below p: its first segments are target.sub's (by fold).
+const std::size_t start=skip?prefix_end(name,skip):std::string::npos;
+const std::string_view rest=skip?(start<name.size()?std::string_view(name).substr(start+1):std::string_view()):std::string_view(name);
+if(rest.empty()||!seen.insert(fold_name(rest)).second)continue;
+relative.assign(sub).push_back('/');
+relative.append(rest);
+const auto info=mount->source->stat(relative);
+if(info&&info->kind==EntryKind::file)++hidden;
 }
 return false;
+});
+return files>hidden;
 }
 
 std::expected<void,Vfs::MountError> Vfs::try_mount(std::string_view at,std::shared_ptr<Source> source,bool writable,const void* owner) noexcept
@@ -1474,7 +1487,50 @@ return failed(FileError::not_found);
 const Target& target=decided.target;
 if(!target.mount->writable)return std::unexpected(Failure{FileError::read_only_pack,read_only_text(path)});
 check_spelling(path,*p,target);
-if(auto removed=target.mount->source->remove_directory(target.sub,recursive);!removed)return std::unexpected(removed.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{removed.error(),{}});
+Source& source=*target.mount->source;
+if(auto removed=source.remove_directory(target.sub,recursive);!removed)return std::unexpected(removed.error()==FileError::ambiguous?ambiguous_failure(path,target):Failure{removed.error(),{}});
+if(!recursive)return {};
+// As remove does for one file: every file below the folder that an older mount still provides gets a marker, so the folder's
+// older files stay deleted (an older pack's folder goes with them; an older host folder stays, empty). The paths below p,
+// each fold once, from every older mount's listing.
+std::vector<std::string> below;
+std::unordered_set<std::string> folds;
+bool past=false;
+visit_covering(*table,*p,[&](const Target& older){
+if(!past){
+past=older.mount==target.mount;
+return false;
+}
+// Depth first through an explicit stack of (the folder below the source's root, the same folder below p).
+std::vector<std::pair<std::string,std::string>> folders{{std::string(older.sub),std::string()}};
+std::vector<EntryInfo> entries;
+while(!folders.empty()){
+auto [at,rest]=std::move(folders.back());
+folders.pop_back();
+entries.clear();
+if(!older.mount->source->list(at,entries))continue;
+for(EntryInfo& entry:entries){
+std::string name=rest.empty()?entry.name:rest+"/"+entry.name;
+if(entry.kind==EntryKind::directory)folders.emplace_back(at.empty()?entry.name:at+"/"+entry.name,std::move(name));
+else if(entry.kind==EntryKind::file&&folds.insert(fold_name(name)).second)below.push_back(std::move(name));
+}
+}
+return false;
+});
+VfsPath file;
+file.mount=p->mount;
+std::string sub;
+for(const std::string& name:below){
+file.relative.assign(p->relative).push_back('/');
+file.relative.append(name);
+if(!older_provides(*table,file,target.mount))continue;
+sub.assign(target.sub).push_back('/');
+sub.append(name);
+const auto left=source.leave_marker(sub);
+if(!left)return std::unexpected(Failure{left.error(),{}});
+// A source without markers (a host folder) cannot keep them hidden.
+if(!*left)break;
+}
 return {};
 });
 }

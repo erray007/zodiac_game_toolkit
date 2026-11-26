@@ -4,8 +4,9 @@
 //   every folder of an entry name (a name some file entry continues with '/') is a folder too. Packs hold no empty folders.
 // - Deletion markers: stat gives EntryKind::deleted, open_read a null reader, list appends them; the Vfs then hides the file of
 //   that name in every older mount and in the folder below (vfs.hpp), not a folder of that fold. A marker's name that is also a
-//   folder with files here is that folder. Folders are implied (implied_folders): markers_below and files_below let the Vfs show
-//   an older mount's folder only while a file of it is shown.
+//   folder with files here is that folder. Folders are implied (implied_folders): count_below and markers_below let the Vfs show
+//   an older mount's folder only while a file of it is shown. leave_marker stores a marker (writable only: access_denied
+//   otherwise), for the older files below a folder a recursive delete_directory removed.
 // - Reads: readers are PackStorage::open_mounted's, so each holds the storage: a file opened through a mount keeps reading after
 //   the mount (and every pack object) is gone, and the storage is freed with its last reader. A read never takes the storage's
 //   writer mutex, so it never waits for a write's I/O or encryption.

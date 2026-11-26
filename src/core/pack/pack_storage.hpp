@@ -88,9 +88,10 @@
 // or a directory for a folder of the pack: a name that some file entry's name continues with '/' (folders hold no markers of
 // their own, and a folder holding only markers is none). A marker is a file's (it hides older files of its name, never a
 // folder: vfs.hpp), so a name that is both a marker and a folder with files is that folder. list gives the names of the files
-// sorted by bytes; count is the number of files. markers_below tells whether a marker lies anywhere below a folder ("" the
-// whole pack; a marker of the folder's own name is not below it), from the folder counts at once; files_below appends the
-// stored names of the files at any depth below a folder ("" every file), reading every entry. For a mount (pack_source.hpp):
+// sorted by bytes; count is the number of files. count_below gives the files and markers at any depth below a folder ("" the
+// whole pack; a marker of the folder's own name is not below it) from the folder counts, in one lookup; markers_below appends
+// the stored names of the markers below a folder from an ordered index of the markers' folds, visiting only that folder's
+// range (the index changes with the markers, its nodes made and freed outside the exclusive lock). For a mount (pack_source.hpp):
 // - open_mounted is open_reader that gives a null reader for a deletion marker (the name is hidden below it) and is_directory
 //   for a folder; the reader holds holder (the storage, so a mounted file keeps it) for its life.
 // - stored_name is a file entry's name as stored.
@@ -134,6 +135,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <span>
 #include <string>
@@ -186,8 +188,13 @@ std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> open_reader(std::stri
 std::expected<std::shared_ptr<vfs::Reader>,vfs::FileError> open_mounted(std::string_view name,std::shared_ptr<const void> holder) const;
 std::optional<std::string> stored_name(std::string_view name) const;
 std::expected<void,vfs::FileError> list_folder(std::string_view folder,std::vector<vfs::EntryInfo>& out) const;
-bool markers_below(std::string_view folder) const;
-void files_below(std::string_view folder,std::vector<std::string>& out) const;
+// The file entries and markers at any depth below a folder.
+struct Below{
+std::uint64_t files=0;
+std::uint64_t markers=0;
+};
+Below count_below(std::string_view folder) const;
+void markers_below(std::string_view folder,std::vector<std::string>& out) const;
 std::expected<void,vfs::MoveError> rename(std::string_view from,std::string_view to);
 std::expected<std::size_t,vfs::FileError> remove_folder(std::string_view folder);
 std::expected<void,vfs::FileError> flush();
@@ -221,6 +228,9 @@ using EntryNode=Entries::node_type;
 // By the folder's fold ("a" and "a/b" for an entry "a/b/c"), looked up by string_view without allocating.
 using Folders=std::unordered_map<std::string,FolderCount,FoldHash,std::equal_to<>>;
 using FolderNodes=std::vector<Folders::node_type>;
+// The folds of the markers, ordered, so the markers below a folder are one range ("<fold>/" and on).
+using Markers=std::set<std::string,std::less<>>;
+using MarkerNode=Markers::node_type;
 PackStorage()=default;
 static std::expected<std::unique_ptr<PackStorage>,PackError> load(const std::filesystem::path& host,const KeySource& key,bool create,const PackOptions& options,std::optional<PackLocation> window);
 static std::shared_ptr<PackStorage> share(std::unique_ptr<PackStorage> storage);
@@ -294,6 +304,7 @@ std::shared_ptr<platform::File> file_;
 // By fold_name.
 Entries entries_;
 Folders folders_;
+Markers markers_;
 std::size_t files_=0;
 std::uint64_t wasted_=0;
 std::string metadata_;

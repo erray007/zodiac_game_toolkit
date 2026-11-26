@@ -959,8 +959,10 @@ add(*both,"maps/new.txt","new");
 REQUIRE(both->flush());
 CHECK(both->stat("maps")->kind==EntryKind::directory);
 CHECK(both->place("maps").value()==EntryKind::directory);
-CHECK(both->markers_below("")==true);
-CHECK(both->markers_below("maps")==false);
+CHECK(both->count_below("").files==1);
+CHECK(both->count_below("").markers==1);
+CHECK(both->count_below("maps").files==1);
+CHECK(both->count_below("maps").markers==0);
 REQUIRE(m.vfs.mount("/",pack::make_pack_source(both,false),false,&owner_a));
 CHECK(m.vfs.stat("maps")->kind==EntryKind::directory);
 CHECK(listed(m.vfs,"/",ListKind::directories)=="maps,tiles");
@@ -974,6 +976,114 @@ REQUIRE(m.vfs.remove("tiles"));
 CHECK(writable->stat("tiles").error()==FileError::not_found);
 CHECK(m.vfs.stat("tiles")->kind==EntryKind::directory);
 CHECK(read_ok(m.vfs,"tiles/t.txt")=="t");
+}
+
+namespace {
+// A source that counts what folder_shown asks of the one it forwards to: stat calls, marker enumerations and the names they give.
+class CountingSource final:public zodiac::vfs::Source{
+public:
+explicit CountingSource(std::shared_ptr<zodiac::vfs::Source> inner):inner_(std::move(inner)){}
+std::uint64_t stats=0;
+std::uint64_t enumerations=0;
+std::uint64_t enumerated=0;
+std::expected<zodiac::vfs::EntryInfo,FileError> stat(std::string_view relative) override{++stats;return inner_->stat(relative);}
+std::expected<std::shared_ptr<zodiac::vfs::Reader>,FileError> open_read(std::string_view relative) override{return inner_->open_read(relative);}
+std::expected<std::unique_ptr<zodiac::vfs::WriteTarget>,FileError> open_write(std::string_view relative,WriteMode mode) override{return inner_->open_write(relative,mode);}
+std::expected<void,FileError> list(std::string_view relative,std::vector<zodiac::vfs::EntryInfo>& out) override{return inner_->list(relative,out);}
+std::expected<void,FileError> remove(std::string_view relative,bool leave_marker) override{return inner_->remove(relative,leave_marker);}
+std::expected<void,FileError> make_directory(std::string_view relative) override{return inner_->make_directory(relative);}
+std::expected<void,FileError> remove_directory(std::string_view relative,bool recursive) override{return inner_->remove_directory(relative,recursive);}
+bool read_only() const noexcept override{return inner_->read_only();}
+bool implied_folders() const noexcept override{return inner_->implied_folders();}
+zodiac::vfs::EntriesBelow count_below(std::string_view relative) override{return inner_->count_below(relative);}
+void markers_below(std::string_view relative,std::vector<std::string>& out) override
+{
+++enumerations;
+const std::size_t before=out.size();
+inner_->markers_below(relative,out);
+enumerated+=out.size()-before;
+}
+private:
+std::shared_ptr<zodiac::vfs::Source> inner_;
+};
+}
+
+TEST_CASE("a pack folder with more files than the newer markers below it is shown from the counts alone")
+{
+Mounted m;
+auto base=make(m.packs()/"big.zpk",test_key(71));
+for(int i=0;i<3000;++i)add(*base,"big/f"+std::to_string(i)+".txt","x");
+add(*base,"small/a.txt","a");
+add(*base,"small/b.txt","b");
+REQUIRE(base->flush());
+auto patch=make(m.packs()/"few.zpk",test_key(72));
+for(int i=0;i<3;++i)REQUIRE(patch->add_deletion_marker("big/f"+std::to_string(i)+".txt"));
+// Many markers elsewhere, and both files of small/.
+for(int i=0;i<500;++i)REQUIRE(patch->add_deletion_marker("other/o"+std::to_string(i)+".txt"));
+REQUIRE(patch->add_deletion_marker("small/a.txt"));
+REQUIRE(patch->add_deletion_marker("Small/B.TXT"));
+REQUIRE(patch->flush());
+auto older=std::make_shared<CountingSource>(pack::make_pack_source(base,false));
+auto newer=std::make_shared<CountingSource>(pack::make_pack_source(patch,false));
+REQUIRE(m.vfs.mount("/",older,false,&owner_a));
+REQUIRE(m.vfs.mount("/",newer,false,&owner_b));
+// 3000 files against 3 markers: shown without one name enumerated or one file looked up beyond the folder's own stat.
+CHECK(m.vfs.stat("big")->kind==EntryKind::directory);
+CHECK(newer->enumerations==0);
+CHECK(older->stats==1);
+// small/ has 2 files against 2 markers: only small/'s markers are visited (not other/'s 500), and the folder is gone.
+CHECK(m.vfs.stat("small").error().code==FileError::not_found);
+CHECK(newer->enumerations==1);
+CHECK(newer->enumerated==2);
+CHECK(older->stats==1+1+2);
+CHECK(listed(m.vfs,"/",ListKind::directories)=="big");
+}
+
+TEST_CASE("a recursive delete in a writable pack leaves markers for the older files below the folder, kept after a reopen")
+{
+Mounted m;
+// The game folder's levels/ (a host folder), the release's levels/, and a writable pack over both holding levels/ too.
+put_bytes(m.root()/"levels"/"host.txt","host");
+auto release=pack_of(m.packs()/"release.zpk",73,{{"levels/l1.txt","1"},{"levels/deep/l2.txt","2"},{"keep.txt","k"}});
+const fs::path save=m.packs()/"save.zpk";
+{
+auto writable=pack_of(save,74,{{"levels/mine.txt","mine"}});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(release,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(writable,true),true,&owner_b));
+REQUIRE(m.vfs.delete_directory("levels",true));
+const auto check=[&]{
+for(const char* gone:{"levels/l1.txt","levels/deep/l2.txt","levels/mine.txt","levels/host.txt"}){
+INFO(gone);
+CHECK(m.vfs.stat(gone).error().code==FileError::not_found);
+}
+CHECK(m.vfs.stat("levels/deep").error().code==FileError::not_found);
+// The host folder itself stays, empty: a host folder's folders exist on their own.
+CHECK(m.vfs.stat("levels")->kind==EntryKind::directory);
+CHECK(listed(m.vfs,"levels").empty());
+CHECK(listed(m.vfs,"levels",ListKind::directories).empty());
+CHECK(read_ok(m.vfs,"keep.txt")=="k");
+CHECK(file_bytes(m.root()/"levels"/"host.txt")=="host");
+};
+check();
+CHECK(writable->stat("levels/l1.txt")->kind==EntryKind::deleted);
+CHECK(writable->stat("levels/deep/l2.txt")->kind==EntryKind::deleted);
+CHECK(writable->stat("levels/host.txt")->kind==EntryKind::deleted);
+CHECK(writable->stat("levels/mine.txt").error()==FileError::not_found);
+REQUIRE(writable->close());
+CHECK(m.vfs.unmount(&owner_b)==1);
+auto reopened=reopen(save,test_key(74));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(reopened,true),true,&owner_b));
+check();
+}
+// Without a host folder of that name, the release's folder goes whole.
+Mounted fresh;
+auto again=pack_of(fresh.packs()/"release.zpk",75,{{"levels/l1.txt","1"}});
+auto writable=pack_of(fresh.packs()/"save.zpk",76,{{"levels/mine.txt","mine"}});
+REQUIRE(fresh.vfs.mount("/",pack::make_pack_source(again,false),false,&owner_a));
+REQUIRE(fresh.vfs.mount("/",pack::make_pack_source(writable,true),true,&owner_b));
+REQUIRE(fresh.vfs.delete_directory("levels",true));
+CHECK(fresh.vfs.stat("levels").error().code==FileError::not_found);
+CHECK(listed(fresh.vfs,"/",ListKind::directories).empty());
 }
 
 // D2 (vfs.hpp, Mount folders): no mount's file or marker hides a mount point or a folder above one.

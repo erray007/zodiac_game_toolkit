@@ -14,9 +14,11 @@
 // below the name is hidden by it: deleting a file never hides an unrelated folder. A folder is deleted file by file (a patch
 // leaves a marker for every file of it): folders of a source with implied folders (a pack, Source::implied_folders) exist only
 // for the files below them, so such a folder is shown (by stat, open_read's is_directory, writes, remove, delete_directory and
-// list, in its parent's listing and as the listed folder itself) only while one of its files is: when a newer covering mount
-// holds markers below it (Source::markers_below), its files are checked one by one, and a folder every file of which a newer
-// marker hides is no folder at all, so the lookup goes on to older mounts. A mount's own folder (a pack's root) is always shown.
+// list, in its parent's listing and as the listed folder itself) only while one of its files is: a folder every file of which a
+// newer marker hides is no folder at all, so the lookup goes on to older mounts. A mount's own folder (a pack's root) is always
+// shown. The check (folder_shown) costs one count lookup per mount when the folder holds more files than the newer mounts hold
+// markers below it (Source::count_below); only otherwise are those markers (Source::markers_below, that folder's only) matched
+// against the folder's files.
 // rename, copy and move take both sides (see rename).
 // Writes (open_write, write_file, the to side of rename, copy and move, host_file for writing) go, newest first, to the first
 // writable mount, unless a read-only mount before it has the name: then they fail with read_only_pack (a file or a deletion
@@ -131,6 +133,11 @@ virtual std::expected<void,FileError> commit()=0;
 // a folder's file is File::sync_data. A source must really flush here, or fail; it may never report a flush it did not make.
 virtual std::expected<void,FileError> sync()=0;
 };
+// What lies at any depth below a folder of a source (Source::count_below).
+struct EntriesBelow{
+std::uint64_t files=0;
+std::uint64_t markers=0;
+};
 // A failure about one of two paths (rename, copy, move): to is false for the first (from), true for the second (to).
 struct MoveError{
 FileError code=FileError::io;
@@ -180,12 +187,17 @@ virtual std::optional<std::pair<std::string,std::string>> ambiguous_names(std::s
 // True for a source whose folders exist only for the files below them (a pack): the Vfs shows such a folder only while one of
 // those files is shown. The default (a host folder, whose folders exist on their own) is false.
 virtual bool implied_folders() const noexcept;
-// Whether a deletion marker lies anywhere below folder relative ("" the source's root). Asked only when an older mount's implied
-// folder is found, so it may cost a lookup. The default (a source without markers) is false.
-virtual bool markers_below(std::string_view relative);
-// Appends the name (below the source's root, as stored) of every file at any depth below folder relative ("" every file). Only
-// asked of a source with implied_folders; the default appends nothing.
-virtual void files_below(std::string_view relative,std::vector<std::string>& out);
+// How many files and deletion markers lie at any depth below folder relative ("" the source's root), for folder_shown: asked of
+// a source with implied folders (its files) and of the newer mounts above one (their markers), so it should cost one lookup.
+// The default (a source without markers or implied folders) is none.
+virtual EntriesBelow count_below(std::string_view relative);
+// Appends the name (below the source's root, as stored) of every deletion marker at any depth below folder relative, visiting
+// only that folder's markers. The default (a source without markers) appends nothing.
+virtual void markers_below(std::string_view relative,std::vector<std::string>& out);
+// Stores a deletion marker at relative (no file of this source is there), so an older mount's file of that name stays hidden:
+// true when stored, false from a source that holds no markers (the default; a folder). A recursive delete_directory asks it for
+// every older file below the folder it removed.
+virtual std::expected<bool,FileError> leave_marker(std::string_view relative);
 };
 struct Failure{
 FileError code=FileError::io;
@@ -285,6 +297,10 @@ std::expected<std::vector<std::string>,Failure> list(std::string_view path,ListK
 // Creates the folder (and, when recursive, every missing folder above it). An existing folder is a success.
 std::expected<void,Failure> create_directory(std::string_view path,bool recursive);
 // Removes the folder (with everything in it when recursive; it must be empty otherwise). A mount's own folder is never removed (access_denied).
+// Recursive, in a mount that holds deletion markers (a writable pack), it then leaves a marker (Source::leave_marker) for every
+// file below the folder that an older mount still provides, as remove does for one file: the folder's files stay deleted, an
+// older pack's folder goes too (D1), and an older host folder stays as an empty folder (its files hidden, the folder itself
+// a host folder's own). In a host folder over older mounts their files show again (it cannot hold markers).
 std::expected<void,Failure> delete_directory(std::string_view path,bool recursive);
 void set_host_paths(bool enabled) noexcept{host_paths_.store(enabled,std::memory_order_relaxed);}
 bool host_paths() const noexcept{return host_paths_.load(std::memory_order_relaxed);}
@@ -374,8 +390,8 @@ return kind==EntryKind::file?Seen::file:kind==EntryKind::directory?Seen::directo
 template<class Ask>
 static Decided decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask);
 // Whether the folder p that mount holds (sub below it) is shown: always for a source without implied folders and for a mount's own
-// folder; otherwise when no newer mount covering p has deletion markers below it, or when one of the folder's files is shown
-// (the first newer mount that answers for it gives no marker; a failure counts as shown).
+// folder; otherwise when the folder holds more files than the newer mounts covering p hold markers below it, or, failing that,
+// more files than there are distinct names among those markers that are files of the folder (each hides exactly one).
 static bool folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub);
 std::expected<VfsPath,Failure> parse_failure(std::string_view path) const;
 Failure ambiguous_failure(std::string_view path,const Target& target) const;

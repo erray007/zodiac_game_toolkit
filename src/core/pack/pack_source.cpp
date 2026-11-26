@@ -141,8 +141,18 @@ std::uint64_t max_file_size() const noexcept override{return kMaxPackWriteBytes;
 bool read_only() const noexcept override{return read_only_;}
 bool real_spelling(std::string_view relative,std::string& real) override;
 bool implied_folders() const noexcept override{return true;}
-bool markers_below(std::string_view relative) override{return storage_->markers_below(relative);}
-void files_below(std::string_view relative,std::vector<std::string>& out) override{storage_->files_below(relative,out);}
+vfs::EntriesBelow count_below(std::string_view relative) override
+{
+const PackStorage::Below below=storage_->count_below(relative);
+return vfs::EntriesBelow{below.files,below.markers};
+}
+void markers_below(std::string_view relative,std::vector<std::string>& out) override{storage_->markers_below(relative,out);}
+std::expected<bool,FileError> leave_marker(std::string_view relative) override
+{
+if(read_only_)return std::unexpected(FileError::access_denied);
+if(auto added=storage_->add_deletion_marker(relative);!added)return std::unexpected(added.error());
+return true;
+}
 private:
 std::shared_ptr<PackStorage> storage_;
 bool read_only_;
