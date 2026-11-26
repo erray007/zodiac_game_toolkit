@@ -151,6 +151,7 @@ const bool is_static=std::ranges::find(project->static_modules,std::string_view(
 payload.modules.push_back({info->name,info->version,is_static?zodiac::LinkMode::static_link:zodiac::LinkMode::dynamic_link});
 }
 payload.core_exclude=project->core_exclude;
+payload.host_paths=project->files.host_paths;
 payload.scripts.push_back({to_utf8(project->main_script.lexically_relative(project->root)),true,std::move(*bytecode)});
 return payload;
 }
@@ -423,6 +424,31 @@ const TempDir folder;
 const Started started=start_in(folder.dir(),source_payload("","int main(){return 256;}\n"));
 CHECK(started.code==1);
 CHECK(started.lines==std::vector<std::string>{"warning: main() returned 256; exit codes must be 0-255, using 1"});
+}
+
+TEST_CASE("start lets the script open host paths exactly when the payload says [files] host_paths")
+{
+const TempDir folder;
+const TempDir outside;
+write_file(outside.dir()/"host.txt","from the host");
+const std::string path="host:"+to_utf8(outside.dir()/"host.txt");
+const std::string script="int main(){if(!file_exists(\""+path+"\"))return 3;return read_file(\""+path+"\")==\"from the host\"?0:4;}\n";
+zodiac::GamePayload payload;
+{
+const TempDir source;
+write_file(source.dir()/"zodiac.toml","[game]\nmain = \"main.zs\"\n[files]\nhost_paths = true\n");
+write_file(source.dir()/"main.zs",script);
+payload=payload_of(source.dir());
+}
+CHECK(payload.host_paths);
+const Started allowed=start_in(folder.dir(),payload);
+INFO(join(allowed.lines));
+CHECK(allowed.code==0);
+CHECK(allowed.lines.empty());
+payload.host_paths=false;
+const Started refused=start_in(folder.dir(),payload);
+INFO(join(refused.lines));
+CHECK(refused.code==3);
 }
 
 TEST_CASE("start mounts the executable folder and data:/")

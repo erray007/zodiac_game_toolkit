@@ -72,6 +72,7 @@ return exit_start_error;
 }
 project.core_exclude=payload.core_exclude;
 project.diagnostics=payload.diagnostics;
+project.files.host_paths=payload.host_paths;
 return 0;
 }
 
@@ -147,8 +148,8 @@ std::vector<const zodiac_module_info*> linked;
 if(const int code=collect_modules(*payload,root,linked,diagnostics))return code;
 if(const int code=enter_root(root,diagnostics))return code;
 ScriptRuntime runtime(diagnostics,ModuleSearchPaths{{root}});
-// The same mounts as zodiac run, for the executable's folder, before global initializers run; release mode, no host paths yet (Task 9 stores [files] host_paths in the payload).
-vfs::mount_game_folders(runtime.vfs(),root,payload->game_name,false,false);
+// The same mounts as zodiac run, for the executable's folder, before global initializers run: release mode, host paths as [files] host_paths was at build time.
+vfs::mount_game_folders(runtime.vfs(),root,payload->game_name,payload->host_paths,false);
 const ScriptRuntime::ModuleCheck check=[&payload,&diagnostics](std::span<const zodiac_module_info* const> loaded){return check_modules(*payload,loaded,diagnostics);};
 if(const int code=runtime.load_bytecode(project,main->bytecode,linked,check))return code;
 return exit_code_of(runtime.run(),diagnostics);

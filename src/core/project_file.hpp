@@ -1,5 +1,6 @@
-// zodiac::load_project reads and validates <dir>/zodiac.toml (load_project_file any project file): the game name and main script, the modules a game uses, core parts to exclude, diagnostics output, build settings (assets, debug info, signing), file access ([files] host_paths) and worker scripts.
+// zodiac::load_project reads and validates <dir>/zodiac.toml (load_project_file any project file): the game name and main script, the modules a game uses, core parts to exclude, diagnostics output, build settings (assets, debug info, signing), file access ([files] host_paths), the release pack ([pack] enabled, external, writable, exclude), the executable's settings ([release] run_as_admin) and worker scripts.
 // toml++ is only included by project_file.cpp, so it never leaks into other translation units. Every error is one plain-text line; the ones about a project file's content start with that file's name ("zodiac.toml").
+// Unknown keys are ignored in every section (a misspelt [pack] writeable leaves writable false); only unknown [core] exclude values are refused.
 #pragma once
 #include <expected>
 #include <filesystem>
@@ -30,6 +31,22 @@ struct FilesConfig{
 // [files] host_paths: scripts may open absolute host paths (core/vfs/path.hpp). Off unless the project enables it.
 bool host_paths=false;
 };
+// [pack] (spec 8.4 of the library-and-packs design): how a release build stores the declared assets.
+struct PackConfig{
+// false keeps plan 3's copying of every asset next to the executable.
+bool enabled=true;
+// The pack goes next to the executable as <game>.zpk instead of being appended to it.
+bool external=false;
+// The release mounts its pack writable. A running executable is locked by the system, so true forces external to true (silently).
+bool writable=false;
+// Assets kept as plain copied files: glob patterns under the same rules (and refusals) as BuildConfig::assets, in file order.
+std::vector<std::string> exclude;
+};
+// [release]: settings of the built executable itself.
+struct ReleaseConfig{
+// zodiac build links the requireAdministrator manifest (kit lib/release/zodiac_manifest_admin.obj) in place of the asInvoker one.
+bool run_as_admin=false;
+};
 struct Project{
 // Absolute, normalized project directory.
 std::filesystem::path root;
@@ -47,6 +64,8 @@ std::vector<std::string> core_exclude;
 DiagnosticsConfig diagnostics;
 BuildConfig build;
 FilesConfig files;
+PackConfig pack;
+ReleaseConfig release;
 // [workers] scripts: absolute, normalized, inside root, existing .zs regular files, without duplicates, in file order.
 std::vector<std::filesystem::path> workers;
 };
@@ -71,7 +90,7 @@ std::optional<std::filesystem::path> find_project_root(const std::filesystem::pa
 // A project file error is returned unchanged. The file itself is not checked: the caller verifies it is a regular file.
 std::expected<Project,std::string> load_project_for_script(const std::filesystem::path& script_file);
 // Every regular file under project.root matching any of project.build.assets, as absolute paths, sorted and without duplicates.
-// zodiac.toml in the root, the project file (project.file) and everything under <root>/release are never returned; those paths are compared as
+// zodiac.toml in the root, the project file (project.file) and everything under <root>/release and <root>/.zodiac (the build's own state, the pack key among it) are never returned; those paths are compared as
 // the file system compares names (same_path_text: case-insensitively on Windows). A pattern matching nothing is not an error; a missing or unreadable directory is: the error is one line, `zodiac.toml: error: cannot read directory "<path>": <reason>`.
 // A link whose target no longer exists is skipped (there is nothing to copy); any other entry whose type cannot be read is an error: `zodiac.toml: error: cannot read "<entry path>": <reason>`.
 std::expected<std::vector<std::filesystem::path>,std::string> expand_assets(const Project& project);

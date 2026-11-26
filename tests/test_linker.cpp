@@ -100,6 +100,7 @@ const bool is_static=std::ranges::find(project->static_modules,std::string_view(
 payload.modules.push_back({info->name,info->version,is_static?zodiac::LinkMode::static_link:zodiac::LinkMode::dynamic_link});
 }
 payload.core_exclude=project->core_exclude;
+payload.host_paths=project->files.host_paths;
 payload.scripts.push_back({to_utf8(project->main_script.lexically_relative(project->root)),true,std::move(*bytecode)});
 return zodiac::serialize_payload(payload);
 }

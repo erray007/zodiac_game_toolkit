@@ -305,6 +305,102 @@ project.toml("files = 1\n[game]\nmain = \"main.zs\"\n");
 CHECK(error_of(project)=="zodiac.toml: error: [files] must be a table");
 }
 
+TEST_CASE("pack section defaults and values")
+{
+TempProject project;
+project.main_script();
+project.toml(minimal);
+const auto defaults=zodiac::load_project(project.dir());
+REQUIRE(defaults.has_value());
+CHECK(defaults->pack.enabled);
+CHECK_FALSE(defaults->pack.external);
+CHECK_FALSE(defaults->pack.writable);
+CHECK(defaults->pack.exclude.empty());
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\nenabled = false\nexternal = true\nexclude = [\"docs/**\", \"plugins/*.dat\"]\n");
+const auto set=zodiac::load_project(project.dir());
+REQUIRE(set.has_value());
+CHECK_FALSE(set->pack.enabled);
+CHECK(set->pack.external);
+CHECK_FALSE(set->pack.writable);
+CHECK(set->pack.exclude==std::vector<std::string>{"docs/**","plugins/*.dat"});
+// A running executable is locked, so a writable pack is the external one, whatever external says.
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\nwritable = true\nexternal = false\n");
+const auto writable=zodiac::load_project(project.dir());
+REQUIRE(writable.has_value());
+CHECK(writable->pack.writable);
+CHECK(writable->pack.external);
+CHECK(writable->pack.enabled);
+}
+
+TEST_CASE("pack and release sections ignore unknown keys")
+{
+TempProject project;
+project.main_script();
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\nwriteable = true\nlevel = \"max\"\n[files]\nhost_path = true\n[release]\nrun_as_administrator = true\n");
+const auto result=zodiac::load_project(project.dir());
+INFO(result.error_or(""));
+REQUIRE(result.has_value());
+CHECK_FALSE(result->pack.writable);
+CHECK_FALSE(result->pack.external);
+CHECK_FALSE(result->files.host_paths);
+CHECK_FALSE(result->release.run_as_admin);
+}
+
+TEST_CASE("pack section type and pattern errors")
+{
+TempProject project;
+project.main_script();
+for(const std::string_view key:{"enabled","external","writable"})
+{
+CAPTURE(key);
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\n"+std::string(key)+" = \"yes\"\n");
+CHECK(error_of(project)=="zodiac.toml: error: [pack] "+std::string(key)+" must be a boolean");
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\n"+std::string(key)+" = 1\n");
+CHECK(error_of(project)=="zodiac.toml: error: [pack] "+std::string(key)+" must be a boolean");
+}
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\nexclude = \"docs/**\"\n");
+CHECK(error_of(project)=="zodiac.toml: error: [pack] exclude must be an array of strings");
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\nexclude = [\"docs/**\", 3]\n");
+CHECK(error_of(project)=="zodiac.toml: error: [pack] exclude must be an array of strings");
+for(const std::string_view pattern:{"docs\\\\*.txt","/docs/*","C:/docs/*","../docs/*","docs/.."})
+{
+CAPTURE(pattern);
+project.toml("[game]\nmain = \"main.zs\"\n[pack]\nexclude = [\"ok/*\", \""+std::string(pattern)+"\"]\n");
+std::string shown;
+for(std::size_t i=0;i<pattern.size();++i){
+if(pattern[i]=='\\')++i;
+shown+=pattern[i];
+}
+CHECK(error_of(project)=="zodiac.toml: error: [pack] exclude \""+shown+"\" must use / and stay inside the project");
+}
+project.toml("pack = 1\n[game]\nmain = \"main.zs\"\n");
+CHECK(error_of(project)=="zodiac.toml: error: [pack] must be a table");
+}
+
+TEST_CASE("release section reads run_as_admin")
+{
+TempProject project;
+project.main_script();
+project.toml(minimal);
+const auto defaults=zodiac::load_project(project.dir());
+REQUIRE(defaults.has_value());
+CHECK_FALSE(defaults->release.run_as_admin);
+project.toml("[game]\nmain = \"main.zs\"\n[release]\nrun_as_admin = true\n");
+const auto admin=zodiac::load_project(project.dir());
+REQUIRE(admin.has_value());
+CHECK(admin->release.run_as_admin);
+project.toml("[game]\nmain = \"main.zs\"\n[release]\nrun_as_admin = false\n");
+const auto user=zodiac::load_project(project.dir());
+REQUIRE(user.has_value());
+CHECK_FALSE(user->release.run_as_admin);
+project.toml("[game]\nmain = \"main.zs\"\n[release]\nrun_as_admin = \"true\"\n");
+CHECK(error_of(project)=="zodiac.toml: error: [release] run_as_admin must be a boolean");
+project.toml("[game]\nmain = \"main.zs\"\n[release]\nrun_as_admin = 1\n");
+CHECK(error_of(project)=="zodiac.toml: error: [release] run_as_admin must be a boolean");
+project.toml("release = true\n[game]\nmain = \"main.zs\"\n");
+CHECK(error_of(project)=="zodiac.toml: error: [release] must be a table");
+}
+
 TEST_CASE("sign command must contain {file}")
 {
 TempProject project;
@@ -430,6 +526,34 @@ REQUIRE(none.has_value());
 const auto empty=zodiac::expand_assets(*none);
 REQUIRE(empty.has_value());
 CHECK(empty->empty());
+}
+
+TEST_CASE("expand_assets never returns the build state under .zodiac, the pack key among it")
+{
+TempProject project;
+project.main_script();
+project.write(".zodiac/pack.key","secret");
+project.write(".zodiac/manifest/last.txt","m");
+project.write("sounds/.zodiac/kept.ogg","k");
+project.toml("[game]\nmain = \"main.zs\"\n[build]\nassets = [\"**/*\", \".zodiac/pack.key\"]\n");
+const auto loaded=zodiac::load_project(project.dir());
+REQUIRE(loaded.has_value());
+const auto files=zodiac::expand_assets(*loaded);
+REQUIRE(files.has_value());
+// Only the root's .zodiac is the build's: a folder of that name deeper down is an ordinary asset folder.
+CHECK(*files==std::vector<fs::path>{loaded->root/"main.zs",loaded->root/"sounds"/".zodiac"/"kept.ogg"});
+#ifdef _WIN32
+// Compared as the file system compares names.
+const TempProject other;
+other.main_script();
+other.write(".ZODIAC/pack.key","secret");
+other.toml("[game]\nmain = \"main.zs\"\n[build]\nassets = [\"**/*\"]\n");
+const auto upper=zodiac::load_project(other.dir());
+REQUIRE(upper.has_value());
+const auto upper_files=zodiac::expand_assets(*upper);
+REQUIRE(upper_files.has_value());
+CHECK(*upper_files==std::vector<fs::path>{upper->root/"main.zs"});
+#endif
 }
 
 TEST_CASE("expand_assets skips a link whose target is gone")

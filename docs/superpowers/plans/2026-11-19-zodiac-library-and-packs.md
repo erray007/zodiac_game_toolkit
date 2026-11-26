@@ -40,6 +40,7 @@
   - `"<path>" is in a read-only pack; save files in data:/ instead`.
   - `"<path>" is in use by another program` (a writable pack open while another process holds the pack open for writing).
   - `wrong key or damaged pack`; `integer overflow`; `file is not open`; `file is not open for writing`; `"<mode>" is not a file mode`; `random_choice on an empty array`; `clamp: low is greater than high`; `invalid date`.
+  - `[release] run_as_admin must be a boolean` (a project file error, after `zodiac.toml: error: ` like the others).
 
 ## Review Focus
 

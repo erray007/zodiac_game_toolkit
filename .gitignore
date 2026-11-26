@@ -6,3 +6,5 @@ Blood bath source/
 .superpowers/
 __pycache__/
 .deps/
+# A project's build state (zodiac build writes the pack key there), so a fixture built in the tree never commits a key.
+.zodiac/

@@ -98,6 +98,28 @@ if(all_strings)return {};
 out.clear();
 return fail("zodiac.toml: error: ["+std::string(section_name)+"] "+std::string(key)+" must be an array of strings");
 }
+// Reads an optional boolean into out. section_name and key are only used in the error text.
+std::expected<void,std::string> boolean(const toml::table* table,std::string_view section_name,std::string_view key,bool& out)
+{
+if(!table)return {};
+const toml::node* node=table->get(key);
+if(!node)return {};
+if(const toml::value<bool>* value=node->as_boolean()){
+out=value->get();
+return {};
+}
+return fail("zodiac.toml: error: ["+std::string(section_name)+"] "+std::string(key)+" must be a boolean");
+}
+// Reads an optional array of asset patterns into out, refusing one usable_asset_pattern refuses.
+std::expected<void,std::string> pattern_array(const toml::table* table,std::string_view section_name,std::string_view key,std::vector<std::string>& out)
+{
+if(auto result=string_array(table,section_name,key,out);!result)return result;
+for(const std::string& pattern:out)
+{
+if(!usable_asset_pattern(pattern))return fail("zodiac.toml: error: ["+std::string(section_name)+"] "+std::string(key)+" \""+one_line(pattern)+"\" must use / and stay inside the project");
+}
+return {};
+}
 std::expected<void,std::string> output_mode(const toml::table* table,std::string_view key,OutputMode& out)
 {
 if(!table)return {};
@@ -234,19 +256,10 @@ project.diagnostics.file=std::move(*file);
 }
 const auto build=section(root,"build");
 if(!build)return fail(std::move(build.error()));
-if(auto result=string_array(*build,"build","assets",project.build.assets);!result)return fail(std::move(result.error()));
-for(const std::string& pattern:project.build.assets)
-{
-if(!usable_asset_pattern(pattern))return fail("zodiac.toml: error: [build] assets \""+one_line(pattern)+"\" must use / and stay inside the project");
-}
+if(auto result=pattern_array(*build,"build","assets",project.build.assets);!result)return fail(std::move(result.error()));
+if(auto result=boolean(*build,"build","strip_debug_info",project.build.strip_debug_info);!result)return fail(std::move(result.error()));
 if(*build)
 {
-if(const toml::node* strip_node=(*build)->get("strip_debug_info"))
-{
-const toml::value<bool>* strip_value=strip_node->as_boolean();
-if(!strip_value)return fail_line("[build] strip_debug_info must be a boolean");
-project.build.strip_debug_info=strip_value->get();
-}
 const toml::node* sign_node=(*build)->get("sign");
 if(sign_node)
 {
@@ -259,15 +272,19 @@ if(!project.build.sign_command.empty()&&!has_placeholder)return fail_line("[buil
 }
 const auto files=section(root,"files");
 if(!files)return fail(std::move(files.error()));
-if(*files)
+if(auto result=boolean(*files,"files","host_paths",project.files.host_paths);!result)return fail(std::move(result.error()));
+const auto pack=section(root,"pack");
+if(!pack)return fail(std::move(pack.error()));
+for(const auto& [key,value]:{std::pair{"enabled",&project.pack.enabled},{"external",&project.pack.external},{"writable",&project.pack.writable}})
 {
-if(const toml::node* host_node=(*files)->get("host_paths"))
-{
-const toml::value<bool>* host_value=host_node->as_boolean();
-if(!host_value)return fail_line("[files] host_paths must be a boolean");
-project.files.host_paths=host_value->get();
+if(auto result=boolean(*pack,"pack",key,*value);!result)return fail(std::move(result.error()));
 }
-}
+// A running executable is locked by the system, so a pack the game writes can only be the external one.
+if(project.pack.writable)project.pack.external=true;
+if(auto result=pattern_array(*pack,"pack","exclude",project.pack.exclude);!result)return fail(std::move(result.error()));
+const auto release=section(root,"release");
+if(!release)return fail(std::move(release.error()));
+if(auto result=boolean(*release,"release","run_as_admin",project.release.run_as_admin);!result)return fail(std::move(result.error()));
 const auto workers=section(root,"workers");
 if(!workers)return fail(std::move(workers.error()));
 std::vector<std::string> worker_names;
@@ -419,6 +436,8 @@ std::expected<std::vector<fs::path>,std::string> expand_assets(const Project& pr
 std::vector<fs::path> files;
 if(project.build.assets.empty())return files;
 const fs::path release_dir=project.root/"release";
+// The build's own state (the pack key, the last release's manifest): never an asset, so a key can never be packed or copied out.
+const fs::path state_dir=project.root/".zodiac";
 const fs::path manifest=project.root/"zodiac.toml";
 std::error_code ec;
 fs::recursive_directory_iterator it(project.root,fs::directory_options::none,ec);
@@ -427,12 +446,16 @@ for(const fs::recursive_directory_iterator end;it!=end;it.increment(ec))
 {
 const fs::path& path=it->path();
 // Compared as the file system compares names (case-insensitively on Windows): "--config AYAR.TXT" names the same file as ayar.txt on disk.
-if(same_path_text(path,release_dir))
+// Every one of those paths is directly in the root (the project file's folder is the root), so deeper entries skip the comparisons.
+if(it.depth()==0)
+{
+if(same_path_text(path,release_dir)||same_path_text(path,state_dir))
 {
 it.disable_recursion_pending();
 continue;
 }
 if(same_path_text(path,manifest)||(!project.file.empty()&&same_path_text(path,project.file)))continue;
+}
 fs::file_status status=it->status(ec);
 // The entry's cached type does not follow every kind of link (a Windows junction is cached as a folder, even when its
 // target is gone), so a folder is asked again through the filesystem before the walk enters it.

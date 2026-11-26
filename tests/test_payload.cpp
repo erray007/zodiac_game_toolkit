@@ -1,6 +1,7 @@
 #include <core/payload.hpp>
 #include <doctest/doctest.h>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -16,6 +17,10 @@ payload.core_exclude={"window"};
 payload.diagnostics.console=zodiac::OutputMode::always;
 payload.diagnostics.file="logs/game.log";
 payload.diagnostics.dialog=zodiac::OutputMode::never;
+payload.pack_mode=zodiac::PackMode::external;
+payload.pack_writable=true;
+payload.host_paths=true;
+payload.pack_key=std::string("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF7\xF8\xF9\xFA\xFB\xFC\xFD\xFE\xFF",32);
 payload.scripts={{"main.zs",true,std::string("\x00\x01\xFF bytecode \x00",14)}};
 return payload;
 }
@@ -38,7 +43,116 @@ const auto parsed=zodiac::parse_payload(bytes);
 INFO(parsed.error_or(""));
 REQUIRE(parsed.has_value());
 CHECK(*parsed==input);
-CHECK(parsed->format_version==1);
+CHECK(parsed->format_version==2);
+CHECK(parsed->pack_mode==zodiac::PackMode::external);
+CHECK(parsed->pack_writable);
+CHECK(parsed->host_paths);
+CHECK(parsed->pack_key==input.pack_key);
+}
+
+TEST_CASE("payload defaults describe a release without a pack or host paths")
+{
+const zodiac::GamePayload defaults;
+CHECK(defaults.format_version==2);
+CHECK(defaults.pack_mode==zodiac::PackMode::none);
+CHECK_FALSE(defaults.pack_writable);
+CHECK_FALSE(defaults.host_paths);
+CHECK(defaults.pack_key.empty());
+}
+
+TEST_CASE("payload round trips every pack mode and flag")
+{
+for(const zodiac::PackMode mode:{zodiac::PackMode::none,zodiac::PackMode::embedded,zodiac::PackMode::external}){
+for(const bool writable:{false,true}){
+for(const bool host_paths:{false,true}){
+CAPTURE(static_cast<int>(mode));
+CAPTURE(writable);
+CAPTURE(host_paths);
+zodiac::GamePayload input=sample();
+input.pack_mode=mode;
+input.pack_writable=writable;
+input.host_paths=host_paths;
+input.pack_key=mode==zodiac::PackMode::none?std::string():std::string(32,'k');
+const auto parsed=zodiac::parse_payload(zodiac::serialize_payload(input));
+INFO(parsed.error_or(""));
+REQUIRE(parsed.has_value());
+CHECK(*parsed==input);
+}
+}
+}
+}
+
+namespace {
+// The payload's bytes with the CRC recomputed, so a test reaches the check after it.
+std::string resealed(std::string bytes)
+{
+bytes.resize(bytes.size()-4);
+const std::uint32_t crc=zodiac::crc32(bytes);
+for(int i=0;i<4;++i)bytes.push_back(static_cast<char>((crc>>(8*i))&0xFFu));
+return bytes;
+}
+// Offset of the u32 pack_mode: right after the diagnostics file and dialog of sample(), which the test finds by its text.
+std::size_t pack_mode_offset(const std::string& bytes)
+{
+const std::size_t file=bytes.find("logs/game.log");
+REQUIRE(file!=std::string::npos);
+return file+std::string_view("logs/game.log").size()+4;
+}
+void put_u32(std::string& bytes,std::size_t at,std::uint32_t value)
+{
+for(int i=0;i<4;++i)bytes[at+static_cast<std::size_t>(i)]=static_cast<char>((value>>(8*i))&0xFFu);
+}
+}
+
+TEST_CASE("only format version 2 is read")
+{
+for(const std::uint32_t version:{0u,1u,3u,0xFFFFFFFFu}){
+CAPTURE(version);
+zodiac::GamePayload input=sample();
+input.format_version=version;
+const auto parsed=zodiac::parse_payload(zodiac::serialize_payload(input));
+REQUIRE_FALSE(parsed.has_value());
+CHECK(parsed.error()=="error: the game data is damaged (unsupported version "+std::to_string(version)+")");
+}
+}
+
+TEST_CASE("a pack key of another size than 32 bytes is damage")
+{
+for(const std::size_t size:{std::size_t{1},std::size_t{31},std::size_t{33},std::size_t{64}}){
+CAPTURE(size);
+zodiac::GamePayload input=sample();
+input.pack_key.assign(size,'k');
+const auto parsed=zodiac::parse_payload(zodiac::serialize_payload(input));
+REQUIRE_FALSE(parsed.has_value());
+CHECK(parsed.error()=="error: the game data is damaged (invalid pack key)");
+}
+}
+
+TEST_CASE("a pack mode or flag out of range is damage")
+{
+const std::string bytes=zodiac::serialize_payload(sample());
+const std::size_t mode=pack_mode_offset(bytes);
+{
+std::string bad=bytes;
+put_u32(bad,mode,3);
+const auto parsed=zodiac::parse_payload(resealed(bad));
+REQUIRE_FALSE(parsed.has_value());
+CHECK(parsed.error()=="error: the game data is damaged (invalid pack mode)");
+}
+for(const std::size_t field:{mode+4,mode+8}){
+CAPTURE(field-mode);
+std::string bad=bytes;
+put_u32(bad,field,2);
+const auto parsed=zodiac::parse_payload(resealed(bad));
+REQUIRE_FALSE(parsed.has_value());
+CHECK(parsed.error()=="error: the game data is damaged (invalid pack or file setting)");
+}
+// The offsets are the fields': written back as they were, the payload reads again.
+std::string same=bytes;
+put_u32(same,mode,static_cast<std::uint32_t>(zodiac::PackMode::external));
+put_u32(same,mode+4,1);
+put_u32(same,mode+8,1);
+CHECK(zodiac::parse_payload(resealed(same)).has_value());
 }
 
 TEST_CASE("payload with no modules and no scripts round trips")

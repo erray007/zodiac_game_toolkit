@@ -258,6 +258,8 @@ payload.modules.push_back({std::string(name),std::string(or_empty(info->version)
 payload.core_exclude=project.core_exclude;
 payload.diagnostics=project.diagnostics;
 if(!payload.diagnostics.file.empty())payload.diagnostics.file=payload.diagnostics.file.lexically_relative(project.root);
+// pack_mode, pack_writable and pack_key keep their defaults (no pack) until the release packing (Task 10) fills them.
+payload.host_paths=project.files.host_paths;
 const std::u8string section=project.main_script.lexically_relative(project.root).generic_u8string();
 payload.scripts.push_back({std::string(reinterpret_cast<const char*>(section.data()),section.size()),true,std::move(bytecode)});
 return payload;
@@ -580,9 +582,10 @@ LinkRequest request;
 request.output=tmp.path();
 request.inputs.reserve(libraries.size()+5);
 request.inputs.push_back(object.path());
-// The application manifest every game carries (the Segment Heap on Windows 10 2004 and later, asInvoker; src/platform/windows/
-// application.manifest.in). Task 9's [release] run_as_admin will choose zodiac_manifest_admin.obj here instead, never both.
-request.inputs.push_back(kit.release_lib/"zodiac_manifest.obj");
+// The application manifest every game carries (the Segment Heap on Windows 10 2004 and later, and the execution level; src/platform/
+// windows/application.manifest.in): asInvoker, or requireAdministrator with [release] run_as_admin. Exactly one of the two objects is
+// linked, so the game holds exactly one RT_MANIFEST 1.
+request.inputs.push_back(kit.release_lib/(project.release.run_as_admin?"zodiac_manifest_admin.obj":"zodiac_manifest.obj"));
 request.inputs.push_back(kit.release_lib/"libzodiac_release_stub.a");
 for(const StaticLibrary& library:libraries){
 request.inputs.push_back(library.archive);

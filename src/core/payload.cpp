@@ -10,7 +10,7 @@
 namespace zodiac {
 namespace {
 constexpr std::string_view kMagic="ZDPAYLD1";
-constexpr uint32_t kFormatVersion=1;
+constexpr uint32_t kFormatVersion=2;
 // Slicing-by-8 tables: kCrcTables[0] is the classic byte table of the reflected polynomial 0xEDB88320, kCrcTables[k] advances a byte through k more zero bytes.
 constexpr auto kCrcTables=[]{
 std::array<std::array<uint32_t,256>,8> tables{};
@@ -128,7 +128,7 @@ return ~crc;
 std::string serialize_payload(const GamePayload& payload)
 {
 const std::string file=generic_utf8(payload.diagnostics.file);
-std::size_t size=kMagic.size()+4+4+payload.kit_version.size()+4+payload.game_name.size()+strings_size(payload.requested)+4+strings_size(payload.core_exclude)+4+4+file.size()+4+4+4;
+std::size_t size=kMagic.size()+4+4+payload.kit_version.size()+4+payload.game_name.size()+strings_size(payload.requested)+4+strings_size(payload.core_exclude)+4+4+file.size()+4+4+4+4+4+payload.pack_key.size()+4+4;
 for(const PayloadModule& module:payload.modules)size+=4+module.name.size()+4+module.version.size()+4;
 for(const PayloadScript& script:payload.scripts)size+=4+script.section.size()+4+4+script.bytecode.size();
 Writer out(size);
@@ -149,6 +149,10 @@ for(const std::string& name:payload.core_exclude)out.str(name);
 out.u32(static_cast<uint32_t>(payload.diagnostics.console));
 out.str(file);
 out.u32(static_cast<uint32_t>(payload.diagnostics.dialog));
+out.u32(static_cast<uint32_t>(payload.pack_mode));
+out.u32(payload.pack_writable?1u:0u);
+out.u32(payload.host_paths?1u:0u);
+out.str(payload.pack_key);
 out.count(payload.scripts.size());
 for(const PayloadScript& script:payload.scripts){
 out.str(script.section);
@@ -172,8 +176,8 @@ if(!in.u32(payload.format_version))return damaged("truncated");
 if(payload.format_version!=kFormatVersion){
 char digits[16];
 const auto end=std::to_chars(digits,digits+sizeof digits,payload.format_version).ptr;
-std::string reason("format version ");
-reason.append(digits,end).append(" is not supported");
+std::string reason("unsupported version ");
+reason.append(digits,end);
 return damaged(reason);
 }
 if(!in.str(payload.kit_version)||!in.str(payload.game_name)||!read_strings(in,payload.requested))return damaged("truncated");
@@ -193,6 +197,16 @@ std::string file;
 if(!in.u32(console)||!in.str(file)||!in.u32(dialog))return damaged("truncated");
 if(!output_mode(console,payload.diagnostics.console)||!output_mode(dialog,payload.diagnostics.dialog))return damaged("invalid diagnostics setting");
 payload.diagnostics.file=path_from_utf8(file);
+uint32_t pack_mode=0;
+uint32_t pack_writable=0;
+uint32_t host_paths=0;
+if(!in.u32(pack_mode)||!in.u32(pack_writable)||!in.u32(host_paths)||!in.str(payload.pack_key))return damaged("truncated");
+if(pack_mode>static_cast<uint32_t>(PackMode::external))return damaged("invalid pack mode");
+if(pack_writable>1||host_paths>1)return damaged("invalid pack or file setting");
+if(!payload.pack_key.empty()&&payload.pack_key.size()!=kPayloadPackKeySize)return damaged("invalid pack key");
+payload.pack_mode=static_cast<PackMode>(pack_mode);
+payload.pack_writable=pack_writable==1;
+payload.host_paths=host_paths==1;
 if(!in.count(count,12))return damaged("truncated");
 payload.scripts.resize(count);
 for(PayloadScript& script:payload.scripts){

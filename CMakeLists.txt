@@ -52,7 +52,7 @@ if(WIN32)
 # requestedExecutionLevel (asInvoker or requireAdministrator) into the build tree and compiles it into the OBJECT library <target>, holding
 # one RT_MANIFEST resource 1. zodiac and zodiacw link zodiac_application_manifest (asInvoker); the kit stages it as
 # lib/release/zodiac_manifest.obj, which zodiac build links into every game, and zodiac_application_manifest_admin (requireAdministrator)
-# as lib/release/zodiac_manifest_admin.obj, for a game that will ask to run as administrator (Task 9); bench_types links the asInvoker one,
+# as lib/release/zodiac_manifest_admin.obj, which zodiac build links instead for a game with [release] run_as_admin; bench_types links the asInvoker one,
 # so the gate measures the heap games get.
 enable_language(RC)
 function(zodiac_manifest_object target level)

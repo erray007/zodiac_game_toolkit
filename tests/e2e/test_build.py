@@ -179,6 +179,28 @@ class BuildTest(unittest.TestCase):
         # Only the executable: no temporary object, response file or .tmp is left behind.
         self.assertEqual(sorted(p.name for p in exe.parent.iterdir()), ["hello.exe"])
 
+    def test_build_run_as_admin_selects_the_manifest(self):
+        # The manifest's bytes as the kit's objects hold them (test_kit checks the objects themselves). The built games are never run:
+        # an elevated one would need a UAC prompt, which CI runners (elevated, UAC off) cannot show anyway.
+        as_invoker = b'<requestedExecutionLevel level="asInvoker" uiAccess="false"/>'
+        as_admin = b'<requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>'
+        for setting, wanted, other in (("", as_invoker, as_admin), ("\n[release]\nrun_as_admin = false\n", as_invoker, as_admin), ("\n[release]\nrun_as_admin = true\n", as_admin, as_invoker)):
+            with self.subTest(setting=setting):
+                project = self.new_project(self.root / ("game%d" % len(setting)))
+                self.append_toml(project, setting)
+                exe = project / "release" / (project.name + ".exe")
+                self.assert_built(self.build(str(project)), exe)
+                image = exe.read_bytes()
+                # Exactly one manifest, at the level the setting asks for.
+                self.assertEqual(image.count(wanted), 1)
+                self.assertEqual(image.count(other), 0)
+                self.assertEqual(image.count(b"<requestedExecutionLevel"), 1)
+        project = self.new_project(self.root / "bad")
+        self.append_toml(project, '\n[release]\nrun_as_admin = "yes"\n')
+        code, out, err = self.build(str(project))
+        self.assertEqual(code, 2, err)
+        self.assertIn("zodiac.toml: error: [release] run_as_admin must be a boolean", err.splitlines())
+
     def test_build_static_example_module_prints(self):
         hello = self.build_hello()
         project = self.new_project(self.root / "game", static=["example"], script='void main()\n{\nexample_print(example_echo("merhaba kanka"));\n}\n')

@@ -2,7 +2,7 @@
 // the manifest configured from application.manifest.in by zodiac_manifest_object (top-level CMakeLists.txt). The manifest's bytes go
 // into every executable as they are, so its explanation is here, not in it:
 // - It is the manifest of every Windows executable Zodiac ships or builds: zodiac.exe and zodiacw.exe, and every game, which links
-//   lib/release/zodiac_manifest.obj (asInvoker) or, once Task 9 adds [release] run_as_admin, lib/release/zodiac_manifest_admin.obj
+//   lib/release/zodiac_manifest.obj (asInvoker) or, with [release] run_as_admin = true, lib/release/zodiac_manifest_admin.obj
 //   (requireAdministrator).
 // - heapType (owner decision, Task 5c fix round 1): the process heap, and so the C runtime's heap, is the Segment Heap. Windows 10 2004
 //   (build 19041) and later honour it; older Windows ignores the element and keeps the NT heap, as before.

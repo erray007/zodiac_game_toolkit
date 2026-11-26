@@ -3,7 +3,7 @@
 # Windows only. Creates the target zodiac_kit_stage, which lays the build tree out as a runnable kit around bin/zodiac.exe (see core/kit_layout.hpp),
 # and makes every zodiac build depend on it:
 # - lib/release/: libzodiac_release_stub.a, libzodiac_core_release.a, libangelscript.a, zodiac_manifest.obj (the application manifest
-#   resource every game links: the Segment Heap, asInvoker), zodiac_manifest_admin.obj (the same with requireAdministrator, for Task 9), and crt/ with every toolchain file the captured link line names (ZODIAC_RELEASE_CRT_FILES,
+#   resource every game links: the Segment Heap, asInvoker), zodiac_manifest_admin.obj (the same with requireAdministrator, linked instead with [release] run_as_admin), and crt/ with every toolchain file the captured link line names (ZODIAC_RELEASE_CRT_FILES,
 #   from zodiac_capture_release_link, which also writes link.txt and toolchain.txt there; call it first).
 # - bin/: ld.lld.exe from the toolchain, with the toolchain DLLs it loads (found through llvm-objdump's import tables, transitively), because the
 #   toolchain's ld.lld.exe is not self-contained (it loads libLLVM-<n>.dll and libc++.dll from its own folder).
@@ -33,7 +33,7 @@ list(APPEND outputs "${staged}")
 list(APPEND install_lib "${staged}")
 endforeach()
 # The application manifest objects (src/platform/windows/application.manifest.in, one per execution level): zodiac build links
-# zodiac_manifest.obj (asInvoker) into every game; zodiac_manifest_admin.obj (requireAdministrator) is staged for Task 9's run_as_admin.
+# zodiac_manifest.obj (asInvoker) into every game, or zodiac_manifest_admin.obj (requireAdministrator) with [release] run_as_admin.
 foreach(pair "zodiac_application_manifest;zodiac_manifest.obj" "zodiac_application_manifest_admin;zodiac_manifest_admin.obj")
 list(GET pair 0 object_target)
 list(GET pair 1 object_name)
