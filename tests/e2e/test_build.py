@@ -558,6 +558,136 @@ class BuildTest(unittest.TestCase):
         code, out, err = zodiac("run", str(project), "--no-window", "--module-dir", MODULE_DIR)
         self.assertEqual((code, err), (0, ""))
 
+    PATCH_NOTE = "patches carry asset files only; script changes need a full build"
+    NOTHING_CHANGED = "no files changed since the last release build; no patch written"
+    # A game that copies the two packed sounds it reads into data:/, and returns 5 when sounds/x/b.ogg is not there.
+    PATCHED_SCRIPT = ('int main()\n{\nif(!write_file("data:/a.ogg",read_file("sounds/a.ogg")))return 3;\n'
+                      'if(!file_exists("sounds/x/b.ogg"))return 5;\nreturn write_file("data:/b.ogg",read_file("sounds/x/b.ogg"))?0:4;\n}\n')
+
+    def patch(self, project):
+        return self.build(str(project), "--patch")
+
+    def assert_patched(self, project, number):
+        code, out, err = self.patch(project)
+        patch = project / "release" / "patches" / ("patch_%d.zpk" % number)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(out.splitlines(), [self.PATCH_NOTE, "Build succeeded: %s" % patch])
+        self.assertTrue(patch.is_file())
+        self.assertFalse(patch.with_name(patch.name + ".tmp").exists())
+
+    def forget_copies(self):
+        for name in ("a.ogg", "b.ogg"):
+            (Path(os.environ["APPDATA"]) / "game" / name).unlink(missing_ok=True)
+
+    def test_build_patch_contains_only_changes(self):
+        project = self.packing_project(script=self.PATCHED_SCRIPT)
+        release = project / "release"
+        self.build_packed(project)
+        new_sound = os.urandom(70000)
+        (project / "sounds" / "a.ogg").write_bytes(new_sound)
+        self.assert_patched(project, 1)
+        # Nothing but the patch is added: no compile, no link, no copy of the executable.
+        self.assertEqual(self.release_files(release), ["game.exe", "patches/patch_1.zpk"])
+        self.assertNotIn(new_sound[:4096], (release / "patches" / "patch_1.zpk").read_bytes())
+        manifest = (project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(manifest[2], "next_patch 2")
+        self.assertEqual([line.split(" ", 3)[2:] for line in manifest if line.startswith("patched ")], [[str(len(new_sound)), "sounds/a.ogg"]])
+        # The patched game reads the changed asset's new bytes and the unchanged one's old bytes.
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), new_sound)
+        self.assertEqual(self.copied("game", "b.ogg"), b"b")
+        # Without the patch it is the release again.
+        (release / "patches" / "patch_1.zpk").unlink()
+        self.forget_copies()
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game"), self.sound)
+
+    def test_build_patch_needs_manifest(self):
+        project = self.packing_project(script=self.PATCHED_SCRIPT)
+        code, out, err = self.patch(project)
+        self.assertEqual((code, err.splitlines()), (2, ["error: no release manifest in .zodiac; build a full release first"]))
+        self.assertEqual(out.splitlines(), ["Build failed: 1 error"])
+        self.assertFalse((project / ".zodiac").exists())
+        self.assertFalse((project / "release").exists())
+        # A patch needs the release's own key: a missing one is never made again (it would make a patch no shipped build accepts).
+        self.build_packed(project)
+        (project / ".zodiac" / "pack.key").unlink()
+        write(project / "sounds" / "a.ogg", "changed")
+        code, out, err = self.patch(project)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(len(err.splitlines()), 1)
+        self.assertTrue(err.startswith('error: cannot read ".zodiac/pack.key": '), err)
+        self.assertFalse((project / ".zodiac" / "pack.key").exists())
+        self.assertFalse((project / "release" / "patches").exists())
+
+    def test_build_patch_nothing_changed(self):
+        project = self.packing_project(script=self.PATCHED_SCRIPT)
+        self.build_packed(project)
+        manifest = (project / ".zodiac" / "release.manifest").read_bytes()
+        code, out, err = self.patch(project)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(out.splitlines(), [self.PATCH_NOTE, self.NOTHING_CHANGED, "Build succeeded: %s" % (project / "release" / "game.exe")])
+        self.assertFalse((project / "release" / "patches").exists())
+        self.assertEqual((project / ".zodiac" / "release.manifest").read_bytes(), manifest)
+
+    def test_build_patch_deletes_and_readds(self):
+        project = self.packing_project(script=self.PATCHED_SCRIPT)
+        release = project / "release"
+        self.build_packed(project)
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game", "b.ogg"), b"b")
+        # b.ogg leaves the project: patch 1 holds a marker, and the game cannot see it.
+        (project / "sounds" / "x" / "b.ogg").unlink()
+        self.assert_patched(project, 1)
+        self.assertIn("deleted marker sounds/x/b.ogg", (project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines())
+        self.forget_copies()
+        self.assertEqual(run_exe(release / "game.exe"), (5, "", ""))
+        # The very same bytes come back: patch 2 holds b.ogg although it equals the release's, so patch 1's marker cannot hide it.
+        write(project / "sounds" / "x" / "b.ogg", "b")
+        self.assert_patched(project, 2)
+        manifest = (project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines()
+        self.assertIn("deleted entry sounds/x/b.ogg", manifest)
+        self.assertEqual(manifest[2], "next_patch 3")
+        self.assertEqual(self.release_files(release), ["game.exe", "patches/patch_1.zpk", "patches/patch_2.zpk"])
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game", "b.ogg"), b"b")
+        self.assertEqual(self.copied("game"), self.sound)
+        # A patch put in data:/patches/ is used too (where a game's own updater saves one).
+        patches = Path(os.environ["APPDATA"]) / "game" / "patches"
+        patches.mkdir(parents=True)
+        shutil.move(str(release / "patches" / "patch_2.zpk"), str(patches / "patch_2.zpk"))
+        self.forget_copies()
+        self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
+        self.assertEqual(self.copied("game", "b.ogg"), b"b")
+        # A new full release ignores the old release's patches.
+        self.build_packed(project)
+        self.forget_copies()
+        code, out, err = run_exe(release / "game.exe")
+        self.assertEqual((code, out), (0, ""))
+        self.assertEqual(err.splitlines(), [
+            'warning: patch "%s" belongs to another release of the game; it is not used' % (release / "patches" / "patch_1.zpk"),
+            'warning: patch "%s" belongs to another release of the game; it is not used' % (patches / "patch_2.zpk")])
+        self.assertEqual((project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines()[2], "next_patch 3")
+
+    def test_build_patch_refuses_a_file_moved_to_exclude(self):
+        project = self.packing_project(script=self.PATCHED_SCRIPT)
+        self.build_packed(project)
+        manifest = (project / ".zodiac" / "release.manifest").read_bytes()
+        self.append_toml(project, '\n[pack]\nexclude = ["sounds/x/**"]\n')
+        code, out, err = self.patch(project)
+        self.assertEqual((code, err.splitlines()), (2, ['error: "sounds/x/b.ogg" moved out of the pack; that needs a full release build']))
+        self.assertEqual(out.splitlines(), ["Build failed: 1 error"])
+        self.assertFalse((project / "release" / "patches").exists())
+        self.assertEqual((project / ".zodiac" / "release.manifest").read_bytes(), manifest)
+
+    def test_build_patch_usage_errors(self):
+        code, out, err = zodiac("run", "--patch", str(self.root / "nowhere"))
+        self.assertEqual((code, out, err.splitlines()), (2, "", ["error: --patch applies to build only; run zodiac help"]))
+        project = self.packing_project('\n[pack]\nenabled = false\n')
+        code, out, err = self.patch(project)
+        self.assertEqual((code, err.splitlines()), (2, ["error: --patch needs [pack] enabled"]))
+        self.assertFalse((project / "release").exists())
+
     def test_hello_has_no_pack(self):
         exe = self.build_hello()
         self.assertFalse((exe.parent.parent / ".zodiac").exists())
