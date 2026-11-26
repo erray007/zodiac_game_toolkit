@@ -432,7 +432,8 @@ class BuildTest(unittest.TestCase):
 
     def test_build_writable_pack_is_external(self):
         # writable forces external (a running executable is locked); a save outside data:/ goes into the pack and survives a restart.
-        script = 'int main()\n{\nif(file_exists("save.txt"))return read_file("save.txt")=="level 2"?10:11;\nif(read_file("sounds/x/b.ogg")!="b")return 12;\nreturn write_file("save.txt","level 2")?0:13;\n}\n'
+        # The save's name is computed: a literal one would draw the build's warning, since no declared asset is called that.
+        script = 'int main()\n{\nstring save="save"+".txt";\nif(file_exists(save))return read_file(save)=="level 2"?10:11;\nif(read_file("sounds/x/b.ogg")!="b")return 12;\nreturn write_file(save,"level 2")?0:13;\n}\n'
         project = self.packing_project('\n[pack]\nwritable = true\n', script)
         release = project / "release"
         self.build_packed(project)
