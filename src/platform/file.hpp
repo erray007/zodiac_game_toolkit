@@ -128,7 +128,9 @@ bool replace_file(const std::filesystem::path& from,const std::filesystem::path&
 // Moves from to to only when nothing is at to: EEXIST (error_kind exists) otherwise, and nothing changes. MoveFileExW without
 // MOVEFILE_REPLACE_EXISTING (and with MOVEFILE_WRITE_THROUGH) on Windows; renameat2(RENAME_NOREPLACE) on Linux, renamex_np(RENAME_EXCL)
 // on macOS, and elsewhere (or where the file system refuses those) link() then unlink(), which never replaces either. A system
-// that can do none of them fails with its error, never with a replacing rename.
+// that can do none of them fails with its error, never with a replacing rename. Returns true exactly when to now names the file;
+// error is then clear, except after the fallback's link when its unlink of from failed: true with error set to that failure,
+// from still a second name of the file (the caller removes it, or keeps both names).
 bool rename_no_replace(const std::filesystem::path& from,const std::filesystem::path& to,std::error_code& error);
 // The identity of the file at path (links followed); a folder has one too.
 std::expected<FileIdentity,std::error_code> file_identity(const std::filesystem::path& path);

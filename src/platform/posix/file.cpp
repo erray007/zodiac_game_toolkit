@@ -356,6 +356,7 @@ if(::link(from.c_str(),to.c_str())!=0){
 error=errno_code(errno);
 return false;
 }
+// to names the file now, so this is a success; a failed unlink leaves from as a second name, reported in error (file.hpp).
 if(::unlink(from.c_str())!=0)error=errno_code(errno);
 return true;
 }

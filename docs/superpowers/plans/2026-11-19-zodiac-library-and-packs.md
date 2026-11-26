@@ -539,7 +539,7 @@
     - Returns 0, or 2 after `error: the game data is damaged (pack: wrong key or damaged pack)` or `error: the game data is damaged (pack "<game>.zpk" is missing)`.
 - Produces in `pack_key.hpp`: `std::expected<crypto::Key,std::string> load_or_create_pack_key(const std::filesystem::path& root)`.
   - The file is `.zodiac/pack.key`: 64 lowercase hex digits and `\n`.
-  - When the key is first made, `.zodiac/.gitignore` gets `pack.key` if missing, and stdout gets `created .zodiac/pack.key; back it up, later builds and patches need it` before the summary.
+  - When the key is first made (and on every later load), `.zodiac/.gitignore` gets a `*` line if missing, so git ignores everything in `.zodiac/`, and when it is first made stdout gets `created .zodiac/pack.key; back it up, later builds and patches need it` before the summary.
   - A damaged file gives `error: .zodiac/pack.key is damaged (expected 64 hex digits); restore it from your backup`.
 - Produces in `release_packing.hpp`:
   - `struct AssetSplit{std::vector<fs::path> packed,plain;}`. `AssetSplit split_assets(const Project&,const std::vector<fs::path>& assets)`: `plain` is `[pack] exclude` matches, `*.zpk`, or everything when `enabled=false`.
@@ -580,7 +580,7 @@
     - Ignored: `write_file("log.txt", ...)`, `f.open("save.txt","w")`, `copy_file`'s destination, commented-out calls and computed paths.
     - `p.extract("maps/1.txt", "data:/1.txt")` yields only `maps/1.txt`, with `pack_entry=true`.
   - e2e (Windows):
-    - `test_build_assets_packed`: the output holds only `game.exe`, and the game reads `sounds/a.ogg` with the bytes from the project. `.zodiac/pack.key` and `.zodiac/.gitignore` exist and the stdout line is exact. A second build reuses the key, so the file is unchanged.
+    - `test_build_assets_packed`: the output holds only `game.exe`, and the game reads `sounds/a.ogg` with the bytes from the project. `.zodiac/pack.key` and `.zodiac/.gitignore` (holding a `*` line) exist and the stdout line is exact. A second build reuses the key, so the file is unchanged.
     - `test_build_pack_external`: `game.exe` plus `game.zpk`. A missing `game.zpk` gives exit 2 with the exact text.
     - `test_build_pack_exclude_keeps_plain_files`.
     - `test_build_pack_disabled_copies_assets`: plan 3's layout.
