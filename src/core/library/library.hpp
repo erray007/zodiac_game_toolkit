@@ -37,9 +37,12 @@
 // - register_system(engine, library) (system_binding.cpp) registers bool is_admin() and bool restart_as_admin() (platform/
 //   elevation.hpp has the platform rules and the accessibility note on the UAC prompt):
 //   - is_admin(): platform::is_elevated(), read once per process.
-//   - restart_as_admin(): true at once, doing nothing, when the process is elevated already (on POSIX: root). Otherwise it only acts
-//     on main()'s own context (the runtime's, library.main_context), so the game's main(), or anything main() calls on its thread,
-//     may restart the game; a global variable's initializer (which zodiac build runs too) or a script on another context gets false.
+//   - restart_as_admin(): true at once, doing nothing, when the process is elevated already (on POSIX: root, by the owner's ruling,
+//     so a script's `if(!restart_as_admin())` means the same everywhere). Otherwise it only acts on main()'s own context (the
+//     runtime's, library.main_context) at its top level: main(), or a script function main() calls directly, may restart the game.
+//     A global variable's initializer (which zodiac build runs too), a script on another context or thread, and a call nested in
+//     main()'s context by a native function (a sort's comparator, any callback run with PushState, which an abort would end alone)
+//     get false and nothing is started.
 //     It starts the game again with administrator rights (platform::restart_elevated: the same executable, arguments and starting
 //     folder; in zodiac run, zodiac.exe runs the script again). When the user declines the UAC prompt, or the start fails, it returns
 //     false and the game runs on. When the elevated copy started, this process ends normally: the call aborts main()'s context and
@@ -62,6 +65,15 @@ asIScriptContext* const* main_context=nullptr;
 bool restarting=false;
 bool restart_as_admin() noexcept;
 };
+#if defined(ZODIAC_TEST_HOOKS)
+// Test hook (a ZODIAC_TEST_HOOKS tree only; test_no_test_hooks proves the symbol absent elsewhere): any value but off makes is_admin
+// and restart_as_admin see a process that is not elevated, and stands in for platform::restart_elevated: started, declined, or
+// failed (also for not_elevated, as on POSIX), without starting anything. off restores the platform. Each call resets the count of
+// restarts that reached the platform's place, which test_hook_restart_requests reads.
+enum class ElevationHook{off,not_elevated,started,declined,failed};
+void test_hook_elevation(ElevationHook hook) noexcept;
+unsigned test_hook_restart_requests() noexcept;
+#endif
 void register_math(asIScriptEngine* engine);
 void register_random(asIScriptEngine* engine);
 void register_time(asIScriptEngine* engine);

@@ -7,6 +7,7 @@
 #include <core/script_runtime.hpp>
 #include <core/static_modules.hpp>
 #include <core/vfs/startup.hpp>
+#include <platform/elevation.hpp>
 #include <zodiac/plugin.h>
 #include <algorithm>
 #include <cstddef>
@@ -121,6 +122,9 @@ return exit_start_error;
 // sinks_ready is set once the sinks follow the payload's settings (or the console was added to report a damaged payload).
 int run_game(std::string_view payload_bytes,const fs::path& executable,Diagnostics& diagnostics,bool& sinks_ready)
 {
+// A copy restart_as_admin started waits until the process that started it has finished writing (platform/elevation.hpp), before
+// its log file, its folders or data:/ are touched.
+platform::wait_for_restart();
 auto payload=parse_payload(payload_bytes);
 if(!payload){
 // Without readable settings the console is the only place the reason can go.

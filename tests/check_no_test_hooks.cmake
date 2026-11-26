@@ -3,7 +3,8 @@
 # The test test_no_test_hooks: the table hash seed hook (platform/entropy.hpp, compiled only with ZODIAC_TEST_HOOKS=ON) is absent from
 # every archive and executable of a tree without it, and present in a tree with it, so the check itself is shown to see it.
 # - ARCHIVES (the cores, zodiac_core and zodiac_core_release; separated by | so the list survives add_test's command line): llvm-nm lists
-#   the symbols test_hook_table_hash_seed, string_array_steps and pack_record_seals (pack/pack_storage.hpp) (any mangling) iff HOOKS. Each archive must also define fill_entropy, the hook's neighbour, so a
+#   the symbols test_hook_table_hash_seed, string_array_steps, pack_record_seals (pack/pack_storage.hpp) and test_hook_elevation
+#   (core/library/library.hpp) (any mangling) iff HOOKS. Each archive must also define fill_entropy, the hook's neighbour, so a
 #   listing that read nothing cannot pass. Release archives hold LLVM bitcode (full LTO), which llvm-nm reads.
 # - BINARIES (linked executables, native code): the hooks' variable names ZODIAC_TABLE_HASH_SEED and ZODIAC_ARRAY_BLOCK_CACHE, the texts
 #   they read the environment with, are in the file iff HOOKS. Each must also hold "zodiac-dictionary 1" (serialize()'s header, in every core), so a read that found no
@@ -30,10 +31,11 @@ endif()
 if(NOT symbols MATCHES "[0-9a-fA-F-]+ +T +[^\r\n]*fill_entropy")
 message(FATAL_ERROR "check_no_test_hooks: ${NM} listed no definition of fill_entropy in ${archive}, so its symbols were not read")
 endif()
-# Every hooks-only symbol: the seed hook (platform/entropy.hpp), keys()'s step sums (types/array.hpp) and, in Windows trees (PRIVATE_HEAP
+# Every hooks-only symbol: the seed hook (platform/entropy.hpp), keys()'s step sums (types/array.hpp), the pack seal log, the elevation
+# stand-in (core/library/library.hpp) and, in Windows trees (PRIVATE_HEAP
 # ON), zodiac::heap::private_heap of the private heap (types/heap.cpp; elsewhere it is an inline wrapper that no core file calls, and
 # heap.cpp is empty).
-set(hooks test_hook_table_hash_seed string_array_steps pack_record_seals)
+set(hooks test_hook_table_hash_seed string_array_steps pack_record_seals test_hook_elevation)
 if(PRIVATE_HEAP)
 list(APPEND hooks "4heap12private_heap")
 endif()

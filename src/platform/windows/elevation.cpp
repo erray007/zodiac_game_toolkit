@@ -1,4 +1,4 @@
-// zodiac::platform::is_elevated and restart_elevated on Windows (contract in platform/elevation.hpp).
+// zodiac::platform::is_elevated, restart_elevated and the restart guard on Windows (contract in platform/elevation.hpp).
 // Every function used here is in advapi32, shell32 and kernel32, which every game imports already (the captured release link line,
 // SHGetFolderPathW, RtlGenRandom); user32 is only looked up when the process has loaded it.
 #define WIN32_LEAN_AND_MEAN
@@ -7,8 +7,10 @@
 #include <platform/command_line.hpp>
 #include <platform/process.hpp>
 #include <windows.h>
+#include <sddl.h>
 #include <shellapi.h>
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 
@@ -75,27 +77,24 @@ if(process==GetCurrentProcessId())return window;
 return GetConsoleWindow();
 }
 
-// Every argument after the program name, each quoted by append_argument, separated by spaces.
-bool arguments(std::wstring& line)
+// Appends argv[1..count) to line, each quoted by append_argument, separated by spaces, with one reservation.
+void append_arguments(std::wstring& line,const wchar_t* const* argv,int count)
 {
-int count=0;
-LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&count);
-if(!argv)return false;
 std::size_t room=0;
 for(int i=1;i<count;++i)room+=argument_room(std::wstring_view(argv[i]).size());
-bool built=true;
-try{
-line.reserve(room);
+line.reserve(line.size()+room);
 for(int i=1;i<count;++i){
 if(i>1)line.push_back(L' ');
 append_argument(line,std::wstring_view(argv[i]));
 }
 }
-catch(...){
-built=false;
-}
-LocalFree(argv);
-return built;
+
+// The guard's name for this process's executable; empty when its path cannot be read.
+std::wstring own_guard_name()
+{
+const std::filesystem::path executable=executable_path();
+if(executable.empty())return {};
+return restart_guard_name(std::wstring_view(executable.native()));
 }
 }
 
@@ -105,14 +104,93 @@ static const bool elevated=query_elevated();
 return elevated;
 }
 
+bool restart_parameters(std::wstring& line)
+{
+// The arguments the C runtime gave main or wmain (the UCRT parses the command line for it). __wargv is set when the program's entry
+// point is wide (zodiac's wmain, a release's wWinMain); a narrow main leaves it null.
+if(const wchar_t* const* argv=__wargv;argv&&__argc>0){
+append_arguments(line,argv,__argc);
+return true;
+}
+int count=0;
+LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&count);
+if(!argv)return false;
+bool built=true;
+try{
+append_arguments(line,argv,count);
+}
+catch(...){
+built=false;
+}
+LocalFree(argv);
+return built;
+}
+
+void* hold_restart_guard(const std::wstring& name) noexcept
+{
+// SYNCHRONIZE (waiting) for everyone, everything for the owner: the elevated copy may run as another user (other credentials at the
+// prompt), and a waiter needs nothing more.
+PSECURITY_DESCRIPTOR descriptor=nullptr;
+if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;OW)(A;;0x00100000;;;WD)",SDDL_REVISION_1,&descriptor,nullptr))return nullptr;
+SECURITY_ATTRIBUTES attributes{};
+attributes.nLength=sizeof attributes;
+attributes.lpSecurityDescriptor=descriptor;
+attributes.bInheritHandle=FALSE;
+HANDLE mutex=CreateMutexW(&attributes,TRUE,name.c_str());
+const DWORD error=GetLastError();
+LocalFree(descriptor);
+if(!mutex)return nullptr;
+// Another restart of the same executable holds it already: this process does not own it, so it is no guard of its own.
+if(error==ERROR_ALREADY_EXISTS){
+CloseHandle(mutex);
+return nullptr;
+}
+return mutex;
+}
+
+void release_restart_guard(void* guard) noexcept
+{
+if(!guard)return;
+ReleaseMutex(static_cast<HANDLE>(guard));
+CloseHandle(static_cast<HANDLE>(guard));
+}
+
+GuardWait wait_restart_guard(const std::wstring& name,unsigned timeout_ms) noexcept
+{
+const HANDLE mutex=OpenMutexW(SYNCHRONIZE,FALSE,name.c_str());
+if(!mutex)return GuardWait::none;
+const DWORD waited=WaitForSingleObject(mutex,timeout_ms);
+GuardWait result=GuardWait::timed_out;
+if(waited==WAIT_OBJECT_0||waited==WAIT_ABANDONED){
+// The wait made this process the owner: given back at once, so the name goes with the last handle.
+ReleaseMutex(mutex);
+result=waited==WAIT_OBJECT_0?GuardWait::released:GuardWait::abandoned;
+}
+CloseHandle(mutex);
+return result;
+}
+
+void wait_for_restart() noexcept
+{
+try{
+const std::wstring name=own_guard_name();
+if(!name.empty())wait_restart_guard(name,kRestartWaitMs);
+}
+catch(...){
+}
+}
+
 Elevation restart_elevated() noexcept
 {
 if(is_elevated())return Elevation::already;
+void* guard=nullptr;
 try{
 const std::filesystem::path executable=executable_path();
 if(executable.empty())return Elevation::failed;
 std::wstring parameters;
-if(!arguments(parameters))return Elevation::failed;
+if(!restart_parameters(parameters))return Elevation::failed;
+// Taken before the launch, so the copy finds it whenever it starts; a guard that cannot be made leaves the copy unguarded only.
+guard=hold_restart_guard(restart_guard_name(std::wstring_view(executable.native())));
 SHELLEXECUTEINFOW info{};
 info.cbSize=sizeof info;
 // NOASYNC: the launch is complete when the call returns, since the caller ends soon after. FLAG_NO_UI: a failure is the script's to
@@ -124,10 +202,16 @@ info.lpFile=executable.c_str();
 info.lpParameters=parameters.empty()?nullptr:parameters.c_str();
 info.lpDirectory=g_start_directory.empty()?nullptr:g_start_directory.c_str();
 info.nShow=SW_SHOWNORMAL;
-if(ShellExecuteExW(&info))return Elevation::started;
-return GetLastError()==ERROR_CANCELLED?Elevation::declined:Elevation::failed;
+if(ShellExecuteExW(&info)){
+// Kept to the process's exit, which releases it (abandoned) once everything was written.
+return Elevation::started;
+}
+const DWORD error=GetLastError();
+release_restart_guard(guard);
+return error==ERROR_CANCELLED?Elevation::declined:Elevation::failed;
 }
 catch(...){
+release_restart_guard(guard);
 return Elevation::failed;
 }
 }

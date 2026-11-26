@@ -12,6 +12,7 @@
 #include <core/text.hpp>
 #include <core/vfs/startup.hpp>
 #include <platform/console.hpp>
+#include <platform/elevation.hpp>
 #include <platform/process.hpp>
 #include <platform/result_window.hpp>
 #include <zodiac/plugin.h>
@@ -198,6 +199,8 @@ std::optional<platform::ResultAction> create;
 // line lone_script_compile_note follows the compiler's errors (not for a missing main() or a failing global initializer).
 int run_game(const Options& options,Diagnostics& diagnostics,RunInfo& info)
 {
+// A copy restart_as_admin started waits until the process that started it has finished writing (platform/elevation.hpp).
+platform::wait_for_restart();
 const fs::path directory=options.positional.empty()?fs::path("."):path_from_utf8(options.positional.front());
 const std::vector<fs::path> dirs=search_dirs(options);
 std::expected<Project,std::string> project=std::unexpected(std::string());

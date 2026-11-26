@@ -282,14 +282,20 @@ jobs:
       # ZODIAC_TEST_HOOKS tree: test_pack alone, built in one that reuses the sources the first step fetched and patched. The
       # test prints a line, so a renamed test that matches nothing cannot pass. Pack writing is the same code on both systems,
       # so this runs here only.
-      - name: Test the pack nonce rule with the test hooks
+      - name: Test the pack nonce rule and the elevation paths with the test hooks
         run: |
           set -o pipefail
           deps="$PWD/.deps/linux-debug"
           .tools/cmake/bin/cmake --preset linux-debug -B build/hooks -DZODIAC_TEST_HOOKS=ON "-DFETCHCONTENT_BASE_DIR=$PWD/build/hooks/_deps" "-DFETCHCONTENT_SOURCE_DIR_ANGELSCRIPT_SDK=$deps/angelscript_sdk-src" "-DFETCHCONTENT_SOURCE_DIR_DOCTEST=$deps/doctest-src" "-DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS=$deps/tomlplusplus-src" "-DFETCHCONTENT_SOURCE_DIR_MONOCYPHER=$deps/monocypher-src"
-          .tools/cmake/bin/cmake --build build/hooks --target test_pack
+          .tools/cmake/bin/cmake --build build/hooks --target test_pack test_elevation zodiac_core_release
           build/hooks/tests/test_pack "--test-case=no file key and nonce pair is ever sealed twice" | tee pack-hooks.txt
           grep -q "pack seal log checked" pack-hooks.txt || { echo "::error::the pack nonce test did not run"; exit 1; }
+          # restart_as_admin's guard, started, declined and failed paths, which an elevated runner never takes (test_hook_elevation).
+          build/hooks/tests/test_elevation "--test-case=*through the elevation hook*" -s | tee elevation-hooks.txt
+          grep -q "elevation hook paths checked" elevation-hooks.txt || { echo "::error::the elevation hook tests did not run"; exit 1; }
+          # The hooks are in this tree's cores and test, so test_no_test_hooks is seen to find them.
+          nm=$(sed -n 's/^CMAKE_NM:[A-Z]*=//p' build/hooks/CMakeCache.txt)
+          .tools/cmake/bin/cmake "-DNM=$nm" -DHOOKS=ON -DPRIVATE_HEAP=OFF "-DARCHIVES=build/hooks/src/core/libzodiac_core.a|build/hooks/src/core/libzodiac_core_release.a" -DBINARIES=build/hooks/tests/test_elevation -P tests/check_no_test_hooks.cmake
       # The benchmark of spec 8.4 on an optimized build, as in the windows job, with only its speed gate report-only: GitHub's
       # Linux runners vary from job to job, and one noisy runner failed operations no commit had touched, so the windows job
       # is the speed gate. Everything else still fails the job: bench_types exiting nonzero (a snippet that does not build or
