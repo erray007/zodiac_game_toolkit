@@ -191,11 +191,12 @@ std::string path;
 bool marker;
 };
 
-// Writes the manifest's temporary file in 1 MiB pieces and flushes it: the head, the release's lines, then (after a patch) the
-// deletion lines and the newest patch's entries, each kind sorted by path bytes.
-std::expected<void,std::string> write_manifest(const Project& project,std::string_view build_id,std::uint64_t patch,std::vector<ManifestLine>& lines,std::vector<DeletedLine>&& deleted={},std::vector<ManifestLine>&& patched={})
+// Writes the manifest's temporary file in 1 MiB pieces and flushes it: the head, the release's packed and plain lines, then
+// (after a patch) the deletion lines and the newest patch's entries, each kind sorted by path bytes.
+std::expected<void,std::string> write_manifest(const Project& project,std::string_view build_id,std::uint64_t patch,std::vector<ManifestLine>& lines,std::vector<ManifestLine>&& plain,std::vector<DeletedLine>&& deleted={},std::vector<ManifestLine>&& patched={})
 {
 std::ranges::sort(lines,{},&ManifestLine::path);
+std::ranges::sort(plain,{},&ManifestLine::path);
 std::ranges::sort(deleted,{},&DeletedLine::path);
 std::ranges::sort(patched,{},&ManifestLine::path);
 const fs::path temporary=manifest_temporary(project);
@@ -218,6 +219,11 @@ piece.append(line.path).push_back('\n');
 };
 piece.append(kManifestMagic).append("\nbuild ").append(build_id).append("\nnext_patch ").append(std::to_string(patch)).push_back('\n');
 for(const ManifestLine& line:lines){
+entry(line);
+if(piece.size()>=kCopyPiece)if(auto flushed=flush();!flushed)return flushed;
+}
+for(const ManifestLine& line:plain){
+piece.append("plain ");
 entry(line);
 if(piece.size()>=kCopyPiece)if(auto flushed=flush();!flushed)return flushed;
 }
@@ -282,8 +288,8 @@ std::uint64_t at_=0;
 bool done_=false;
 };
 
-// `<64 hex digits> <size> <path>`, path a canonical entry name.
-std::optional<ManifestLine> parse_entry(std::string_view line)
+// `<64 hex digits> <size> <path>`, path a canonical entry name (canonical), or any path of one line (a plain asset's).
+std::optional<ManifestLine> parse_entry(std::string_view line,bool canonical=true)
 {
 if(line.size()<64+4||line[64]!=' ')return std::nullopt;
 const std::string_view hex=line.substr(0,64);
@@ -293,8 +299,11 @@ const std::size_t space=line.find(' ');
 if(space==std::string_view::npos)return std::nullopt;
 const auto size=decimal(line.substr(0,space),true);
 const std::string_view path=line.substr(space+1);
-const auto canonical=pack::canonical_entry_name(path);
-if(!size||!canonical||*canonical!=path)return std::nullopt;
+if(!size||path.empty()||path.find('\r')!=std::string_view::npos)return std::nullopt;
+if(canonical){
+const auto name=pack::canonical_entry_name(path);
+if(!name||*name!=path)return std::nullopt;
+}
 ManifestLine entry{std::string(path),{},*size};
 for(std::size_t i=0;i<entry.hash.size();++i){
 const auto digit=[](char c){return static_cast<std::uint8_t>(c<='9'?c-'0':c-'a'+10);};
@@ -317,6 +326,8 @@ struct Manifest{
 ManifestHead head;
 // By fold_name.
 std::unordered_map<std::string,Known> known;
+// The release's plain assets (its plain lines), by fold_name; none in a manifest written before they were recorded.
+std::unordered_map<std::string,ManifestLine> plain;
 };
 
 // The whole manifest, every line checked (the damaged text otherwise).
@@ -344,7 +355,7 @@ const auto build=take();
 const auto patch=take();
 const auto head=parse_head(magic,build,patch);
 if(!head)return failed();
-Manifest manifest{*head,{}};
+Manifest manifest{*head,{},{}};
 // A deleted entry line needs a patched line; checked once every line is read.
 std::size_t deleted_entries=0;
 std::size_t patched_with_deleted=0;
@@ -373,6 +384,13 @@ else{
 if(known.newest==PatchState::marker)return failed();
 if(known.newest==PatchState::entry)++patched_with_deleted;
 }
+continue;
+}
+if(line->starts_with("plain ")){
+auto entry=parse_entry(line->substr(6),false);
+if(!entry)return failed();
+std::string fold=vfs::fold_name(entry->path);
+if(!manifest.plain.try_emplace(std::move(fold),std::move(*entry)).second)return failed();
 continue;
 }
 if(line->starts_with("patched ")){
@@ -470,7 +488,21 @@ lines.push_back({std::move(name),reader.digest(),reader.size()});
 if(auto set=(*storage)->set_metadata("build="+build_id);!set)return std::unexpected(cannot("write",pack_file,set.error()));
 if(auto closed=(*storage)->close();!closed)return std::unexpected(cannot("write",pack_file,closed.error()));
 storage->reset();
-return write_manifest(project,build_id,*patch,lines);
+// The plain assets too, so a later patch tells which of them changed (it cannot ship them). A name no manifest line can hold
+// (a line break in it) is left out, and a patch then counts it as new.
+std::vector<ManifestLine> plain;
+plain.reserve(split.plain.size());
+const auto buffer=std::make_unique_for_overwrite<std::byte[]>(kCopyPiece);
+for(const fs::path& asset:split.plain){
+std::string name=relative_text(asset,project.root);
+if(name.find_first_of("\r\n")!=std::string::npos)continue;
+const auto info=platform::stat_path(asset);
+if(!info)return std::unexpected(cannot("read",asset,info.error()));
+auto hash=hash_file(asset,info->size,buffer.get());
+if(!hash)return std::unexpected(std::move(hash.error()));
+plain.push_back({std::move(name),*hash,info->size});
+}
+return write_manifest(project,build_id,*patch,lines,std::move(plain));
 }
 
 std::expected<void,std::string> append_pack(const fs::path& executable,const fs::path& pack_file,std::uint32_t payload_crc)
@@ -575,11 +607,16 @@ std::unordered_map<std::string,Current> packed;
 packed.reserve(expanded->size());
 std::unordered_set<std::string> declared;
 declared.reserve(expanded->size());
+// The plain assets now: their paths and files.
+std::vector<std::pair<std::string,const fs::path*>> plain_now;
 for(const fs::path& asset:*expanded){
 std::string relative=relative_text(asset,project.root);
 std::string fold=vfs::fold_name(relative);
 declared.insert(fold);
-if(!packed_in_release(project.pack,relative))continue;
+if(!packed_in_release(project.pack,relative)){
+plain_now.emplace_back(std::move(relative),&asset);
+continue;
+}
 const auto canonical=pack::canonical_entry_name(relative);
 if(!canonical||*canonical!=relative)return std::unexpected("error: "+in_quotes(relative)+" is not a valid file name");
 const auto info=platform::stat_path(asset);
@@ -602,6 +639,21 @@ if(!moved||path<*moved)moved=&path;
 }
 if(moved)return std::unexpected("error: "+in_quotes(*moved)+" moved out of the pack; that needs a full release build");
 const auto buffer=std::make_unique_for_overwrite<std::byte[]>(kCopyPiece);
+// A plain asset the release lacks, or holds with other bytes, is one a patch cannot carry: warned about, in path order.
+std::vector<std::string> warnings;
+std::ranges::sort(plain_now,{},&std::pair<std::string,const fs::path*>::first);
+for(const auto& [relative,file]:plain_now){
+const auto info=platform::stat_path(*file);
+if(!info)return std::unexpected(cannot("read",*file,info.error()));
+const auto recorded=manifest->plain.find(vfs::fold_name(relative));
+bool same_file=recorded!=manifest->plain.end()&&recorded->second.path==relative&&recorded->second.size==info->size;
+if(same_file){
+auto hash=hash_file(*file,info->size,buffer.get());
+if(!hash)return std::unexpected(std::move(hash.error()));
+same_file=*hash==recorded->second.hash;
+}
+if(!same_file)warnings.push_back("warning: "+in_quotes(relative)+" is not packed; patches carry packed assets only, so ship it with the patch or build a full release");
+}
 // Whether the current asset is exactly line (spelling, size, bytes); the hash is made only when the rest agrees, and once.
 const auto same=[&](Current& current,const ManifestLine& line)->std::expected<bool,std::string>{
 if(current.path!=line.path||current.size!=line.size)return false;
@@ -640,7 +692,7 @@ if(manifest->known.contains(fold))continue;
 changed=true;
 emitted.push_back(Emitted{current.path,&current});
 }
-if(!changed)return PatchResult{static_cast<int>(number),0,0,false};
+if(!changed)return PatchResult{static_cast<int>(number),0,0,false,std::move(warnings)};
 std::ranges::sort(emitted,{},&Emitted::path);
 const fs::path folder=output/"patches";
 std::error_code error;
@@ -690,7 +742,10 @@ if(auto closed=(*storage)->close();!closed)return std::unexpected(cannot("write"
 std::vector<ManifestLine> release;
 release.reserve(manifest->known.size());
 for(auto& [fold,known]:manifest->known)if(known.release)release.push_back(std::move(*known.release));
-if(auto written=write_manifest(project,manifest->head.build_id,number+1,release,std::move(deleted),std::move(patched));!written){
+std::vector<ManifestLine> plain;
+plain.reserve(manifest->plain.size());
+for(auto& [fold,line]:manifest->plain)plain.push_back(std::move(line));
+if(auto written=write_manifest(project,manifest->head.build_id,number+1,release,std::move(plain),std::move(deleted),std::move(patched));!written){
 discard_release_manifest(project);
 return std::unexpected(std::move(written.error()));
 }
@@ -707,6 +762,6 @@ if(auto committed=commit_release_manifest(project);!committed){
 discard_release_manifest(project);
 return std::unexpected(std::move(committed.error()));
 }
-return PatchResult{static_cast<int>(number),entries,markers,true};
+return PatchResult{static_cast<int>(number),entries,markers,true,std::move(warnings)};
 }
 }

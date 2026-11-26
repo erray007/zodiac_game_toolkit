@@ -735,9 +735,10 @@ CHECK(started.code==0);
 CHECK(started.lines.empty());
 // patch_3 gives b.txt again; patch_10 comes after patch_9 (by number, not by name), and the gap between 3 and 9 is fine.
 write_patch_pack(patches/"patch_3.zpk",{{"a.txt","three"},{"b.txt","back"}},{},key,3);
-write_patch_pack(patches/"patch_9.zpk",{{"a.txt","nine"}},{},key,9);
+// Named in another case: patch 9 all the same, on every system.
+write_patch_pack(patches/"Patch_9.ZPK",{{"a.txt","nine"},{"nine.txt","nine"}},{},key,9);
 write_patch_pack(patches/"patch_10.zpk",{{"a.txt","ten"}},{},key,10);
-started=start_in(folder.dir(),patched_game(folder.dir(),key,"if(read_file(\"a.txt\")!=\"ten\")return 3;if(read_file(\"b.txt\")!=\"back\")return 4;if(directory_exists(\"sub\"))return 5;"));
+started=start_in(folder.dir(),patched_game(folder.dir(),key,"if(read_file(\"a.txt\")!=\"ten\")return 3;if(read_file(\"b.txt\")!=\"back\")return 4;if(directory_exists(\"sub\"))return 5;if(read_file(\"nine.txt\")!=\"nine\")return 6;"));
 INFO(join(started.lines));
 CHECK(started.code==0);
 CHECK(started.lines.empty());
@@ -774,7 +775,7 @@ const std::vector<std::string> expected{
 "warning: ignoring "+quoted(patches/"patch_01.zpk")+": patch packs are named patch_<n>.zpk",
 "error: cannot use patch "+quoted(patches/"patch_1.zpk")+": wrong key or damaged pack",
 "warning: patch "+quoted(patches/"patch_2.zpk")+" belongs to another release of the game; it is not used",
-"warning: ignoring "+quoted(patches/"patch_3.zpk")+": patch packs are named patch_<n>.zpk"};
+"warning: ignoring "+quoted(patches/"patch_3.zpk")+": it was made as another patch number"};
 CHECK(started.lines==expected);
 // A damaged patch is refused the same way.
 std::string bytes=read_file(patches/"patch_2.zpk");
@@ -787,12 +788,15 @@ CHECK(damaged.code==0);
 CHECK(damaged.lines==std::vector<std::string>{"error: cannot use patch "+quoted(patches/"patch_5.zpk")+": wrong key or damaged pack"});
 }
 
-TEST_CASE("patch_number reads only patch_<n>.zpk with a decimal n from 1 without leading zeros")
+TEST_CASE("patch_number reads only patch_<n>.zpk, ASCII case-insensitively, with a decimal n from 1 without leading zeros")
 {
 CHECK(zodiac::pack::patch_number("patch_1.zpk")==1);
 CHECK(zodiac::pack::patch_number("patch_10.zpk")==10);
+// The same on every system, as the VFS finds names.
+CHECK(zodiac::pack::patch_number("patch_1.ZPK")==1);
+CHECK(zodiac::pack::patch_number("PATCH_7.Zpk")==7);
 CHECK(zodiac::pack::patch_number("patch_18446744073709551615.zpk")==UINT64_MAX);
-for(const char* name:{"patch_0.zpk","patch_01.zpk","patch_.zpk","patch_1.ZPK","Patch_1.zpk","patch_1.zpk.tmp","patch_-1.zpk","patch_+1.zpk","patch_1a.zpk","patch_18446744073709551616.zpk"}){
+for(const char* name:{"patch_0.zpk","patch_01.zpk","patch_.zpk","patch_1.zpk.tmp","patch-1.zpk","patch_-1.zpk","patch_+1.zpk","patch_1a.zpk","patch_18446744073709551616.zpk"}){
 INFO(name);
 CHECK_FALSE(zodiac::pack::patch_number(name));
 }

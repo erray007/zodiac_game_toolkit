@@ -159,7 +159,7 @@ diagnostics.report(ZODIAC_LOG_WARNING,"warning: patch "+shown+" belongs to anoth
 return;
 }
 if(!has_line(metadata,"patch",std::to_string(patch.number))){
-diagnostics.report(ZODIAC_LOG_WARNING,"warning: ignoring "+shown+": patch packs are named patch_<n>.zpk");
+diagnostics.report(ZODIAC_LOG_WARNING,"warning: ignoring "+shown+": it was made as another patch number");
 return;
 }
 try{
@@ -252,7 +252,16 @@ std::optional<std::uint64_t> patch_number(std::string_view file_name) noexcept
 {
 constexpr std::string_view prefix="patch_";
 constexpr std::string_view suffix=".zpk";
-if(file_name.size()<=prefix.size()+suffix.size()||!file_name.starts_with(prefix)||!file_name.ends_with(suffix))return std::nullopt;
+// ASCII case-insensitively on every system, as the VFS finds names ("PATCH_1.ZPK" is patch 1 on Linux too).
+const auto same_ascii=[](std::string_view text,std::string_view lower){
+for(std::size_t i=0;i<lower.size();++i){
+char c=text[i];
+if(c>='A'&&c<='Z')c=static_cast<char>(c-'A'+'a');
+if(c!=lower[i])return false;
+}
+return true;
+};
+if(file_name.size()<=prefix.size()+suffix.size()||!same_ascii(file_name.substr(0,prefix.size()),prefix)||!same_ascii(file_name.substr(file_name.size()-suffix.size()),suffix))return std::nullopt;
 const std::string_view digits=file_name.substr(prefix.size(),file_name.size()-prefix.size()-suffix.size());
 // Decimal, at least 1, no leading zero: one name per number.
 if(digits.front()<'1'||digits.front()>'9')return std::nullopt;
@@ -268,7 +277,12 @@ std::vector<PatchFile> patches;
 collect_patches(exe_dir,0,patches,diagnostics);
 if(!data_dir.empty())collect_patches(data_dir,1,patches,diagnostics);
 // Oldest first, as they are mounted: the highest number in front, of one number the data folder's.
-std::ranges::sort(patches,[](const PatchFile& a,const PatchFile& b){return a.number!=b.number?a.number<b.number:a.folder<b.folder;});
+// Two spellings of one name in one folder (a case-sensitive file system) go by name bytes, so every start mounts alike.
+std::ranges::sort(patches,[](const PatchFile& a,const PatchFile& b){
+if(a.number!=b.number)return a.number<b.number;
+if(a.folder!=b.folder)return a.folder<b.folder;
+return a.path.native()<b.path.native();
+});
 for(const PatchFile& patch:patches)mount_patch(vfs,key,build_id,patch,diagnostics);
 }
 

@@ -465,7 +465,10 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(run_exe(release / "game.exe"), (0, "", ""))
         self.assertEqual(self.copied("game"), self.sound)
         manifest = (project / ".zodiac" / "release.manifest").read_text(encoding="utf-8").splitlines()
-        self.assertEqual([line.split(" ", 2)[2] for line in manifest[3:]], ["sounds/a.ogg"])
+        self.assertEqual([line.split(" ", 2)[2] for line in manifest[3:] if not line.startswith("plain ")], ["sounds/a.ogg"])
+        # The plain assets are recorded too, so a patch can tell which of them changed.
+        self.assertEqual([line.split(" ", 3)[2:] for line in manifest[3:] if line.startswith("plain ")],
+                         [[str(len("a pack the game opens itself")), "sounds/bundled.zpk"], ["1", "sounds/x/b.ogg"]])
 
     def test_build_writable_pack_is_external(self):
         # writable forces external (a running executable is locked); a save outside data:/ goes into the pack and survives a restart.
@@ -679,6 +682,17 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(out.splitlines(), ["Build failed: 1 error"])
         self.assertFalse((project / "release" / "patches").exists())
         self.assertEqual((project / ".zodiac" / "release.manifest").read_bytes(), manifest)
+
+    def test_build_patch_warns_for_plain_assets(self):
+        project = self.packing_project('\n[pack]\nexclude = ["sounds/x/**"]\n', self.PATCHED_SCRIPT)
+        self.build_packed(project)
+        write(project / "sounds" / "x" / "b.ogg", "b2")
+        write(project / "sounds" / "x" / "new.ogg", "n")
+        code, out, err = self.patch(project)
+        self.assertEqual(code, 0, err)
+        warning = 'warning: "%s" is not packed; patches carry packed assets only, so ship it with the patch or build a full release'
+        self.assertEqual(err.splitlines(), [warning % "sounds/x/b.ogg", warning % "sounds/x/new.ogg"])
+        self.assertEqual(out.splitlines(), [self.PATCH_NOTE, self.NOTHING_CHANGED, "Build succeeded: %s" % (project / "release" / "game.exe")])
 
     def test_build_patch_usage_errors(self):
         code, out, err = zodiac("run", "--patch", str(self.root / "nowhere"))

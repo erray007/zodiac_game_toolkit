@@ -758,6 +758,7 @@ crypto::wipe(loaded->data(),loaded->size());
 }
 const auto patched=write_patch(project,key,output);
 if(!patched)return fail(diagnostics,patched.error());
+for(const std::string& warning:patched->warnings)diagnostics.report(ZODIAC_LOG_WARNING,warning);
 platform::write_stdout_line("patches carry asset files only; script changes need a full build");
 if(!patched->written){
 platform::write_stdout_line("no files changed since the last release build; no patch written");

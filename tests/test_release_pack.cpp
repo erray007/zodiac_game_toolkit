@@ -424,11 +424,15 @@ zodiac::Project project;
 project.root=temp.path/"game";
 project.name="game";
 project.build.assets={"assets/**"};
+project.pack.exclude={"assets/plain/**"};
 const fs::path assets=project.root/"assets";
 fs::create_directories(assets/"sub");
+fs::create_directories(assets/"plain");
 write_all(assets/"a.txt","a");
 write_all(assets/"same.txt","same");
 write_all(assets/"sub"/"gone.txt","gone");
+write_all(assets/"plain"/"kept.txt","kept");
+write_all(assets/"plain"/"changed.txt","before");
 const crypto::Key key=test_key(31);
 const fs::path output=project.root/"release";
 const auto patch_of=[&]{return zodiac::cli::write_patch(project,key,output);};
@@ -449,12 +453,26 @@ fs::create_directories(project.root/".zodiac");
 REQUIRE(zodiac::cli::write_release_pack(project,key,split,temp.path/"game.zpk",build_id));
 REQUIRE(zodiac::cli::commit_release_manifest(project));
 }
+// The release records its plain assets too.
+CHECK(std::ranges::count_if(manifest_lines(project),[](const std::string& line){return line.starts_with("plain ");})==2);
 // Nothing differs yet.
 const auto unchanged=patch_of();
 REQUIRE(unchanged);
 CHECK(unchanged->number==1);
 CHECK_FALSE(unchanged->written);
+CHECK(unchanged->warnings.empty());
 CHECK_FALSE(fs::exists(output/"patches"));
+// A plain asset added or changed cannot ship in a patch: each is warned about once, an unchanged one not, and nothing is written.
+write_all(assets/"plain"/"changed.txt","after");
+write_all(assets/"plain"/"added.txt","added");
+const auto plain=patch_of();
+REQUIRE(plain);
+CHECK_FALSE(plain->written);
+CHECK(plain->warnings==std::vector<std::string>{
+"warning: \"assets/plain/added.txt\" is not packed; patches carry packed assets only, so ship it with the patch or build a full release",
+"warning: \"assets/plain/changed.txt\" is not packed; patches carry packed assets only, so ship it with the patch or build a full release"});
+fs::remove(assets/"plain"/"added.txt");
+write_all(assets/"plain"/"changed.txt","before");
 // One asset changed, one is new, one was removed.
 write_all(assets/"a.txt","a2");
 write_all(assets/"new.txt","new");
@@ -522,6 +540,31 @@ REQUIRE(storage);
 CHECK(entry_bytes(**storage,"assets/a.txt")=="a");
 REQUIRE((*storage)->close());
 }
+// An asset only a patch added, removed later: the next patch holds a marker, so with every patch mounted it is gone.
+fs::remove(assets/"new.txt");
+const auto fourth=patch_of();
+REQUIRE(fourth);
+CHECK(fourth->written);
+CHECK(fourth->number==4);
+CHECK(fourth->deleted==1);
+CHECK(has(manifest_lines(project),"deleted marker assets/new.txt"));
+{
+zodiac::vfs::Vfs vfs;
+std::vector<std::shared_ptr<pack::PackStorage>> mounted;
+const auto mount=[&](const fs::path& file){
+auto storage=pack::PackStorage::open(file,pack::KeySource(key),false);
+REQUIRE(storage);
+REQUIRE(vfs.mount("/",pack::make_pack_source(*storage,false),false,nullptr));
+mounted.push_back(std::move(*storage));
+};
+mount(temp.path/"game.zpk");
+for(int n=1;n<=4;++n)mount(output/"patches"/("patch_"+std::to_string(n)+".zpk"));
+CHECK(vfs.stat("assets/new.txt").error().code==zodiac::vfs::FileError::not_found);
+CHECK(vfs.stat("assets/sub/gone.txt")->kind==zodiac::vfs::EntryKind::file);
+CHECK(vfs.stat("assets/a.txt")->size==1);
+CHECK(vfs.stat("assets/same.txt")->kind==zodiac::vfs::EntryKind::file);
+for(const auto& storage:mounted)REQUIRE(storage->close());
+}
 // A file the manifest knows that is still declared but no longer packed needs a full build; nothing is written.
 const std::vector<std::string> before=manifest_lines(project);
 zodiac::Project excluding=project;
@@ -530,13 +573,24 @@ write_all(assets/"new.txt","newer");
 const auto moved=zodiac::cli::write_patch(excluding,key,output);
 REQUIRE_FALSE(moved);
 CHECK(moved.error()=="error: \"assets/same.txt\" moved out of the pack; that needs a full release build");
-CHECK_FALSE(fs::exists(output/"patches"/"patch_4.zpk"));
+CHECK_FALSE(fs::exists(output/"patches"/"patch_5.zpk"));
 CHECK(manifest_lines(project)==before);
+// A manifest from before plain lines were recorded still parses; every plain asset is warned about then.
+{
+std::string text;
+for(const std::string& line:before)if(!line.starts_with("plain "))text.append(line).push_back('\n');
+write_all(project.root/".zodiac"/"release.manifest",text);
+}
+const auto older=patch_of();
+INFO(older.error_or(""));
+REQUIRE(older);
+CHECK(older->written);
+CHECK(older->warnings.size()==2);
 // A damaged manifest line is refused as the whole manifest is.
 {
 std::ofstream out(project.root/".zodiac"/"release.manifest",std::ios::binary|std::ios::app);
 out<<"no such line\n";
 }
 CHECK(patch_of().error()=="error: .zodiac/release.manifest is damaged; restore it from your backup or delete it");
-CHECK_FALSE(fs::exists(output/"patches"/"patch_4.zpk"));
+CHECK_FALSE(fs::exists(output/"patches"/"patch_6.zpk"));
 }

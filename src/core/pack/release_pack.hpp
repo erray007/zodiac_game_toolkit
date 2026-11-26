@@ -42,14 +42,16 @@
 //   - `error: cannot mount the game data: out of memory`.
 // - mount_patches(vfs, key, build_id, exe_dir, data_dir, diagnostics): the patch packs zodiac build --patch writes
 //   (cli/release_packing.hpp), each cumulative against the full release build it was made for. It collects every file named
-//   patch_<n>.zpk (n decimal, at least 1, no leading zeros, at most 2^64-1) in <exe_dir>/patches/ and <data_dir>/patches/
-//   (an empty data_dir, or a missing folder, has none), orders them by n ascending, the data folder's after the executable
-//   folder's at an equal n, and mounts each read only at "/" in that order, in front of the build pack (so the highest n
+//   patch_<n>.zpk (n decimal, at least 1, no leading zeros, at most 2^64-1; "patch_" and ".zpk" ASCII case-insensitively on
+//   every system, as the VFS finds names) in <exe_dir>/patches/ and <data_dir>/patches/ (an empty data_dir, or a missing
+//   folder, has none), orders them by n ascending, the data folder's after the executable folder's at an equal n (two
+//   spellings in one folder by name bytes), and mounts each read only at "/" in that order, in front of the build pack (so the highest n
 //   decides a name, and of two of one n the data folder's). Patches are matched to the release by their `base_build=` metadata
 //   against build_id (payload.build_id, which the build pack's own `build=` line equals), never by `build=`; every check below
 //   leaves the patch unmounted and the game going on:
-//   - any other name in either patches/ folder (folders included), and a patch whose `patch=` metadata is not its n:
-//     `warning: ignoring "<path>": patch packs are named patch_<n>.zpk`, in name order per folder;
+//   - any other name in either patches/ folder (folders included): `warning: ignoring "<path>": patch packs are named
+//     patch_<n>.zpk`, in name order per folder; a patch whose `patch=` metadata is not its n (renamed by hand, so it could
+//     override a newer patch): `warning: ignoring "<path>": it was made as another patch number`;
 //   - a patch the key does not open, or a damaged one: `error: cannot use patch "<path>": wrong key or damaged pack`
 //     (`unsupported pack (newer format)` for a newer format; the system's reason when the file cannot be opened);
 //   - a patch whose `base_build=` is not build_id (no such line included): `warning: patch "<path>" belongs to another release of
@@ -66,7 +68,8 @@
 // go in a patches/ folder next to the executable, or in data:/patches/ (where a game's own updater may save them); a patch
 // holds every change since its full release, so only the newest needs shipping, and a new full release ignores the old ones.
 // With a writable release pack, a name a patch holds cannot be written any more (read-only pack text), since the patch is in
-// front of the pack.
+// front of the pack. The base_build check keeps stale patches (of an older full release) out; it is no defence against an
+// attacker, who has the key from the executable anyway (see release_pack_key).
 // Threads: the main thread, before the script runs.
 #pragma once
 #include <core/diagnostics.hpp>

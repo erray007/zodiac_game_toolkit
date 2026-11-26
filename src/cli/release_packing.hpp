@@ -16,7 +16,9 @@
 //   no asset is ever held whole in memory. The metadata is `build=<build_id>`.
 // - Writes the manifest to <root>/.zodiac/release.manifest.tmp: `zodiac-release-manifest 1`, `build <build_id>`,
 //   `next_patch <n>` (n from the current .zodiac/release.manifest when there is one, else 1), then one line per packed asset,
-//   sorted by path bytes: `<64 hex digits of its BLAKE2b-256> <size> <path>`, every line ending in "\n". commit_release_manifest
+//   sorted by path bytes: `<64 hex digits of its BLAKE2b-256> <size> <path>`, then one per plain asset of split (hashed, streamed,
+//   as the packed ones; a path holding a line break is left out): `plain <64 hex digits> <size> <path>`, every line ending in
+//   "\n". commit_release_manifest
 //   moves it over .zodiac/release.manifest once the release itself is in place, so a build that fails later never changes the
 //   manifest patches compare against; discard_release_manifest removes it otherwise.
 // - Errors, each one line: `error: cannot read "<asset>": <reason>` (an asset that cannot be opened or read, or changes size while it
@@ -54,7 +56,12 @@
 //   nothing) differs from what the game sees now; only then is a patch written. Hashes are made only where size and spelling
 //   agree, streamed through one 1 MiB buffer; nothing is held whole in memory, and an asset written into the patch is read again
 //   as write_release_pack reads one (hashed on the way, for its patched line).
-// - With nothing changed nothing is written: PatchResult{n, 0, 0, false}. Otherwise <output>/patches/patch_<n>.zpk
+// - Plain assets: a patch carries packed assets only. Every plain asset now (packed_in_release refuses it) that has no plain line
+//   of that path, size and hash (new, or changed since the release; hashed only where path and size agree) gets, in path order,
+//   `warning: "<path>" is not packed; patches carry packed assets only, so ship it with the patch or build a full release`, in
+//   PatchResult::warnings, whether a patch is written or not; never an error. A manifest written before plain lines were
+//   recorded has none, so every plain asset is warned about until the next full build. The release's plain lines are kept.
+// - With nothing changed nothing is written: PatchResult{n, 0, 0, false, warnings}. Otherwise <output>/patches/patch_<n>.zpk
 //   (pack::patch_file_name, n the manifest's next_patch) is made through pack::PackStorage under key as a raw key (the nonce
 //   rule holds for every chunk and index), entries by project-relative path with their files' modification times and markers in
 //   path order, metadata `base_build=<the manifest's build id>` and `patch=<n>`; as <name>.tmp first, then renamed over any file
@@ -66,7 +73,9 @@
 // Notes for the user documentation (Task 14): a packed asset is found by its project-relative path, case-insensitively, exactly as
 // in zodiac run; .zodiac/release.manifest records the last release build, and patches (zodiac build --patch) are made against it.
 // A patch holds every change since the full release build, so shipping the newest patch alone is enough; scripts and modules
-// never change in a patch, and an asset moved out of the pack, or newly excluded, needs a full release build.
+// never change in a patch, and an asset moved out of the pack, or newly excluded, needs a full release build. Patch n re-ships
+// every path changed (or deleted) since the release, so patches grow until the next full build, which starts again from
+// nothing. A plain asset that is new or changed is not in any patch: ship it by hand next to the patch, or build a full release.
 // Threads: main thread.
 #pragma once
 #include <core/pack/crypto.hpp>
@@ -94,6 +103,8 @@ int number;
 std::size_t changed;
 std::size_t deleted;
 bool written;
+// The plain-asset warnings (see write_patch), for the caller to report.
+std::vector<std::string> warnings;
 };
 std::expected<PatchResult,std::string> write_patch(const Project& project,const crypto::Key& key,const std::filesystem::path& output);
 }
