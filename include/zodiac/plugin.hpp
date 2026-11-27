@@ -11,6 +11,11 @@ Any C++ exception escaping fn becomes a catchable script exception carrying e.wh
 zodiac::plugin::VfsFile opens game files through the host's VFS (plugin.h, VFS rules): VfsFile::open(host, "sounds/a.ogg")
 gives a VfsResult<VfsFile> (value and a ZODIAC_E_* code), and the file reads into a span, seeks and closes itself. It checks
 the host's struct_size itself, so an older host gives ZODIAC_E_UNAVAILABLE instead of a call through a missing entry.
+Open a VfsFile through the host the current call came from (the host given to the module's init, or the one a registered
+function was bound to), and use it only there: the one shared implementation the next paragraph relies on makes a bound function
+safe with any host, but not a file handle. Each host numbers its own handles, and one from another host may alias a handle of
+this one (plugin.h). Each open and exists with a std::string_view copies the path into a 512-byte stack buffer to add its NUL
+(one allocation only for a longer path), so it costs that much stack.
 
 The wrapper reaches the host table through a per-function pointer set at registration. Registration runs on the main
 thread before scripts execute, so calls only read it. Registering the same function with several hosts makes it use the
@@ -177,7 +182,9 @@ int code_=ZODIAC_OK;
 }
 // A game file opened through the host's VFS (plugin.h, VFS rules), closed when it is destroyed. Move-only; every call is noexcept
 // and compiles down to the C entries. A host whose table lacks the VFS entries (ZODIAC_HOST_HAS) gives ZODIAC_E_UNAVAILABLE from
-// open and exists, so a module using VfsFile still loads in an older host. One VfsFile belongs to one thread at a time.
+// open and exists, so a module using VfsFile still loads in an older host. One VfsFile belongs to one thread at a time, and to the
+// host it was opened through: open it through the host the call came from (the header comment above). The std::string_view
+// overloads of open and exists put a 512-byte buffer on the stack (vfs_path).
 class VfsFile{
 public:
 VfsFile() noexcept=default;

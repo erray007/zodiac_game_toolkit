@@ -110,6 +110,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ==============================================================================
+poly1305-donna (MIT or public domain), https://github.com/floodyberry/poly1305-donna
+==============================================================================
+
+Zodiac's Poly1305 (src/core/pack/poly1305.cpp) follows poly1305-donna-64.h by Andrew Moon (commit e6ad6e091d30d7f4ec2d4f978be1fcfcbce72781): its limbs and arithmetic, carried into C++. The project's README gives its licence as below; Zodiac takes it as public domain, which asks for no notice.
+
+# LICENSE
+
+[MIT](http://www.opensource.org/licenses/mit-license.php) or PUBLIC DOMAIN
+
+
+==============================================================================
 mimalloc 3.5.3 (MIT), https://github.com/microsoft/mimalloc
 ==============================================================================
 

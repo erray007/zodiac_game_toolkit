@@ -37,9 +37,9 @@ class CheckBenchTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.path = Path(self._tmp.name) / "bench.json"
 
-    def run_main(self, text, expected=None, machine=True):
+    def run_main(self, text, expected=None, machine=True, extra=()):
         """Runs check_bench on text, with MACHINE appended unless machine is False (so line numbers stay those of text); expected is
-        the op list bench_types --list would print (by default the ops in text)."""
+        the op list bench_types --list would print (by default the ops in text); extra are further arguments."""
         self.path.write_text(text + (MACHINE + "\n" if machine else ""), encoding="utf-8")
         if expected is None:
             expected = list(dict.fromkeys(re.findall(r'"op": "([^"]*)"', text)))
@@ -48,8 +48,42 @@ class CheckBenchTests(unittest.TestCase):
         out = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = check_bench.main([str(self.path), "--expected", str(ops)])
+            code = check_bench.main([str(self.path), "--expected", str(ops), *extra])
         return code, out.getvalue(), err.getvalue()
+
+    def test_limit_sets_the_gated_ratio_s_limit(self):
+        # bench_files' pack reads (Task 13) are gated well above 1: --limit 3.0 passes 2.9 and fails 3.1; the default stays 1.05.
+        code, out, err = self.run_main(line("pack_read_sequential", 2.9) + "\n", extra=["--limit", "3.0"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("within their limits (pack_read_sequential 3)", out)
+        code, _, err = self.run_main(line("pack_read_sequential", 3.1) + "\n", extra=["--limit", "3.0"])
+        self.assertEqual(code, 1)
+        self.assertIn("pack_read_sequential: ratio 3.100 (limit 3)", err)
+        code, _, err = self.run_main(line("pack_read_sequential", 1.06) + "\n")
+        self.assertEqual(code, 1)
+        self.assertIn("more than 5 % slower", err)
+        code, _, err = self.run_main(line("pack_read_sequential", 1.05) + "\n")
+        self.assertEqual(code, 0, err)
+
+    def test_a_per_op_limit_wins_over_the_plain_one(self):
+        text = line("pack_read_sequential", 2.9) + "\n" + line("pack_read_random_seek", 30.0) + "\n"
+        code, out, err = self.run_main(text, extra=["--limit", "3.0", "--limit", "pack_read_random_seek=31.5"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("pack_read_random_seek 31.5", out)
+        code, _, err = self.run_main(text, extra=["--limit", "pack_read_random_seek=29"])
+        self.assertEqual(code, 1)
+        # The other op keeps the default 1.05, and both are named with their limits.
+        self.assertIn("pack_read_sequential: ratio 2.900 (limit 1.05)", err)
+        self.assertIn("pack_read_random_seek: ratio 30.000 (limit 29)", err)
+
+    def test_a_bad_limit_fails(self):
+        text = line("pack_read_sequential", 1.0) + "\n"
+        for bad in (["--limit", "fast"], ["--limit", "0"], ["--limit", "-2"], ["--limit", "inf"], ["--limit", "nan"], ["--limit", "2", "--limit", "3"],
+                ["--limit", "unknown_op=2"], ["--limit", "=2"], ["--limit", "pack_read_sequential=2", "--limit", "pack_read_sequential=3"], ["--limit", "pack_read_sequential="]):
+            with self.subTest(bad=bad):
+                code, _, err = self.run_main(text, extra=bad)
+                self.assertEqual(code, 2)
+                self.assertIn("--limit", err)
 
     def test_a_missing_op_fails_naming_it(self):
         code, _, err = self.run_main(line("string_find", 0.5) + "\n", expected=["string_find", "array_sort_int", "dict_insert_10"])

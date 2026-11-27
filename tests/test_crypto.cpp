@@ -4,10 +4,13 @@
 // - open refusing every flipped bit of cipher, tag and aad, and a wrong size, with its output zeroed;
 // - with the vectorized ChaCha20 compiled in, its keystream and seal against Monocypher's on 64 random buffers of a fixed
 //   seed, at every length from 0 to 1024 and at 65536, from counters 0, 1 and 0xFFFFFFFE;
+// - Poly1305 after poly1305-donna-64 (poly1305.hpp) against the RFC 8439 vectors and against Monocypher's on random inputs of every
+//   length from 0 to 1024 and 65536 and on extreme keys and messages, in one call and block by block;
 // - Argon2id through derive_password_key against single-lane vectors of Monocypher 4.0.2's test suite (generated from
 //   libsodium), its determinism, its salt dependence and its limits; BLAKE2b-256 and the file key against Python's hashlib.
 #include <core/library/random.hpp>
 #include <core/pack/crypto.hpp>
+#include <core/pack/poly1305.hpp>
 #include <doctest/doctest.h>
 #include <algorithm>
 #include <array>
@@ -208,6 +211,70 @@ const Bytes& message=(*v)["message"];
 std::uint8_t tag[16];
 crypto::detail::poly1305(tag,message.data(),message.size(),(*v)["key"].data());
 CHECK(Bytes(tag,tag+16)==(*v)["tag"]);
+std::uint8_t donna[16];
+crypto::detail::poly1305_donna(donna,message.data(),message.size(),(*v)["key"].data());
+CHECK(Bytes(donna,donna+16)==(*v)["tag"]);
+}
+}
+
+TEST_CASE("Poly1305 after donna-64 gives Monocypher's tags on random and extreme inputs, in one call or block by block")
+{
+zodiac::Xoshiro256 random;
+random.seed(0xD0BB1A64u);
+const auto fill=[&](std::uint8_t* bytes,std::size_t size){
+for(std::size_t i=0;i<size;++i)bytes[i]=static_cast<std::uint8_t>(random.next()>>56);
+};
+const auto agree=[](const Bytes& message,const std::uint8_t key[32]){
+std::uint8_t expected[16];
+crypto::detail::poly1305(expected,message.data(),message.size(),key);
+std::uint8_t tag[16];
+crypto::detail::poly1305_donna(tag,message.data(),message.size(),key);
+CHECK(Bytes(tag,tag+16)==Bytes(expected,expected+16));
+// The same message given to the class one block at a time, then its partial end.
+crypto::detail::Poly1305 mac(key);
+const std::size_t whole=message.size()&~std::size_t{15};
+for(std::size_t at=0;at<whole;at+=16)mac.blocks(message.data()+at,16);
+if(message.size()!=whole)mac.last_partial(message.data()+whole,message.size()-whole);
+std::uint8_t pieces[16];
+mac.finish(pieces);
+CHECK(Bytes(pieces,pieces+16)==Bytes(expected,expected+16));
+};
+std::size_t compared=0;
+// 64 random keys and messages: buffer b covers the lengths b, b + 64, ... up to 1024, so every length from 0 to 1024 once, and
+// each buffer 65536.
+for(int buffer=0;buffer<64;++buffer){
+std::uint8_t key[32];
+fill(key,sizeof key);
+Bytes data(65536);
+fill(data.data(),data.size());
+std::vector<std::size_t> lengths;
+for(std::size_t length=static_cast<std::size_t>(buffer);length<=1024;length+=64)lengths.push_back(length);
+lengths.push_back(65536);
+for(const std::size_t length:lengths){
+INFO("buffer "<<buffer<<", length "<<length);
+agree(Bytes(data.begin(),data.begin()+static_cast<std::ptrdiff_t>(length)),key);
+++compared;
+}
+}
+CHECK(compared==1025+64);
+// Extremes that drive the limbs and the final reduction to their edges: every bit r may keep after clamping and an all-ones s,
+// over all-ones messages (h stays near its largest values and p), all-zero keys and messages, and r = 1 (the tag is then the
+// message's sum plus s, so h can land just at or above p).
+std::uint8_t widest[32];
+std::fill(widest,widest+32,std::uint8_t{0xFF});
+std::uint8_t zero_key[32]{};
+std::uint8_t unit[32]{};
+unit[0]=1;
+std::fill(unit+16,unit+32,std::uint8_t{0xFF});
+for(const std::uint8_t* key:{static_cast<const std::uint8_t*>(widest),static_cast<const std::uint8_t*>(zero_key),static_cast<const std::uint8_t*>(unit)}){
+for(const std::size_t length:{std::size_t{0},std::size_t{1},std::size_t{15},std::size_t{16},std::size_t{17},std::size_t{31},std::size_t{32},std::size_t{33},std::size_t{64},std::size_t{1023},std::size_t{65536}}){
+INFO("extreme key "<<static_cast<int>(key[0])<<", length "<<length);
+agree(Bytes(length,0xFF),key);
+agree(Bytes(length,0x00),key);
+Bytes alternating(length);
+for(std::size_t i=0;i<length;++i)alternating[i]=static_cast<std::uint8_t>(i%32<16?0xFF:0x00);
+agree(alternating,key);
+}
 }
 }
 

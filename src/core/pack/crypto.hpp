@@ -45,7 +45,8 @@
 // - dispatched() is the one seal and open use, chosen once: AVX2 when the CPU has it, else SSE2, else the reference.
 // - seal_with and open_with are seal and open on a given keystream (bench_files measures the reference against the
 //   dispatched one with them).
-// - poly1305 is Monocypher's crypto_poly1305.
+// - poly1305 is Monocypher's crypto_poly1305; poly1305_donna is Poly1305 after poly1305-donna-64 (poly1305.hpp), which test_crypto
+//   checks against the RFC 8439 vectors and against poly1305 on random inputs, and bench_files times against it (poly1305_chunk).
 #pragma once
 #include <array>
 #include <cstddef>
@@ -114,5 +115,6 @@ const Keystream& dispatched() noexcept;
 void seal_with(const Keystream& stream,const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::span<const std::byte> plain,std::span<std::byte> cipher,Tag& tag) noexcept;
 [[nodiscard]] bool open_with(const Keystream& stream,const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::span<const std::byte> cipher,const Tag& tag,std::span<std::byte> plain) noexcept;
 void poly1305(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept;
+void poly1305_donna(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept;
 }
 }

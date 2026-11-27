@@ -1,5 +1,6 @@
-// bench_files: report-only measurements of the pack and file code (spec 8.2 of the library-and-packs design); Task 13 adds the read
-// operations and gates them. Not a ctest test: CI runs it on the release presets and prints its lines.
+// bench_files: measurements of the pack and file code (spec 8.2 and 9 of the library-and-packs design). The two read operations are
+// gated by tools/check_bench.py in CI (pack against disk, at the limit Task 13 measured); the others are report-only. Not a ctest
+// test: CI runs it on the release presets.
 // Contract:
 // - crypto_chunk: one 64 KiB seal plus open of a pack chunk (32 bytes of aad), with each vectorized ChaCha20 this CPU runs (sse2,
 //   and avx2 when the CPU has it) against Monocypher's scalar one (reference), all through crypto::detail::seal_with and open_with,
@@ -8,16 +9,44 @@
 //   candidate, each a timed window of the same reps (calibrated once so the reference's window takes at least 2 ms), so a drift of
 //   the machine's speed during a round weighs on both sides alike. Per candidate: ratio is the median over rounds of
 //   (B + B) / (A + A), its 10th and 90th percentiles, and the median nanoseconds of one seal plus open of each side.
+// - poly1305_chunk: Poly1305 over 64 KiB, crypto::detail::poly1305_donna (poly1305-donna-64) against Monocypher's
+//   crypto::detail::poly1305 (reference), first checked to give the same tag (exit 3 otherwise), then timed as crypto_chunk is
+//   (A B B A rounds of equal reps, the reference's window at least 2 ms). It tells how much of a chunk's time Poly1305 is.
 // - kdf_open: crypto::derive_password_key with the defaults (kDefaultKdfKib, kDefaultKdfPasses), one untimed run then 11 timed ones:
 //   the median, lowest and highest milliseconds. Task 13 records it against the spec's "well under 100 ms" (here at most 50 ms).
+// - The read operations (gated): a 32 MiB file of seeded random bytes on disk, in a folder mounted read only at "disk" (a
+//   FolderSource, as zodiac run mounts the game's folder), and the same bytes as one entry of a pack made with a raw key and chunks
+//   of 2^--chunk-log2 bytes (the default PackOptions::chunk_log2), closed and opened again read only, mounted at "pack" (a release
+//   pack's way). Both are read through Vfs::open_read and Reader::read_at, as a script's file object reads, and both are first read
+//   whole and at every seek offset and compared with the bytes written (exit 3 on a difference), which also warms them. One rep opens
+//   the file and makes the operation's reads:
+//   - pack_read_sequential: the whole file in 64 KiB reads (512 reads);
+//   - pack_read_random_seek: 2 000 reads of 4 KiB at offsets drawn once from a seeded generator, the same for both sides.
+//   Each side is calibrated to its own reps so that its timed window takes at least --window-ms (10) milliseconds (equal-time
+//   calibration, bench_types' --calibrate time; a pack rep of the random seeks is longer than that by itself). Then --rounds (31)
+//   rounds: each runs every read operation's two sides back to back, the side that runs first alternating with the round. Per
+//   operation: new_ns is the median over rounds of the pack's nanoseconds per read, addon_ns the disk's, ratio the median of the
+//   per-round ratios pack/disk (the fields tools/check_bench.py gates; new_ns and addon_ns are named as bench_types names them).
 // - Output: a line {"machine":{"cpu":brand,"logical_cores":n,"os":build}}, then one JSON line per operation, to stdout and to --out
 //   when given; stderr gets a readable summary.
 //   {"op":"crypto_chunk","bytes":65536,"rounds":n,"reps":n,"reference_ns":n,"dispatched":name,
 //    "candidates":[{"name":name,"ns":n,"ratio":r,"ratio_p10":r,"ratio_p90":r}...]}
+//   {"op":"poly1305_chunk","bytes":65536,"rounds":n,"reps":n,"reference_ns":n,"candidates":[{"name":"donna64",...}]}
 //   {"op":"kdf_open","kib":n,"passes":n,"runs":11,"ms":m,"min_ms":m,"max_ms":m}
-// - Usage: bench_files [--op NAME]... [--rounds N] [--out PATH] [--list]. Without --op every operation runs; --list prints the names.
-// - Exit codes: 0 measured, 1 bad arguments, 3 a keystream disagrees with the reference.
+//   {"op":"pack_read_sequential","new_ns":n,"addon_ns":n,"ratio":r,"ratio_p10":r,"ratio_p90":r,"calibrate":"time","window_ms":w,
+//    "pack_reps":n,"disk_reps":n,"rounds":n,"chunk_log2":c,"file_bytes":33554432,"read_bytes":65536,"reads":512}
+//   (pack_read_random_seek likewise, with read_bytes 4096 and reads 2000).
+// - Usage: bench_files [--op NAME]... [--rounds N] [--window-ms N] [--chunk-log2 N] [--out PATH] [--list] [--list-gated]. Without
+//   --op every operation runs; --list prints the names, --list-gated the gated ones (the --expected list of check_bench.py).
+//   --rounds defaults to 101 for crypto_chunk and poly1305_chunk and to 31 for the reads.
+// - Exit codes: 0 measured, 1 bad arguments, 3 a keystream, a tag or a read disagrees with the reference, 4 the read operations'
+//   files could not be made, mounted or read.
+#include <core/library/random.hpp>
 #include <core/pack/crypto.hpp>
+#include <core/pack/pack_source.hpp>
+#include <core/pack/pack_storage.hpp>
+#include <core/vfs/folder_source.hpp>
+#include <core/vfs/vfs.hpp>
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -27,6 +56,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -43,6 +77,7 @@
 #endif
 
 namespace crypto=zodiac::crypto;
+namespace fs=std::filesystem;
 
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -240,6 +275,60 @@ if(sink==0xFFFFFFFFu)std::fprintf(stderr,"bench_files: sink %u\n",sink);
 return line;
 }
 
+// ---- poly1305_chunk ----
+using MacFunction=void(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept;
+
+// One Poly1305 of the chunk with mac, reps times (the key changes with each rep's tag, so no call can be skipped); returns the
+// nanoseconds and folds the tags into sink.
+std::int64_t time_mac(MacFunction* mac,const std::uint8_t* message,std::uint8_t key[32],int reps,unsigned& sink)
+{
+std::uint8_t tag[16];
+const Clock::time_point start=Clock::now();
+for(int rep=0;rep<reps;++rep){
+mac(tag,message,kChunk,key);
+key[rep&31]^=tag[0];
+sink+=tag[15];
+}
+return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start).count();
+}
+
+std::string poly1305_chunk(int rounds)
+{
+Chunk chunk;
+const auto* message=reinterpret_cast<const std::uint8_t*>(chunk.plain.data());
+std::uint8_t key[32];
+std::memcpy(key,chunk.key.data(),32);
+std::uint8_t expected[16];
+std::uint8_t tag[16];
+crypto::detail::poly1305(expected,message,kChunk,key);
+crypto::detail::poly1305_donna(tag,message,kChunk,key);
+if(std::memcmp(expected,tag,16)!=0)fail(3,"poly1305_chunk: donna64 disagrees with the reference");
+unsigned sink=0;
+int reps=1;
+while(time_mac(&crypto::detail::poly1305,message,key,reps,sink)<2'000'000&&reps<(1<<20))reps*=2;
+std::vector<double> ratios;
+std::vector<double> donna_ns;
+std::vector<double> reference_ns;
+for(int round=0;round<rounds;++round){
+const std::int64_t a1=time_mac(&crypto::detail::poly1305,message,key,reps,sink);
+const std::int64_t b1=time_mac(&crypto::detail::poly1305_donna,message,key,reps,sink);
+const std::int64_t b2=time_mac(&crypto::detail::poly1305_donna,message,key,reps,sink);
+const std::int64_t a2=time_mac(&crypto::detail::poly1305,message,key,reps,sink);
+ratios.push_back(static_cast<double>(b1+b2)/static_cast<double>(a1+a2));
+donna_ns.push_back(static_cast<double>(b1+b2)/(2.0*reps));
+reference_ns.push_back(static_cast<double>(a1+a2)/(2.0*reps));
+}
+const double reference=quantile(reference_ns,0.5);
+const double ns=quantile(donna_ns,0.5);
+const double ratio=quantile(ratios,0.5);
+const double p10=quantile(ratios,0.1);
+const double p90=quantile(ratios,0.9);
+std::fprintf(stderr,"bench_files: poly1305_chunk: one 64 KiB Poly1305, %d rounds of A B B A, %d reps per window; reference (Monocypher) %.0f ns (%.0f MB/s), donna64 %.0f ns (%.0f MB/s), paired ratio %.4f (p10 %.4f, p90 %.4f)\n",rounds,reps,reference,kChunk/reference*1000.0,ns,kChunk/ns*1000.0,ratio,p10,p90);
+crypto::wipe(key,sizeof key);
+if(sink==0xFFFFFFFFu)std::fprintf(stderr,"bench_files: sink %u\n",sink);
+return "{\"op\":\"poly1305_chunk\",\"bytes\":"+std::to_string(kChunk)+",\"rounds\":"+std::to_string(rounds)+",\"reps\":"+std::to_string(reps)+",\"reference_ns\":"+number(reference,0)+",\"candidates\":[{\"name\":\"donna64\",\"ns\":"+number(ns,0)+",\"ratio\":"+number(ratio,4)+",\"ratio_p10\":"+number(p10,4)+",\"ratio_p90\":"+number(p90,4)+"}]}";
+}
+
 // ---- kdf_open ----
 std::string kdf_open()
 {
@@ -266,15 +355,216 @@ if(sink==0xFFFFFFFFu)std::fprintf(stderr,"bench_files: sink %u\n",sink);
 return "{\"op\":\"kdf_open\",\"kib\":"+std::to_string(crypto::kDefaultKdfKib)+",\"passes\":"+std::to_string(crypto::kDefaultKdfPasses)+",\"runs\":"+std::to_string(runs)+",\"ms\":"+number(median,3)+",\"min_ms\":"+number(low,3)+",\"max_ms\":"+number(high,3)+"}";
 }
 
-constexpr std::string_view kOps[]{"crypto_chunk","kdf_open"};
+// ---- the read operations ----
+constexpr std::uint64_t kFileBytes=std::uint64_t{32}<<20;
+constexpr std::size_t kSequentialRead=65536;
+constexpr std::size_t kSeekRead=4096;
+constexpr int kSeekReads=2000;
+
+// The two mounted copies of the file, made in a fresh folder of the system's temporary folder and removed with it.
+class ReadFiles{
+public:
+explicit ReadFiles(std::uint8_t chunk_log2)
+{
+std::array<std::byte,8> name{};
+crypto::random_bytes(name);
+std::string suffix;
+for(const std::byte b:name){
+char hex[3];
+std::snprintf(hex,sizeof hex,"%02x",static_cast<unsigned>(b));
+suffix+=hex;
+}
+std::error_code error;
+root_=fs::temp_directory_path(error)/("zodiac-bench-files-"+suffix);
+if(error||!fs::create_directories(root_/"disk",error)||error)fail(4,"cannot make a folder in the temporary folder: "+error.message());
+bytes_.resize(kFileBytes);
+zodiac::Xoshiro256 random;
+random.seed(0xF11E5u);
+for(std::size_t at=0;at<bytes_.size();at+=8){
+const std::uint64_t word=random.next();
+std::memcpy(bytes_.data()+at,&word,8);
+}
+{
+std::ofstream out(root_/"disk"/"level.bin",std::ios::binary|std::ios::trunc);
+out.write(reinterpret_cast<const char*>(bytes_.data()),static_cast<std::streamsize>(bytes_.size()));
+out.close();
+if(!out)fail(4,"cannot write the disk copy of the file");
+}
+crypto::Key key{};
+for(std::size_t i=0;i<key.size();++i)key[i]=static_cast<std::uint8_t>(0x5A^(i*7));
+const fs::path pack_path=root_/"level.zpk";
+{
+auto made=zodiac::pack::PackStorage::open(pack_path,key,true,zodiac::pack::PackOptions{crypto::kDefaultKdfKib,crypto::kDefaultKdfPasses,chunk_log2});
+if(!made)fail(4,"cannot make the pack: "+made.error().failure.message);
+if(!(*made)->add("level.bin",bytes_,0)||!(*made)->flush()||!(*made)->close())fail(4,"cannot write the pack");
+}
+// Opened again, as a release opens its pack: the index read back from the file, nothing of the writing kept.
+auto opened=zodiac::pack::PackStorage::open(pack_path,key,false);
+crypto::wipe(key.data(),key.size());
+if(!opened)fail(4,"cannot open the pack: "+opened.error().failure.message);
+vfs_.emplace();
+if(!vfs_->mount("disk",std::make_shared<zodiac::vfs::FolderSource>(root_/"disk",true),false,nullptr)||!vfs_->mount("pack",zodiac::pack::make_pack_source(std::move(*opened),false),false,nullptr))fail(4,"cannot mount the two copies");
+zodiac::Xoshiro256 offsets;
+offsets.seed(0x5EEC5u);
+offsets_.reserve(kSeekReads);
+for(int i=0;i<kSeekReads;++i)offsets_.push_back(offsets.next()%(kFileBytes-kSeekRead+1));
+buffer_.resize(kSequentialRead);
+}
+~ReadFiles()
+{
+// The mounts hold the pack file open, which Windows would not delete.
+vfs_.reset();
+std::error_code error;
+fs::remove_all(root_,error);
+}
+ReadFiles(const ReadFiles&)=delete;
+ReadFiles& operator=(const ReadFiles&)=delete;
+std::shared_ptr<zodiac::vfs::Reader> open(std::string_view path)
+{
+auto reader=vfs_->open_read(path);
+if(!reader||!*reader)fail(4,std::string("cannot open ")+std::string(path));
+return std::move(*reader);
+}
+// Reads the whole file and every seek offset of path and compares them with the bytes written.
+void verify(std::string_view path)
+{
+const auto reader=open(path);
+if(reader->size()!=kFileBytes)fail(3,std::string(path)+" has the wrong size");
+for(std::uint64_t at=0;at<kFileBytes;at+=kSequentialRead){
+if(reader->read_at(at,buffer_)!=static_cast<std::int64_t>(kSequentialRead)||std::memcmp(buffer_.data(),bytes_.data()+at,kSequentialRead)!=0)fail(3,std::string(path)+" reads other bytes than were written");
+}
+for(const std::uint64_t at:offsets_){
+if(reader->read_at(at,std::span(buffer_).first(kSeekRead))!=static_cast<std::int64_t>(kSeekRead)||std::memcmp(buffer_.data(),bytes_.data()+at,kSeekRead)!=0)fail(3,std::string(path)+" reads other bytes than were written at a seek");
+}
+}
+// reps reps of the sequential reads of path: the nanoseconds, a byte of each read folded into sink.
+std::int64_t sequential(std::string_view path,int reps,unsigned& sink)
+{
+const Clock::time_point start=Clock::now();
+for(int rep=0;rep<reps;++rep){
+const auto reader=open(path);
+for(std::uint64_t at=0;at<kFileBytes;at+=kSequentialRead){
+if(reader->read_at(at,buffer_)!=static_cast<std::int64_t>(kSequentialRead))fail(4,std::string("a read of ")+std::string(path)+" failed");
+sink+=static_cast<unsigned>(buffer_[static_cast<std::size_t>(at>>16)&(kSequentialRead-1)]);
+}
+}
+return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start).count();
+}
+// reps reps of the 4 KiB reads at the seek offsets of path.
+std::int64_t random_seek(std::string_view path,int reps,unsigned& sink)
+{
+const Clock::time_point start=Clock::now();
+for(int rep=0;rep<reps;++rep){
+const auto reader=open(path);
+for(const std::uint64_t at:offsets_){
+if(reader->read_at(at,std::span(buffer_).first(kSeekRead))!=static_cast<std::int64_t>(kSeekRead))fail(4,std::string("a read of ")+std::string(path)+" failed");
+sink+=static_cast<unsigned>(buffer_[static_cast<std::size_t>(at)&(kSeekRead-1)]);
+}
+}
+return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start).count();
+}
+private:
+fs::path root_;
+std::vector<std::byte> bytes_;
+std::optional<zodiac::vfs::Vfs> vfs_;
+std::vector<std::uint64_t> offsets_;
+std::vector<std::byte> buffer_;
+};
+
+struct ReadOp{
+std::string_view name;
+std::int64_t (ReadFiles::*run)(std::string_view path,int reps,unsigned& sink)=nullptr;
+std::size_t read_bytes=0;
+int reads=0;
+int pack_reps=1;
+int disk_reps=1;
+std::vector<double> pack_ns;
+std::vector<double> disk_ns;
+std::vector<double> ratios;
+};
+
+// Grows reps until one timed run of path takes at least target_ns (each run doubles as a warm-up).
+int calibrate_reads(ReadFiles& files,ReadOp& op,std::string_view path,double target_ns,unsigned& sink)
+{
+int reps=1;
+for(;;){
+const auto ns=static_cast<double>((files.*op.run)(path,reps,sink));
+if(ns>=target_ns||reps>=(1<<20))return reps;
+const double scale=ns>0?target_ns/ns*1.1:16;
+reps=static_cast<int>(std::min<double>(1<<20,std::max<double>(reps*2.0,reps*scale)));
+}
+}
+
+std::vector<std::string> read_ops(const std::vector<std::string_view>& names,int rounds,int window_ms,std::uint8_t chunk_log2)
+{
+ReadFiles files(chunk_log2);
+files.verify("disk/level.bin");
+files.verify("pack/level.bin");
+std::vector<ReadOp> ops;
+for(const std::string_view name:names){
+ReadOp& op=ops.emplace_back();
+op.name=name;
+const bool sequential=name=="pack_read_sequential";
+op.run=sequential?&ReadFiles::sequential:&ReadFiles::random_seek;
+op.read_bytes=sequential?kSequentialRead:kSeekRead;
+op.reads=sequential?static_cast<int>(kFileBytes/kSequentialRead):kSeekReads;
+}
+unsigned sink=0;
+const double target_ns=window_ms*1e6;
+for(ReadOp& op:ops){
+op.pack_reps=calibrate_reads(files,op,"pack/level.bin",target_ns,sink);
+op.disk_reps=calibrate_reads(files,op,"disk/level.bin",target_ns,sink);
+}
+// Every round takes each operation in turn, so each one's rounds spread over the whole run.
+for(int round=0;round<rounds;++round){
+for(ReadOp& op:ops){
+const bool pack_first=round%2==0;
+std::int64_t pack=0;
+std::int64_t disk=0;
+if(pack_first)pack=(files.*op.run)("pack/level.bin",op.pack_reps,sink);
+disk=(files.*op.run)("disk/level.bin",op.disk_reps,sink);
+if(!pack_first)pack=(files.*op.run)("pack/level.bin",op.pack_reps,sink);
+const double pack_read=static_cast<double>(pack)/(static_cast<double>(op.pack_reps)*op.reads);
+const double disk_read=static_cast<double>(disk)/(static_cast<double>(op.disk_reps)*op.reads);
+op.pack_ns.push_back(pack_read);
+op.disk_ns.push_back(disk_read);
+op.ratios.push_back(disk_read>0?pack_read/disk_read:0.0);
+}
+}
+std::vector<std::string> lines;
+for(const ReadOp& op:ops){
+const double pack=quantile(op.pack_ns,0.5);
+const double disk=quantile(op.disk_ns,0.5);
+const double ratio=quantile(op.ratios,0.5);
+const double p10=quantile(op.ratios,0.1);
+const double p90=quantile(op.ratios,0.9);
+std::fprintf(stderr,"bench_files: %.*s: %d reads of %zu bytes per rep, chunks of %u bytes, %d rounds, reps pack %d disk %d (window %d ms): pack %.0f ns per read (%.0f MB/s), disk %.0f ns (%.0f MB/s), ratio %.3f (p10 %.3f, p90 %.3f)\n",static_cast<int>(op.name.size()),op.name.data(),op.reads,op.read_bytes,1u<<chunk_log2,rounds,op.pack_reps,op.disk_reps,window_ms,pack,op.read_bytes/pack*1000.0,disk,op.read_bytes/disk*1000.0,ratio,p10,p90);
+lines.push_back("{\"op\":\""+std::string(op.name)+"\",\"new_ns\":"+number(pack,1)+",\"addon_ns\":"+number(disk,1)+",\"ratio\":"+number(ratio,4)+",\"ratio_p10\":"+number(p10,4)+",\"ratio_p90\":"+number(p90,4)+",\"calibrate\":\"time\",\"window_ms\":"+std::to_string(window_ms)+",\"pack_reps\":"+std::to_string(op.pack_reps)+",\"disk_reps\":"+std::to_string(op.disk_reps)+",\"rounds\":"+std::to_string(rounds)+",\"chunk_log2\":"+std::to_string(chunk_log2)+",\"file_bytes\":"+std::to_string(kFileBytes)+",\"read_bytes\":"+std::to_string(op.read_bytes)+",\"reads\":"+std::to_string(op.reads)+"}");
+}
+if(sink==0xFFFFFFFFu)std::fprintf(stderr,"bench_files: sink %u\n",sink);
+return lines;
+}
+
+constexpr std::string_view kOps[]{"crypto_chunk","poly1305_chunk","kdf_open","pack_read_sequential","pack_read_random_seek"};
+// The operations tools/check_bench.py gates (CI's --expected list).
+constexpr std::string_view kGatedOps[]{"pack_read_sequential","pack_read_random_seek"};
+
+bool parse_whole(std::string_view value,int& out,int low,int high)
+{
+const auto [end,error]=std::from_chars(value.data(),value.data()+value.size(),out);
+return error==std::errc()&&end==value.data()+value.size()&&out>=low&&out<=high;
+}
 }
 
 int main(int argc,char** argv)
 {
 std::vector<std::string> only;
-int rounds=101;
+std::optional<int> rounds;
+int window_ms=10;
+int chunk_log2=zodiac::pack::kDefaultChunkLog2;
 std::string out_path;
 bool list=false;
+bool list_gated=false;
 for(int i=1;i<argc;++i){
 const std::string_view arg=argv[i];
 const bool has_value=i+1<argc;
@@ -284,16 +574,23 @@ if(std::find(std::begin(kOps),std::end(kOps),name)==std::end(kOps))fail(1,"no op
 only.emplace_back(name);
 }
 else if(arg=="--rounds"&&has_value){
-const std::string_view value=argv[++i];
-const auto [end,error]=std::from_chars(value.data(),value.data()+value.size(),rounds);
-if(error!=std::errc()||end!=value.data()+value.size()||rounds<1)fail(1,"--rounds needs a whole number of at least 1");
+int value=0;
+if(!parse_whole(argv[++i],value,1,1'000'000))fail(1,"--rounds needs a whole number of at least 1");
+rounds=value;
+}
+else if(arg=="--window-ms"&&has_value){
+if(!parse_whole(argv[++i],window_ms,1,10'000))fail(1,"--window-ms needs a whole number from 1 to 10000");
+}
+else if(arg=="--chunk-log2"&&has_value){
+if(!parse_whole(argv[++i],chunk_log2,zodiac::pack::kMinChunkLog2,zodiac::pack::kMaxChunkLog2))fail(1,"--chunk-log2 needs a whole number from "+std::to_string(zodiac::pack::kMinChunkLog2)+" to "+std::to_string(zodiac::pack::kMaxChunkLog2));
 }
 else if(arg=="--out"&&has_value)out_path=argv[++i];
 else if(arg=="--list")list=true;
-else fail(1,"usage: bench_files [--op NAME]... [--rounds N] [--out PATH] [--list]");
+else if(arg=="--list-gated")list_gated=true;
+else fail(1,"usage: bench_files [--op NAME]... [--rounds N] [--window-ms N] [--chunk-log2 N] [--out PATH] [--list] [--list-gated]");
 }
-if(list){
-for(const std::string_view name:kOps)std::printf("%.*s\n",static_cast<int>(name.size()),name.data());
+if(list||list_gated){
+for(const std::string_view name:list?std::span<const std::string_view>(kOps):std::span<const std::string_view>(kGatedOps))std::printf("%.*s\n",static_cast<int>(name.size()),name.data());
 return 0;
 }
 const std::string cpu=cpu_brand();
@@ -304,8 +601,15 @@ std::vector<std::string> lines{"{\"machine\":{\"cpu\":"+json_string(cpu)+",\"log
 const auto wanted=[&](std::string_view name){
 return only.empty()||std::find(only.begin(),only.end(),name)!=only.end();
 };
-if(wanted("crypto_chunk"))lines.push_back(crypto_chunk(rounds));
+if(wanted("crypto_chunk"))lines.push_back(crypto_chunk(rounds.value_or(101)));
+if(wanted("poly1305_chunk"))lines.push_back(poly1305_chunk(rounds.value_or(101)));
 if(wanted("kdf_open"))lines.push_back(kdf_open());
+std::vector<std::string_view> reads;
+for(const std::string_view name:kGatedOps)if(wanted(name))reads.push_back(name);
+if(!reads.empty()){
+std::vector<std::string> read_lines=read_ops(reads,rounds.value_or(31),window_ms,static_cast<std::uint8_t>(chunk_log2));
+lines.insert(lines.end(),read_lines.begin(),read_lines.end());
+}
 std::FILE* out=out_path.empty()?nullptr:std::fopen(out_path.c_str(),"w");
 if(!out_path.empty()&&out==nullptr)fail(1,"cannot write "+out_path);
 for(const std::string& line:lines){

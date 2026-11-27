@@ -51,8 +51,8 @@ def pe_subsystem(path):
     return struct.unpack_from("<H", data, pe + 24 + 68)[0]
 
 
-def run_exe(path, cwd=None, errors="strict"):
-    result = subprocess.run([str(path)], capture_output=True, cwd=cwd, timeout=60)
+def run_exe(path, cwd=None, errors="strict", env=None):
+    result = subprocess.run([str(path)], capture_output=True, cwd=cwd, env=env, timeout=60)
     return result.returncode, result.stdout.decode("utf-8", errors), result.stderr.decode("utf-8", errors)
 
 
@@ -77,6 +77,21 @@ def isolate_user_data(test):
     for key in ("APPDATA", "XDG_DATA_HOME"):
         test.addCleanup(restore_environment, key, os.environ.get(key))
         os.environ[key] = folder.name
+
+
+def fresh_user_data(test):
+    """The environment with APPDATA and XDG_DATA_HOME pointing into a new, empty temporary folder of the test (removed when it ends), so
+    one run's data:/ (a save, a folder it made) can never be seen by the next."""
+    folder = tempfile.TemporaryDirectory()
+    test.addCleanup(folder.cleanup)
+    env = dict(os.environ)
+    env["APPDATA"] = folder.name
+    env["XDG_DATA_HOME"] = folder.name
+    return env
+
+
+# The three ways a release carries its assets: the pack appended to the executable (the default), <game>.zpk beside it, plain files.
+PACK_MODES = (("embedded", ""), ("external", "\n[pack]\nexternal = true\n"), ("plain", "\n[pack]\nenabled = false\n"))
 
 
 def toml_literal(text):
@@ -256,6 +271,50 @@ class BuildTest(unittest.TestCase):
                 self.assertEqual(exe_err.splitlines(), run_err.splitlines())
                 self.assertEqual(exe_out, run_out)
         self.assertEqual(built, BUILDABLE_FIXTURES)
+
+    def test_blood_bath_style_identical_in_every_pack_mode(self):
+        # Core-types spec 9 and library-and-packs spec 9: the Blood Bath-style script prints exactly the same, on stdout and stderr, with
+        # the same exit code, in zodiac run and in its release, whether the release carries its assets in the executable, in
+        # <game>.zpk or as plain files. Every run gets an empty data:/ of its own, so the save it makes and deletes starts from nothing.
+        source = SCRIPT_FIXTURES / "blood_bath_style"
+        game = source.name
+        assets = sorted(p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file() and p.name not in ("main.zs", "zodiac.toml"))
+        for mode, setting in PACK_MODES:
+            with self.subTest(mode=mode):
+                fixture = self.root / mode / game
+                shutil.copytree(source, fixture)
+                self.append_toml(fixture, setting)
+                run = zodiac("run", str(fixture), "--no-window", "--module-dir", MODULE_DIR, env=fresh_user_data(self))
+                self.assertEqual(run[0], 7, run[2])
+                # Every part of the script ran (the last lines are the dictionary's serialize()).
+                self.assertIn("elapsed>=0 true", run[1].splitlines())
+                self.assertIn('double "hız" 1.5', run[1].splitlines())
+                output = self.root / mode / "release"
+                code, out, err = zodiac("build", str(fixture), "--no-window", "--module-dir", MODULE_DIR, "--output", str(output))
+                self.assertEqual((code, err), (0, ""), out)
+                exe = output / (game + ".exe")
+                # The mode took effect: the assets are in the executable, in the pack beside it, or plain files beside it.
+                expected = {"embedded": [game + ".exe"], "external": [game + ".exe", game + ".zpk"], "plain": sorted([game + ".exe"] + assets)}[mode]
+                self.assertEqual(self.release_files(output), expected)
+                self.assertEqual(exe.read_bytes()[-8:] == TRAILER_MAGIC, mode == "embedded")
+                self.assertEqual(run_exe(exe, env=fresh_user_data(self)), run)
+
+    def test_cased_read_same_output(self):
+        # A packed sounds/a.ogg read as Sounds/A.OGG gives the same bytes in zodiac run and in the release in every pack mode. Only stdout
+        # and the exit code are compared: zodiac run's dev-mode case warning goes to stderr, and a release never checks spelling, so
+        # its stderr is empty. Every other identity case compares stderr too.
+        script = 'int main()\n{\nexample_print(read_file("Sounds/A.OGG"));\nreturn 5;\n}\n'
+        warning = 'warning: "Sounds/A.OGG" was found as "sounds/a.ogg"; use the real name, other systems may not find it'
+        for mode, setting in PACK_MODES:
+            with self.subTest(mode=mode):
+                project = self.new_project(self.root / mode / "game", static=["example"], script=script)
+                self.append_toml(project, '\n[build]\nassets = ["sounds/**"]\n' + setting)
+                write(project / "sounds" / "a.ogg", "OggS kanka şarkısı")
+                run_code, run_out, run_err = zodiac("run", str(project), "--no-window", "--module-dir", MODULE_DIR, env=fresh_user_data(self))
+                self.assertEqual((run_code, run_out.splitlines(), run_err.splitlines()), (5, ["OggS kanka şarkısı"], [warning]))
+                exe = project / "release" / "game.exe"
+                self.assert_built(self.build(str(project)), exe)
+                self.assertEqual(run_exe(exe, env=fresh_user_data(self)), (run_code, run_out, ""))
 
     def test_run_error_summary_only_in_zodiac_run(self):
         # Without --no-window and with no desktop, zodiac run sums its engine errors up on the console; the built game never does.

@@ -100,12 +100,31 @@ jobs:
       - name: Show the CPU
         shell: pwsh
         run: Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
-      # Report-only (Task 6; Task 13 gates the file operations), about 5 s: bench_files' crypto_chunk, one 64 KiB seal plus open with each
-      # vectorized ChaCha20 against Monocypher's scalar one in A B B A rounds within one process on this runner, and kdf_open, Argon2id with
-      # the pack defaults (at most 50 ms expected). It fails the job only when a keystream disagrees with the reference (exit 3).
+      # Report-only (Task 6), about 8 s: bench_files' crypto_chunk, one 64 KiB seal plus open with each vectorized ChaCha20 against
+      # Monocypher's scalar one in A B B A rounds within one process on this runner, poly1305_chunk, Poly1305 over 64 KiB after
+      # poly1305-donna-64 against Monocypher's, and kdf_open, Argon2id with the pack defaults (at most 50 ms expected). It fails the job
+      # only when a keystream or a tag disagrees with the reference (exit 3).
       - name: Measure the pack cryptography (report-only)
         shell: bash
-        run: build/windows-release/tests/bench/bench_files.exe --out bench-files.json
+        run: build/windows-release/tests/bench/bench_files.exe --op crypto_chunk --op poly1305_chunk --op kdf_open --out bench-files.json
+      # Pack reads against disk (Task 13, spec 9 of the library-and-packs design), about 30 s: bench_files' gated read operations, a
+      # 32 MiB file read sequentially in 64 KiB reads and in 2 000 seeks of 4 KiB, from a mounted pack and from a mounted folder,
+      # through Vfs::open_read. As the bench_types gate (spec 8.4): each side equal-time calibrated, 3 processes each from its own copy
+      # of the build, gated on the median of their pack/disk ratios per operation (tools/bench_files_gate.py, tools/check_bench.py).
+      # Report-only until Task 13 measures the limits.
+      - name: Benchmark pack reads against disk (report-only)
+        continue-on-error: true
+        run: python -I tools/bench_files_gate.py --bench build/windows-release/tests/bench/bench_files.exe --out-dir bench-files-gate --report-only
+      - name: Upload the pack read results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-files-windows
+          path: |
+            bench-files.json
+            bench-files-gate/*.json
+            bench-files-gate/*.txt
+          if-no-files-found: ignore
       - name: Find main's commit
         id: main
         shell: bash
@@ -331,7 +350,21 @@ jobs:
         run: lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket)|MHz|cache'
       # As in the windows job; bench-files.json goes up with the bench results.
       - name: Measure the pack cryptography (report-only)
-        run: build/linux-release/tests/bench/bench_files --out bench-files.json
+        run: build/linux-release/tests/bench/bench_files --op crypto_chunk --op poly1305_chunk --op kdf_open --out bench-files.json
+      # As in the windows job.
+      - name: Benchmark pack reads against disk (report-only)
+        continue-on-error: true
+        run: python -I tools/bench_files_gate.py --bench build/linux-release/tests/bench/bench_files --out-dir bench-files-gate --report-only
+      - name: Upload the pack read results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-files-linux
+          path: |
+            bench-files.json
+            bench-files-gate/*.json
+            bench-files-gate/*.txt
+          if-no-files-found: ignore
       - name: Benchmark against the sample add-ons (speed gate report-only)
         shell: bash
         run: |

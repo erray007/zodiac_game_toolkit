@@ -2,7 +2,7 @@
 """Checks bench_types' results against the speed gate of spec 8.4: no Zodiac type may be more than 5 % slower than its sample add-on, nor
 slower than on main beyond the regression limits.
 
-    python -I tools/check_bench.py <results.json>... --expected <ops.txt> [--baseline <main results.json>...]
+    python -I tools/check_bench.py <results.json>... --expected <ops.txt> [--limit RATIO | --limit OP=RATIO]... [--baseline <main results.json>...]
 
 Each results file is one bench_types process: one JSON object per line, {"op": name, "new_ns": n, "addon_ns": n, "ratio": r, ...}: new_ns
 and addon_ns are the median nanoseconds per iteration of Zodiac's types and of the add-ons, ratio the median of the per-round ratios
@@ -14,6 +14,10 @@ operation list), and every results file must cover exactly those operations, in 
 
 The add-on gate: per operation, the median over the files of their ratios is at most LIMIT (1.05). Several processes (the Windows gate
 runs 3) are needed because one process's code and heap placement moves a ratio by several percent (Task 5b fix rounds 3 and 4).
+--limit changes that limit: --limit RATIO for every operation, --limit OP=RATIO (repeatable) for one operation of the expected list,
+which wins over the plain one. bench_files' read operations, whose ratio is a pack's time over the disk's and nowhere near 1, are gated
+this way at the limits Task 13 measured (ci.yml). A RATIO is a finite number above 0; a malformed one, a second plain one, an operation
+named twice or one not in the expected list is exit 2.
 
 The regression gate (--baseline, one file per process of main's bench on the same machine, as many as results files; the gate runs them
 in alternation) is one-sided: it fails when head is slower. Per operation both have, head's best new_ns (minimum over its processes) over
@@ -44,12 +48,12 @@ stdout), when main's results were calibrated otherwise than
 head's (no "calibrate" field: a bench older than per-side calibration), since head/main then measures the calibration, not the code; it
 gates by itself once main's bench records the same mode. Every results file (head's processes) must record the same calibration mode.
 
-Exit codes: 0 both gates pass; 1 some gated ratio is above LIMIT or the regression gate fails (each such operation is named on stderr); 2 a
+Exit codes: 0 both gates pass; 1 some gated ratio is above its limit or the regression gate fails (each such operation is named on stderr); 2 a
 file is missing or unreadable, a line is not such an object (malformed JSON, a missing or non-numeric field, a negative or non-finite
 number, an empty op name), an operation appears twice, a file holds no results, the machine line is missing, repeated, malformed or differs
 between files, the results files record different calibration modes, the expected list is empty, an expected operation is missing or an
 unknown one is present (each named on stderr), the baseline files are not as many as the results files, an operation has a time of 0 on
-either side of the regression gate, the arguments are wrong, or the check itself fails unexpectedly. Only 1 means "too
+either side of the regression gate, the arguments are wrong (a --limit as above included), or the check itself fails unexpectedly. Only 1 means "too
 slow": the report-only Linux job tolerates exactly that code.
 """
 
@@ -157,11 +161,43 @@ def check_complete(results: list, expected_text: str) -> None:
         raise BenchFormatError("; ".join(problems))
 
 
-def table(results: list) -> str:
+def parse_limits(values: list, expected_text: str) -> dict:
+    """{"default": d, "ops": {op: limit}} of the --limit values ("RATIO" or "OP=RATIO"); raises BenchFormatError."""
+    expected = {name.strip() for name in expected_text.splitlines() if name.strip()}
+    limits = {"default": LIMIT, "ops": {}}
+    plain = False
+    for value in values:
+        op, separator, text = value.rpartition("=")
+        try:
+            number = float(text)
+        except ValueError:
+            number = math.nan
+        if not math.isfinite(number) or number <= 0:
+            raise BenchFormatError(f"--limit {value}: the limit must be a finite number above 0")
+        if not separator:
+            if plain:
+                raise BenchFormatError(f"--limit {value}: a second limit for every operation")
+            plain = True
+            limits["default"] = number
+            continue
+        if op not in expected:
+            raise BenchFormatError(f"--limit {value}: {op or '(no name)'} is not an operation of the expected list")
+        if op in limits["ops"]:
+            raise BenchFormatError(f"--limit {value}: {op} has a limit already")
+        limits["ops"][op] = number
+    return limits
+
+
+def limit_of(limits: dict, op: str) -> float:
+    return limits["ops"].get(op, limits["default"])
+
+
+def table(results: list, limits: dict = None) -> str:
+    limits = limits or {"default": LIMIT, "ops": {}}
     width = max(len("op"), max(len(op) for op, *_ in results))
     lines = [f"{'op':<{width}}  {'new_ns':>12}  {'addon_ns':>12}  {'ratio':>6}"]
     for op, new_ns, addon_ns, ratio in results:
-        mark = "  FAIL" if ratio > LIMIT else ""
+        mark = "  FAIL" if ratio > limit_of(limits, op) else ""
         lines.append(f"{op:<{width}}  {new_ns:>12.2f}  {addon_ns:>12.2f}  {ratio:>6.3f}{mark}")
     return "\n".join(lines)
 
@@ -257,22 +293,24 @@ def median(values: list) -> float:
     return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def gate_table(runs: list) -> tuple:
-    """The table of several processes' results and the [(op, gated ratio)] it gates: per op the median over the processes of
-    their ratios (each a median over rounds), new_ns and addon_ns as medians too."""
+def gate_table(runs: list, limits: dict = None) -> tuple:
+    """The table of several processes' results and the [(op, gated ratio, limit)] it gates: per op the median over the processes of
+    their ratios (each a median over rounds), new_ns and addon_ns as medians too; limits as parse_limits gives them (default LIMIT)."""
+    limits = limits or {"default": LIMIT, "ops": {}}
     ops = [op for op, *_ in runs[0]]
     by_run = [{op: (new_ns, addon_ns, ratio) for op, new_ns, addon_ns, ratio in results} for results in runs]
     width = max(len("op"), max(len(op) for op in ops))
     columns = "".join(f"  {'run ' + str(index + 1):>7}" for index in range(len(runs)))
-    lines = [f"{'op':<{width}}  {'new_ns':>12}  {'addon_ns':>12}{columns}  {'ratio':>6}"]
+    lines = [f"{'op':<{width}}  {'new_ns':>12}  {'addon_ns':>12}{columns}  {'ratio':>6}  {'limit':>6}"]
     gated = []
     for op in ops:
         values = [run[op] for run in by_run]
         ratio = median([value[2] for value in values])
-        gated.append((op, ratio))
-        mark = "  FAIL" if ratio > LIMIT else ""
+        limit = limit_of(limits, op)
+        gated.append((op, ratio, limit))
+        mark = "  FAIL" if ratio > limit else ""
         cells = "".join(f"  {value[2]:>7.3f}" for value in values)
-        lines.append(f"{op:<{width}}  {median([v[0] for v in values]):>12.2f}  {median([v[1] for v in values]):>12.2f}{cells}  {ratio:>6.3f}{mark}")
+        lines.append(f"{op:<{width}}  {median([v[0] for v in values]):>12.2f}  {median([v[1] for v in values]):>12.2f}{cells}  {ratio:>6.3f}  {limit:>6.2f}{mark}")
     return "\n".join(lines), gated
 
 
@@ -322,6 +360,7 @@ def _check(argv) -> int:
     parser = argparse.ArgumentParser(description="Fail when a Zodiac type is more than 5 % slower than its sample add-on, or than main.")
     parser.add_argument("results", type=Path, nargs="+", help="bench_types' JSON lines, one file per process (the gate runs 3)")
     parser.add_argument("--expected", type=Path, required=True, help="the operation names, one per line (bench_types --list)")
+    parser.add_argument("--limit", action="append", default=[], metavar="RATIO|OP=RATIO", help=f"the gated ratio's limit, for every operation or for one (default {LIMIT}; repeatable)")
     parser.add_argument("--baseline", type=Path, nargs="+", help="main's bench results, one file per process, paired with the results in order")
     parser.add_argument("--limits", type=Path, default=DEFAULT_LIMITS, help="the regression gate's per-operation limits (tools/bench_regression_limits.json)")
     args = parser.parse_args(argv)
@@ -333,6 +372,11 @@ def _check(argv) -> int:
         except (OSError, UnicodeDecodeError) as error:
             print(f"check_bench: cannot read {path}: {error}", file=sys.stderr)
             return 2
+    try:
+        gate_limits = parse_limits(args.limit, texts[args.expected])
+    except BenchFormatError as error:
+        print(f"check_bench: {error}", file=sys.stderr)
+        return 2
     runs = []
     machine = None
     for path in args.results:
@@ -368,17 +412,23 @@ def _check(argv) -> int:
                 return 2
     print(describe(machine), flush=True)
     print(f"calibration: {calibration(texts[args.results[0]])}; gated on the median of {len(runs)} process(es)", flush=True)
-    text, gated = gate_table(runs)
+    text, gated = gate_table(runs, gate_limits)
     print(text, flush=True)
     failed = False
-    slower = [(op, ratio) for op, ratio in gated if ratio > LIMIT]
+    slower = [(op, ratio, limit) for op, ratio, limit in gated if ratio > limit]
+    uniform = {limit for _, _, limit in gated} == {LIMIT}
     if slower:
         failed = True
-        print(f"check_bench: {len(slower)} operation(s) more than {round((LIMIT - 1) * 100)} % slower than the sample add-ons:", file=sys.stderr)
-        for op, ratio in slower:
-            print(f"  {op}: ratio {ratio:.3f}", file=sys.stderr)
-    else:
+        if uniform:
+            print(f"check_bench: {len(slower)} operation(s) more than {round((LIMIT - 1) * 100)} % slower than the sample add-ons:", file=sys.stderr)
+        else:
+            print(f"check_bench: {len(slower)} operation(s) above their limits:", file=sys.stderr)
+        for op, ratio, limit in slower:
+            print(f"  {op}: ratio {ratio:.3f} (limit {limit:g})", file=sys.stderr)
+    elif uniform:
         print(f"check_bench: all {len(gated)} operations within the {LIMIT} limit.", flush=True)
+    else:
+        print(f"check_bench: all {len(gated)} operations within their limits (" + ", ".join(f"{op} {limit:g}" for op, _, limit in gated) + ").", flush=True)
     if baselines:
         try:
             limits = read_limits(args.limits)
