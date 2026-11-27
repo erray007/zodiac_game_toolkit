@@ -2,12 +2,17 @@
 //
 // Lifetime: the Host must outlive every script call into functions registered through it, so shut the engine down before destroying the Host.
 // Threads: registration and the setters run on the main thread before scripts execute. The call-time accessors in the table only read the call and immutable registration data, so different script contexts may use them concurrently.
+// VFS entries (plugin.h, VFS rules): they reach the Vfs given to set_vfs (ZODIAC_E_UNAVAILABLE without one) from any thread. A handle
+// is a slot of a table that only grows, in segments that never move, tagged with the slot's generation: every call checks the
+// generation under the slot's lock, so a stale or forged handle is refused and calls on one handle are serialized. A read takes
+// one uncontended compare-exchange and goes through the Reader straight into the plugin's buffer.
 #pragma once
 #include <zodiac/plugin.h>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -18,12 +23,21 @@ class asIScriptFunction;
 class asITypeInfo;
 
 namespace zodiac {
+namespace vfs {
+class Vfs;
+}
+class PluginFiles;
 class Host{
 public:
 using LogHandler=std::function<void(zodiac_log_level,std::string_view)>;
 explicit Host(asIScriptEngine* engine);
+// Closes every handle a plugin left open.
+~Host();
 Host(const Host&)=delete;
 Host& operator=(const Host&)=delete;
+// The VFS the plugin entries read (null: they give ZODIAC_E_UNAVAILABLE). It must outlive every open handle and every call.
+void set_vfs(vfs::Vfs* files) noexcept{vfs_=files;}
+vfs::Vfs* vfs() const noexcept{return vfs_;}
 zodiac_host* abi() noexcept{return &table_.abi;}
 asIScriptEngine* engine() const noexcept{return engine_;}
 const std::string& current_module() const noexcept{return current_module_;}
@@ -74,5 +88,8 @@ std::string current_module_;
 LogHandler log_handler_;
 mutable std::size_t registration_failures_=0;
 std::deque<Binding> bindings_;
+vfs::Vfs* vfs_=nullptr;
+// The plugins' open files; made with the Host, so a call never has to create it.
+std::unique_ptr<PluginFiles> files_;
 };
 }

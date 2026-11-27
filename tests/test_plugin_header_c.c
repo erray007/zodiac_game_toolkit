@@ -57,7 +57,16 @@ _Static_assert(offsetof(zodiac_host,array_push_int32)==ZT_HOST_FN(28),"zodiac_ho
 _Static_assert(offsetof(zodiac_host,array_push_double)==ZT_HOST_FN(29),"zodiac_host.array_push_double");
 _Static_assert(offsetof(zodiac_host,set_exception)==ZT_HOST_FN(30),"zodiac_host.set_exception");
 _Static_assert(offsetof(zodiac_host,log)==ZT_HOST_FN(31),"zodiac_host.log");
-_Static_assert(sizeof(zodiac_host)==ZT_HOST_FN(32),"sizeof(zodiac_host)");
+/* Appended after ABI v1: the VFS entries. */
+_Static_assert(offsetof(zodiac_host,vfs_open)==ZT_HOST_FN(32),"zodiac_host.vfs_open");
+_Static_assert(offsetof(zodiac_host,vfs_read)==ZT_HOST_FN(33),"zodiac_host.vfs_read");
+_Static_assert(offsetof(zodiac_host,vfs_seek)==ZT_HOST_FN(34),"zodiac_host.vfs_seek");
+_Static_assert(offsetof(zodiac_host,vfs_size)==ZT_HOST_FN(35),"zodiac_host.vfs_size");
+_Static_assert(offsetof(zodiac_host,vfs_close)==ZT_HOST_FN(36),"zodiac_host.vfs_close");
+_Static_assert(offsetof(zodiac_host,vfs_exists)==ZT_HOST_FN(37),"zodiac_host.vfs_exists");
+_Static_assert(sizeof(zodiac_host)==ZT_HOST_FN(38),"sizeof(zodiac_host)");
+_Static_assert(ZODIAC_E_NOT_FOUND==-6&&ZODIAC_E_IO==-7&&ZODIAC_E_DAMAGED==-8&&ZODIAC_E_BAD_PATH==-9&&ZODIAC_E_UNAVAILABLE==-10,"VFS error codes");
+_Static_assert(ZODIAC_SEEK_SET==0&&ZODIAC_SEEK_CUR==1&&ZODIAC_SEEK_END==2,"seek origins");
 
 static const zodiac_module_info zodiac_test_module_info = {
 .abi_version = ZODIAC_ABI_VERSION,
@@ -77,4 +86,10 @@ ZODIAC_DEFINE_MODULE(zodiac_test_module_info)
 const zodiac_module_info* zodiac_test_get_c_module_info(void)
 {
 return &zodiac_test_module_info;
+}
+
+/* ZODIAC_HOST_HAS compiles as C (-pedantic-errors). */
+int zodiac_test_c_host_has_vfs(const zodiac_host* host)
+{
+return ZODIAC_HOST_HAS(host,vfs_exists)?1:0;
 }

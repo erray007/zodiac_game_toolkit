@@ -91,6 +91,13 @@ zodiac_fixture_module(gpl_static LICENSE GPL-3.0-only)
 zodiac_add_module(no_entry SOURCES fixtures/modules/no_entry.cpp NO_STATIC OUTPUT_DIRECTORY "${ZODIAC_TEST_MODULE_DIR}")
 zodiac_add_module(ref_object SOURCES fixtures/modules/ref_object.cpp NO_STATIC OUTPUT_DIRECTORY "${ZODIAC_TEST_MODULE_DIR}")
 zodiac_add_module(cwd_probe SOURCES fixtures/modules/cwd_probe.cpp NO_STATIC OUTPUT_DIRECTORY "${ZODIAC_TEST_MODULE_DIR}")
+# The plugin VFS fixture, and the same source built as a module made before the VFS entries (an ABI v1 size info, no VFS use).
+zodiac_add_module(vfs_reader SOURCES fixtures/modules/vfs_reader.cpp NO_STATIC OUTPUT_DIRECTORY "${ZODIAC_TEST_MODULE_DIR}" DEFINITIONS "ZODIAC_FIXTURE_NAME=\"vfs_reader\"")
+target_link_libraries(zodiac_mod_vfs_reader PRIVATE Threads::Threads)
+zodiac_add_module(vfs_reader_old SOURCES fixtures/modules/vfs_reader.cpp NO_STATIC OUTPUT_DIRECTORY "${ZODIAC_TEST_MODULE_DIR}" DEFINITIONS "ZODIAC_FIXTURE_NAME=\"vfs_reader_old\"" ZODIAC_FIXTURE_OLD_ABI)
+zodiac_add_test(test_plugin_vfs SOURCES test_plugin_vfs.cpp script_fixture.hpp LIBRARIES zodiac_core)
+target_compile_definitions(test_plugin_vfs PRIVATE "ZODIAC_TEST_FIXTURE_DIR=\"${ZODIAC_TEST_MODULE_DIR}\"")
+add_dependencies(test_plugin_vfs zodiac_mod_vfs_reader zodiac_mod_vfs_reader_old)
 configure_file(fixtures/modules/corrupt_module.txt "${ZODIAC_TEST_MODULE_DIR}/zodiac_mod_corrupt${CMAKE_SHARED_LIBRARY_SUFFIX}" COPYONLY)
 if(WIN32)
 # Third-party DLLs of a dynamic module, in a folder of their own (zodiac build ships what sits next to a module DLL):

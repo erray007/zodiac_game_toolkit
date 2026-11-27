@@ -161,6 +161,8 @@ register_pack(engine_,vfs_);
 register_system(engine_,system_);
 register_exception_helpers(engine_);
 host_.set_log_handler([this](zodiac_log_level level,std::string_view message){diagnostics_.report(level,message);});
+// Plugins read the game's files through the same Vfs as scripts (plugin.h, VFS rules); vfs_ outlives host_.
+host_.set_vfs(&vfs_);
 vfs_.set_log([this](zodiac_log_level level,std::string_view message){diagnostics_.report(level,message);});
 }
 
