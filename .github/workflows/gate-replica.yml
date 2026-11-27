@@ -4,8 +4,10 @@
 # A/A' run of the regression gate, whose head/main values are the samples of tools/bench_regression_limits.json). With pads=true (Task 5c
 # fix round 2) head and main are built with different no-op relink pads (ZODIAC_BENCH_PAD, ZODIAC_BENCH_CORE_PAD; job n takes pair n of
 # PADS for head and pair n+1 for main), so the samples hold the layout shift a code change elsewhere causes too. slowdown=OP:PERCENT makes
-# head's OP that much slower (bench_types --slowdown), to show the gate catches a real slowdown. Trigger:
-#   gh workflow run gate-replica.yml --ref <branch> [-f pads=true] [-f slowdown=string_find_ascii:10]
+# head's OP that much slower (bench_types --slowdown), to show the gate catches a real slowdown. With main=<ref> (Task 13) that commit's
+# build stands in for main instead of a second build of this one, run as ci.yml runs main's bench (--detail only, since an older bench
+# may know no other option), so the jobs are paired runs of this commit against it. Trigger:
+#   gh workflow run gate-replica.yml --ref <branch> [-f pads=true] [-f slowdown=string_find_ascii:10] [-f main=c380dd9]
 name: gate-replica
 
 on:
@@ -17,6 +19,9 @@ on:
       slowdown:
         description: "OP:PERCENT, head's OP made that much slower (empty: none)"
         default: ""
+      main:
+        description: "A ref or sha whose build stands in for main (empty: a second build of this commit, an A/A' run)"
+        default: ""
 
 permissions:
   contents: read
@@ -24,6 +29,7 @@ permissions:
 env:
   PADDED: ${{ inputs.pads || 'false' }}
   SLOWDOWN: ${{ inputs.slowdown || '' }}
+  MAIN_REF: ${{ inputs.main || '' }}
   # bench pad_core pad (bytes), as bench-reference.yml's: the bench pad moves everything after it, the core pad the code behind byte_at.
   PADS: "0_0 16_0 0_16 48_32 80_8 112_48 32_64 96_24 0_0"
 
@@ -82,7 +88,12 @@ jobs:
       - name: Build the same commit again
         shell: pwsh
         run: |
-          git worktree add again-src HEAD
+          $ref = 'HEAD'
+          if ($env:MAIN_REF) {
+          git fetch origin $env:MAIN_REF
+          $ref = $env:MAIN_REF
+          }
+          git worktree add again-src $ref
           if ($LASTEXITCODE -ne 0) { throw "git worktree failed" }
           New-Item -ItemType Junction -Path again-src/.tools -Target (Resolve-Path .tools) | Out-Null
           $deps = "$PWD/.deps/windows-release"
@@ -106,7 +117,12 @@ jobs:
           run() {
             extra=()
             case "$1" in bench-*) extra=("${slow[@]}");; esac
-            "copies/$1.exe" --detail --faults --layout --calibrate time "${extra[@]}" --out "$1.json" 2> "$1-stderr.txt"
+            if [ -n "$MAIN_REF" ] && [ "${1%%-*}" = main ]; then
+              # Another commit's bench, as ci.yml runs main's: its default calibration, no option it may not know.
+              "copies/$1.exe" --detail --out "$1.json" 2> "$1-stderr.txt"
+            else
+              "copies/$1.exe" --detail --faults --layout --calibrate time "${extra[@]}" --out "$1.json" 2> "$1-stderr.txt"
+            fi
             grep -m1 "image base" "$1-stderr.txt" || true
           }
           # The gate's order: main, head, head, main, main, head.
@@ -116,7 +132,8 @@ jobs:
           cat check-bench.txt check-bench-stderr.txt
           echo "check_bench exit code $status (report-only)"
           # The CPU and the result in the run's summary too, so they are recorded even when the artifact is not.
-          echo "job $JOB: $(grep -m1 '^machine:' check-bench.txt), $(grep -m1 'heap kind' bench-1-stderr.txt | tr -d '\r'), pads head ${HEAD_BENCH_PAD}_${HEAD_CORE_PAD} main ${MAIN_BENCH_PAD}_${MAIN_CORE_PAD}, slowdown '${SLOWDOWN}', check_bench exit code $status" >> "$GITHUB_STEP_SUMMARY"
+          echo "job $JOB: $(grep -m1 '^machine:' check-bench.txt), $(grep -m1 'heap kind' bench-1-stderr.txt | tr -d '\r'), pads head ${HEAD_BENCH_PAD}_${HEAD_CORE_PAD} main ${MAIN_BENCH_PAD}_${MAIN_CORE_PAD}, slowdown '${SLOWDOWN}', main '${MAIN_REF}', check_bench exit code $status" >> "$GITHUB_STEP_SUMMARY"
+          grep -m1 "^geometric mean" check-bench.txt >> "$GITHUB_STEP_SUMMARY" || true
           grep -E "^  [a-z_0-9]+: (ratio|head/main)" check-bench-stderr.txt >> "$GITHUB_STEP_SUMMARY" || true
           echo "head ${HEAD_BENCH_PAD}_${HEAD_CORE_PAD} main ${MAIN_BENCH_PAD}_${MAIN_CORE_PAD} slowdown ${SLOWDOWN}" > check-bench-pads.txt
         env:

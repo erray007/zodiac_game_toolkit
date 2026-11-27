@@ -1,0 +1,140 @@
+# Pack read study (Task 13), never part of the gate: on 8 Windows and 8 Linux runners at once, bench_files' pack read gate exactly as
+# ci.yml runs it (tools/bench_files_gate.py: 3 processes, each from its own copy of the build), then, with chunks=true, the chunk size
+# study (pack_read_random_seek and pack_read_sequential with chunks of 16, 64 and 256 KiB, 3 passes of one process per size from its own
+# copy, the order rotated per pass) and the cryptography (crypto_chunk, poly1305_chunk, kdf_open). With limits set (the gate's
+# --limit values, space-separated) every job gates at them, so the run counts false failures; without, the gate is report-only.
+# A last job merges every job's files into one artifact, bench-files-study. Trigger:
+#   gh workflow run bench-files-study.yml --ref <branch> [-f chunks=true] [-f limits="pack_read_sequential=X pack_read_random_seek=Y"]
+name: bench-files-study
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunks:
+        description: "true: also the chunk size study and the cryptography"
+        default: "true"
+      limits:
+        description: "check_bench.py --limit values, space-separated (empty: report-only)"
+        default: ""
+
+permissions:
+  contents: read
+
+# The inputs reach the scripts only through the environment, never spliced into their text.
+env:
+  CHUNKS: ${{ inputs.chunks || 'true' }}
+  LIMITS: ${{ inputs.limits || '' }}
+
+jobs:
+  study:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+        job: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-${{ runner.os == 'Windows' && 'windows' || 'linux' }}-${{ hashFiles('tools/toolchain.json') }}
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ runner.os }}-release-${{ github.event.repository.name }}-${{ hashFiles('cmake/Dependencies.cmake', 'cmake/ZodiacApplyPatch.cmake', 'cmake/patches/**') }}
+      - name: Cache Unicode data
+        uses: actions/cache@v4
+        with:
+          path: .tools/unicode
+          key: ucd-16.0.0-${{ hashFiles('tools/gen_unicode.py') }}
+      - name: Install and select clang 18 with libc++, lld and the LLVM tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libc++-18-dev libc++abi-18-dev lld-18 llvm-18
+          echo "CC=clang-18" >> "$GITHUB_ENV"
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Bootstrap
+        run: python bootstrap.py
+      - name: Build bench_files on the release preset
+        run: |
+          preset=linux-release
+          if [ "$RUNNER_OS" = Windows ]; then preset=windows-release; fi
+          .tools/cmake/bin/cmake --preset "$preset"
+          .tools/cmake/bin/cmake --build --preset "$preset" --target bench_files
+          exe="build/$preset/tests/bench/bench_files"
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          echo "BENCH=$exe" >> "$GITHUB_ENV"
+      - name: The pack read gate as ci.yml runs it
+        env:
+          JOB: ${{ matrix.job }}
+        run: |
+          mkdir -p out
+          limits=()
+          read -r -a values <<< "$LIMITS"
+          for value in "${values[@]}"; do limits+=(--limit "$value"); done
+          mode=()
+          if [ "${#limits[@]}" -eq 0 ]; then mode=(--report-only); fi
+          status=0
+          python -I tools/bench_files_gate.py --bench "$BENCH" --out-dir out/gate "${limits[@]}" "${mode[@]}" || status=$?
+          echo "$status" > out/gate/exit-code.txt
+          echo "$RUNNER_OS job $JOB: $(grep -m1 '^machine:' out/gate/check.txt), gate exit code $status, limits '${LIMITS}'" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^pack_read" out/gate/check.txt >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Chunk sizes and the cryptography
+        if: env.CHUNKS == 'true'
+        run: |
+          mkdir -p out/chunks out/copies
+          ext=""
+          if [ "$RUNNER_OS" = Windows ]; then ext=".exe"; fi
+          # One copy per process, as the gate: three passes, each size once per pass, the order rotated.
+          orders=("14 16 18" "16 18 14" "18 14 16")
+          for pass in 1 2 3; do
+            for log2 in ${orders[$((pass-1))]}; do
+              copy="out/copies/chunk-$log2-$pass$ext"
+              cp "$BENCH" "$copy"
+              "$copy" --op pack_read_sequential --op pack_read_random_seek --chunk-log2 "$log2" --out "out/chunks/chunk-$log2-$pass.json" 2> "out/chunks/chunk-$log2-$pass-stderr.txt" || { cat "out/chunks/chunk-$log2-$pass-stderr.txt"; exit 2; }
+              grep "pack_read" "out/chunks/chunk-$log2-$pass-stderr.txt"
+            done
+          done
+          cp "$BENCH" "out/copies/crypto$ext"
+          "out/copies/crypto$ext" --op crypto_chunk --op poly1305_chunk --op kdf_open --out out/chunks/crypto.json 2> out/chunks/crypto-stderr.txt || { cat out/chunks/crypto-stderr.txt; exit 2; }
+          cat out/chunks/crypto-stderr.txt
+      - name: Name the files after the job
+        if: always()
+        env:
+          JOB: ${{ matrix.job }}
+        run: |
+          rm -rf out/copies out/gate/copies
+          echo "$RUNNER_OS $JOB" > out/job.txt
+      - name: Upload the job's files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: study-${{ runner.os }}-${{ matrix.job }}
+          path: out
+          if-no-files-found: ignore
+
+  collect:
+    needs: study
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: study-*
+          path: study
+      - name: Upload every job's files as one artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-files-study
+          path: study
