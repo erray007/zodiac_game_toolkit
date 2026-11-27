@@ -310,7 +310,9 @@ std::expected<void,Failure> create_directory(std::string_view path,bool recursiv
 // (Source::remove_directory_leaving: all or nothing, and never over a file written meanwhile), for every file below the folder
 // that an older mount still provides, as remove does for one file: the folder's files stay deleted, an
 // older pack's folder goes too (D1), and an older host folder stays as an empty folder (its files hidden, the folder itself
-// a host folder's own). In a host folder over older mounts their files show again (it cannot hold markers).
+// a host folder's own). In a host folder over older mounts their files show again (it cannot hold markers). Every marker's name
+// is checked before anything changes, so when an older host folder holds a name below the folder that the pack cannot store as
+// an entry name (pack_format.hpp, canonical_entry_name), the delete fails as a whole with bad_path and changes nothing.
 std::expected<void,Failure> delete_directory(std::string_view path,bool recursive);
 void set_host_paths(bool enabled) noexcept{host_paths_.store(enabled,std::memory_order_relaxed);}
 bool host_paths() const noexcept{return host_paths_.load(std::memory_order_relaxed);}
@@ -396,20 +398,25 @@ static constexpr Seen seen_of(const EntryInfo& info) noexcept
 const EntryKind kind=info.kind;
 return kind==EntryKind::file?Seen::file:kind==EntryKind::directory?(info.marked?Seen::marked_directory:Seen::directory):kind==EntryKind::deleted?Seen::marker:Seen::none;
 }
+// What folder_shown decided during one lookup, by mount and folder (fold): a folder's decision looks up files below it, whose
+// lookups decide the newer mounts' folders of their names, and so on down, so markers and folders nested d deep would otherwise
+// decide the same folders again and again (about 2^d of them). Filled only past the count check, so the usual lookup allocates nothing.
+struct ShownMemo;
 // The lookup order of every reading operation (see Resolution): asks the mounts covering p newest first (only those older than
 // after, when after is set) through ask(Target)->Seen, until one decides: a file that no newer marker hides, a folder that
 // folder_shown shows, or stop. A marker hides the older mounts' files of the name; a folder not shown and everything else
-// passes the lookup on. seen is none when no mount decided.
+// passes the lookup on. seen is none when no mount decided. memo is the lookup's (folder_shown's own lookups pass theirs);
+// without one, decide keeps one for itself.
 template<class Ask>
-static Decided decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask);
+static Decided decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask,ShownMemo* memo=nullptr);
 // A source's folder that an open_read found (is_directory): marked_directory when a marker of its name lies there too (stat's
 // EntryInfo::marked), else directory. Asked only for folders, so file reads cost nothing more.
 static Seen folder_seen(Source& source,std::string_view sub);
 // Whether the folder p that mount holds (sub below it) is shown: always for a source without implied folders and for a mount's own
 // folder; otherwise when the folder holds more files than the newer mounts covering p hold markers below it, or, failing that,
 // more files than there are distinct names among those markers that are files of the folder and that a lookup (decide, as stat
-// does) does not give as this mount's file.
-static bool folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub);
+// does) does not give as this mount's file. Each (mount, folder) is decided once per memo; without one, it keeps one for itself.
+static bool folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub,ShownMemo* memo=nullptr);
 std::expected<VfsPath,Failure> parse_failure(std::string_view path) const;
 Failure ambiguous_failure(std::string_view path,const Target& target) const;
 // Both are advisory and never throw: whatever their work or the callbacks throw is reported by report_internal_error.

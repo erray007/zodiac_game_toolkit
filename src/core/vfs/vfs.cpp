@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace zodiac::vfs {
@@ -437,13 +438,34 @@ const auto info=source.stat(sub);
 return info&&info->marked?Seen::marked_directory:Seen::directory;
 }
 
+struct Vfs::ShownMemo{
+struct Key{
+const Mount* mount;
+std::string fold;
+bool operator==(const Key&) const=default;
+};
+struct Hash{
+std::size_t operator()(const Key& key) const noexcept
+{
+return std::hash<std::string_view>{}(key.fold)^(std::hash<const void*>{}(key.mount)*0x9e3779b97f4a7c15u);
+}
+};
+std::unordered_map<Key,bool,Hash> shown;
+};
+
 template<class Ask>
-Vfs::Decided Vfs::decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask)
+Vfs::Decided Vfs::decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask,ShownMemo* memo)
 {
 Decided decided;
 bool past=after==nullptr;
 // A newer deletion marker hides the older files of the name, not its folders.
 bool hidden=false;
+// Made by the first folder this lookup decides, when no caller's memo is given.
+std::optional<ShownMemo> own;
+const auto shown=[&](const Target& target){
+if(!memo)memo=&own.emplace();
+return folder_shown(table,p,target.mount,target.sub,memo);
+};
 visit_covering(table,p,[&](const Target& target){
 if(!past){
 past=target.mount==after;
@@ -460,11 +482,11 @@ case Seen::file:
 if(hidden)return false;
 break;
 case Seen::directory:
-if(!folder_shown(table,p,target.mount,target.sub))return false;
+if(!shown(target))return false;
 break;
 case Seen::marked_directory:
 // Not shown, the folder is no folder, and its marker still hides the older files of the name.
-if(!folder_shown(table,p,target.mount,target.sub)){
+if(!shown(target)){
 hidden=true;
 return false;
 }
@@ -479,7 +501,7 @@ return true;
 return decided;
 }
 
-bool Vfs::folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub)
+bool Vfs::folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub,ShownMemo* memo)
 {
 // A mount's own folder is a mount folder; a host folder's folders exist on their own.
 if(sub.empty()||!mount->source->implied_folders())return true;
@@ -494,6 +516,11 @@ markers+=target.mount->source->count_below(target.sub).markers;
 return false;
 });
 if(files>markers)return true;
+// Past the counts, every (mount, folder) is decided once per lookup: the files below it decide deeper folders the same way.
+std::optional<ShownMemo> own;
+if(!memo)memo=&own.emplace();
+ShownMemo::Key key{mount,fold_name(p.relative)};
+if(const auto found=memo->shown.find(key);found!=memo->shown.end())return found->second;
 // Otherwise only the files the newer markers below p name (each mount visits only that folder's markers; each name once) can
 // be hidden. Each one that is a file of this mount is decided as stat decides it (decide, so a newer folder that is also a
 // marker counts exactly as in a lookup), and the folder is shown while one file of it is left.
@@ -530,11 +557,13 @@ const Decided decided=decide(table,file,nullptr,[](const Target& target){
 const auto got=target.mount->source->stat(target.sub);
 if(!got)return fall_through(got.error())?Seen::none:Seen::stop;
 return seen_of(*got);
-});
+},memo);
 if(decided.seen==Seen::stop||(decided.seen==Seen::file&&decided.target.mount==mount))continue;
 ++hidden;
 }
-return files>hidden;
+const bool result=files>hidden;
+memo->shown.emplace(std::move(key),result);
+return result;
 }
 
 std::expected<void,Vfs::MountError> Vfs::try_mount(std::string_view at,std::shared_ptr<Source> source,bool writable,const void* owner) noexcept

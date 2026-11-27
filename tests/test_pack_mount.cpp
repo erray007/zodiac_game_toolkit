@@ -8,6 +8,7 @@
 //   read, a second pack object on one file, and compact under an open file object.
 // - the 2 GiB limit of a file written through a pack mount, also for an append seeded from an older mount's (sparse) file;
 // - lookups that allocate nothing: usual and Turkish names on the stack fold, a name past it with one allocation.
+// - folders nested under markers decided once per lookup (no 2^depth), and a recursive delete racing writes into its folder.
 // Packs are made with 64 KiB, 1 pass Argon2id or raw keys for speed.
 #include "script_fixture.hpp"
 #include "sparse_file.hpp"
@@ -1041,6 +1042,46 @@ CHECK(older->stats==1+1+2*2);
 CHECK(listed(m.vfs,"/",ListKind::directories)=="big");
 }
 
+// Deep nesting: pack j (1 to kDepth, newer as j grows) holds the file a/a/.../a of j + 1 segments, so it has the folders of 1 to j
+// segments; the newest pack holds a marker of every one of those names, so every file is hidden and no folder is shown. Deciding
+// whether pack j's folder of k segments is shown looks up its one file, a/.../a of j + 1 segments, which every newer pack has as a
+// folder, each of which asks the same of its own file: without remembering the answers per lookup that is 2^kDepth folders.
+TEST_CASE("folders nested under markers are each decided once per lookup")
+{
+constexpr int kDepth=14;
+Mounted m;
+const auto nested=[](int segments){
+std::string name="a";
+for(int i=1;i<segments;++i)name.append("/a");
+return name;
+};
+std::vector<std::shared_ptr<CountingSource>> sources;
+for(int j=1;j<=kDepth;++j){
+auto storage=pack_of(m.packs()/("deep"+std::to_string(j)+".zpk"),static_cast<std::uint8_t>(j),{{nested(j+1),"x"}});
+sources.push_back(std::make_shared<CountingSource>(pack::make_pack_source(storage,false)));
+REQUIRE(m.vfs.mount("/",sources.back(),false,sources.back().get()));
+}
+auto markers=make(m.packs()/"markers.zpk",test_key(99));
+for(int k=1;k<=kDepth+1;++k)REQUIRE(markers->add_deletion_marker(nested(k)));
+REQUIRE(markers->flush());
+sources.push_back(std::make_shared<CountingSource>(pack::make_pack_source(markers,false)));
+REQUIRE(m.vfs.mount("/",sources.back(),false,sources.back().get()));
+const auto stats=[&]{
+std::uint64_t total=0;
+for(const auto& source:sources)total+=source->stats;
+return total;
+};
+for(int k=1;k<=kDepth+1;++k){
+INFO(k);
+const std::uint64_t before=stats();
+CHECK(m.vfs.stat(nested(k)).error().code==FileError::not_found);
+// Each (pack, folder) pair is decided once, at a few lookups per mount: polynomial in kDepth, not 2^kDepth.
+CHECK(stats()-before<=std::uint64_t{4}*(kDepth+1)*(kDepth+1)*(kDepth+1));
+}
+CHECK(listed(m.vfs,"/",ListKind::directories).empty());
+CHECK(m.vfs.open_read(nested(3)).error().code==FileError::not_found);
+}
+
 TEST_CASE("a recursive delete in a writable pack leaves markers for the older files below the folder, kept after a reopen")
 {
 Mounted m;
@@ -1152,6 +1193,117 @@ put_bytes(newer.path/"maps"/"n.txt","n");
 REQUIRE(host.vfs.mount("/",std::make_shared<FolderSource>(newer.path,false),true,&owner_b));
 REQUIRE(host.vfs.delete_directory("maps",true));
 CHECK(read_ok(host.vfs,"maps/m.txt")=="m");
+}
+
+// One thread deletes levels/ recursively again and again while another writes files into it, in a writable pack over a release
+// pack that ships files there. Every call is stamped on one clock before and after it. Afterwards (and after a reopen), each name
+// is what the stamps allow: the last write of a name that no successful delete began after is there with its bytes, unless a delete
+// overlapped it (then it is there or gone); a name a delete began after its last write, or never written, is gone (the shipped
+// files stay deleted). The listing agrees with the lookups.
+TEST_CASE("a recursive delete racing writes into its folder loses no write and leaves one consistent state")
+{
+Mounted m;
+std::vector<std::pair<std::string,std::string>> shipped;
+for(int i=0;i<8;++i)shipped.emplace_back("levels/old"+std::to_string(i)+".txt","shipped");
+auto release=pack_of(m.packs()/"release.zpk",86,shipped);
+const fs::path save=m.packs()/"save.zpk";
+auto writable=pack_of(save,87,{});
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(release,false),false,&owner_a));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(writable,true),true,&owner_b));
+// The shipped names (a write there replaces the marker a delete left) and new ones.
+std::vector<std::string> names;
+for(int i=0;i<8;++i){
+names.push_back("old"+std::to_string(i)+".txt");
+names.push_back("new"+std::to_string(i)+".txt");
+}
+struct Stamp{
+std::uint64_t start=0;
+std::uint64_t end=0;
+};
+struct Write{
+Stamp stamp;
+std::string bytes;
+};
+std::vector<Write> last(names.size());
+std::vector<Stamp> deletes;
+std::atomic<std::uint64_t> clock{0};
+std::atomic<bool> stop{false};
+std::atomic<int> unexpected{0};
+std::uint64_t writes=0;
+// A file in the writable pack first, so the first delete finds the folder there (the release's own folder is read-only); from
+// that delete on, the shipped files are hidden for good.
+{
+const std::uint64_t start=++clock;
+REQUIRE(m.vfs.write_file("levels/"+names[1],span_of("first")));
+last[1]={{start,++clock},"first"};
+}
+{
+std::thread deleter([&]{
+for(int i=0;i<150;++i){
+const std::uint64_t start=++clock;
+const auto removed=m.vfs.delete_directory("levels",true);
+const std::uint64_t end=++clock;
+if(removed)deletes.push_back({start,end});
+// Nothing shown in the folder between a delete and the next write: not_found, and nothing changed.
+else if(removed.error().code!=FileError::not_found)++unexpected;
+}
+stop.store(true);
+});
+std::thread writer([&]{
+for(std::uint64_t i=0;!stop.load();++i){
+const std::size_t which=i%names.size();
+const std::string bytes="write "+std::to_string(i);
+const std::uint64_t start=++clock;
+const auto written=m.vfs.write_file("levels/"+names[which],span_of(bytes));
+const std::uint64_t end=++clock;
+if(written)last[which]={{start,end},bytes};
+else ++unexpected;
+++writes;
+}
+});
+deleter.join();
+writer.join();
+}
+CHECK(unexpected.load()==0);
+REQUIRE_FALSE(deletes.empty());
+MESSAGE(writes<<" writes and "<<deletes.size()<<" deletes");
+const auto check=[&]{
+std::vector<std::string> present;
+for(std::size_t i=0;i<names.size();++i){
+const std::string path="levels/"+names[i];
+INFO(path);
+const Write& write=last[i];
+const bool deleted_after=std::ranges::any_of(deletes,[&](const Stamp& d){return write.stamp.end&&d.start>write.stamp.end;});
+const bool overlapped=std::ranges::any_of(deletes,[&](const Stamp& d){return d.start<write.stamp.end&&d.end>write.stamp.start;});
+const auto bytes=vfs_read(m.vfs,path);
+if(!write.stamp.end||deleted_after){
+CHECK(bytes.error_or(FileError::io)==FileError::not_found);
+continue;
+}
+if(bytes){
+CHECK(*bytes==write.bytes);
+present.push_back(names[i]);
+}
+else{
+// Only a delete running at the same time may have taken the last write.
+CHECK(overlapped);
+CHECK(bytes.error()==FileError::not_found);
+}
+}
+std::ranges::sort(present);
+const auto listing=m.vfs.list("levels",ListKind::files);
+if(present.empty())CHECK((!listing||listing->empty()));
+else{
+REQUIRE(listing);
+CHECK(*listing==present);
+}
+};
+check();
+REQUIRE(writable->close());
+CHECK(m.vfs.unmount(&owner_b)==1);
+auto reopened=reopen(save,test_key(87));
+REQUIRE(m.vfs.mount("/",pack::make_pack_source(reopened,true),true,&owner_b));
+check();
 }
 
 TEST_CASE("a folder with more newer markers than files is still shown when some markers name files it lacks")
