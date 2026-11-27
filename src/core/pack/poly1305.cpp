@@ -157,7 +157,7 @@ store64(tag+8,(h1>>20)|(h2<<24));
 clear(this,sizeof *this);
 }
 
-void poly1305_donna(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept
+void poly1305(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept
 {
 Poly1305 mac(key);
 const std::size_t whole=size&~std::size_t{15};

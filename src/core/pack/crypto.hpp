@@ -1,6 +1,7 @@
 // The cryptography of packs (spec 8.2 of the library-and-packs design): AEAD_CHACHA20_POLY1305 of RFC 8439, Argon2id for
 // script pack passwords, keyed BLAKE2b-256 for per-pack file keys, BLAKE2b-256 hashes and the operating system's random bytes.
-// Poly1305, BLAKE2b, Argon2id and the reference ChaCha20 are Monocypher 4.0.2's (cmake/Dependencies.cmake, THIRD_PARTY_LICENSES).
+// BLAKE2b, Argon2id and the reference ChaCha20 are Monocypher 4.0.2's (cmake/Dependencies.cmake, THIRD_PARTY_LICENSES); Poly1305 is
+// poly1305.cpp's, after poly1305-donna-64 (THIRD_PARTY_LICENSES).
 // Contract:
 // - seal encrypts plain into cipher and writes the 16-byte tag: the Poly1305 key is the first 32 bytes of the ChaCha20 block at
 //   counter 0, the data is ChaCha20 from counter 1, and the tag covers aad, zero padding to 16 bytes, cipher, zero padding,
@@ -45,8 +46,9 @@
 // - dispatched() is the one seal and open use, chosen once: AVX2 when the CPU has it, else SSE2, else the reference.
 // - seal_with and open_with are seal and open on a given keystream (bench_files measures the reference against the
 //   dispatched one with them).
-// - poly1305 is Monocypher's crypto_poly1305; poly1305_donna is Poly1305 after poly1305-donna-64 (poly1305.hpp), which test_crypto
-//   checks against the RFC 8439 vectors and against poly1305 on random inputs, and bench_files times against it (poly1305_chunk).
+// - poly1305 is the Poly1305 seal and open use, after poly1305-donna-64 (poly1305.hpp; Task 13 measured it against Monocypher's in
+//   bench_files' poly1305_chunk); poly1305_monocypher is Monocypher's crypto_poly1305, kept as test_crypto's cross-check on random
+//   inputs and bench_files' reference.
 #pragma once
 #include <array>
 #include <cstddef>
@@ -115,6 +117,6 @@ const Keystream& dispatched() noexcept;
 void seal_with(const Keystream& stream,const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::span<const std::byte> plain,std::span<std::byte> cipher,Tag& tag) noexcept;
 [[nodiscard]] bool open_with(const Keystream& stream,const Key& key,const Nonce& nonce,std::span<const std::byte> aad,std::span<const std::byte> cipher,const Tag& tag,std::span<std::byte> plain) noexcept;
 void poly1305(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept;
-void poly1305_donna(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept;
+void poly1305_monocypher(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept;
 }
 }

@@ -2,7 +2,7 @@ Zodiac third-party licenses
 
 The Zodiac kit contains or is built from the software below. The license texts are copied unchanged from the sources the kit is built from.
 
-AngelScript, toml++ and Monocypher are linked into zodiac.exe and into every game built with the kit, and so are Zodiac's tables generated from the Unicode Character Database. The AngelScript in the kit is an altered version of AngelScript 2.39.0: Zodiac changed its number literal scanner and its compiler so that decimal literals compile to the nearest double or float (cmake/patches/angelscript-exact-literals.patch in Zodiac's source; each change is marked "Zodiac (altered source)"). Zodiac's script array (array<T>) is derived from AngelScript's scriptarray add-on and is covered by the AngelScript license below. The LLVM linker (ld.lld.exe) and its runtime libraries libLLVM, libc++ and libunwind are shipped in bin (libLLVM also contains the regular expression, strlcpy, xxHash and Unicode code listed after the LLVM license), and libc++, libunwind and compiler-rt (libclang_rt.builtins) are statically linked into every game. The MinGW-w64 runtime is statically linked into zodiac.exe and into every game. doctest is only used to test Zodiac and is not shipped, and mimalloc is only built into a benchmark experiment and is not shipped.
+AngelScript, toml++ and Monocypher are linked into zodiac.exe and into every game built with the kit, and so are Zodiac's tables generated from the Unicode Character Database and Zodiac's Poly1305 after poly1305-donna. The AngelScript in the kit is an altered version of AngelScript 2.39.0: Zodiac changed its number literal scanner and its compiler so that decimal literals compile to the nearest double or float (cmake/patches/angelscript-exact-literals.patch in Zodiac's source; each change is marked "Zodiac (altered source)"). Zodiac's script array (array<T>) is derived from AngelScript's scriptarray add-on and is covered by the AngelScript license below. The LLVM linker (ld.lld.exe) and its runtime libraries libLLVM, libc++ and libunwind are shipped in bin (libLLVM also contains the regular expression, strlcpy, xxHash and Unicode code listed after the LLVM license), and libc++, libunwind and compiler-rt (libclang_rt.builtins) are statically linked into every game. The MinGW-w64 runtime is statically linked into zodiac.exe and into every game. doctest is only used to test Zodiac and is not shipped, and mimalloc is only built into a benchmark experiment and is not shipped.
 
 ==============================================================================
 AngelScript (zlib license), https://www.angelcode.com/angelscript/
@@ -64,7 +64,7 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 Monocypher 4.0.2 (2-clause BSD), https://monocypher.org/
 ==============================================================================
 
-Linked into zodiac.exe and into every game built with the kit (its src/monocypher.c, unmodified: the packs' Poly1305, BLAKE2b, Argon2id and ChaCha20). Monocypher is dual-licensed under the 2-clause BSD licence and CC-0; Zodiac uses it under the 2-clause BSD licence below.
+Linked into zodiac.exe and into every game built with the kit (its src/monocypher.c, unmodified: the packs' BLAKE2b, Argon2id and reference ChaCha20; its Poly1305 only cross-checks Zodiac's in tests and benchmarks). Monocypher is dual-licensed under the 2-clause BSD licence and CC-0; Zodiac uses it under the 2-clause BSD licence below.
 
 Monocypher as a whole is dual-licensed.  Choose whichever licence you
 want from the two licences listed below.
@@ -113,7 +113,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 poly1305-donna (MIT or public domain), https://github.com/floodyberry/poly1305-donna
 ==============================================================================
 
-Zodiac's Poly1305 (src/core/pack/poly1305.cpp) follows poly1305-donna-64.h by Andrew Moon (commit e6ad6e091d30d7f4ec2d4f978be1fcfcbce72781): its limbs and arithmetic, carried into C++. The project's README gives its licence as below; Zodiac takes it as public domain, which asks for no notice.
+Zodiac's Poly1305 (src/core/pack/poly1305.cpp, linked into zodiac.exe and into every game built with the kit: the packs' AEAD tags) follows poly1305-donna-64.h by Andrew Moon (commit e6ad6e091d30d7f4ec2d4f978be1fcfcbce72781): its limbs and arithmetic, carried into C++. The project's README gives its licence as below; Zodiac takes it as public domain, which asks for no notice.
 
 # LICENSE
 

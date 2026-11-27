@@ -9,8 +9,8 @@
 //   candidate, each a timed window of the same reps (calibrated once so the reference's window takes at least 2 ms), so a drift of
 //   the machine's speed during a round weighs on both sides alike. Per candidate: ratio is the median over rounds of
 //   (B + B) / (A + A), its 10th and 90th percentiles, and the median nanoseconds of one seal plus open of each side.
-// - poly1305_chunk: Poly1305 over 64 KiB, crypto::detail::poly1305_donna (poly1305-donna-64) against Monocypher's
-//   crypto::detail::poly1305 (reference), first checked to give the same tag (exit 3 otherwise), then timed as crypto_chunk is
+// - poly1305_chunk: Poly1305 over 64 KiB, crypto::detail::poly1305 (poly1305-donna-64, the AEAD's) against Monocypher's
+//   crypto::detail::poly1305_monocypher (reference), first checked to give the same tag (exit 3 otherwise), then timed as crypto_chunk is
 //   (A B B A rounds of equal reps, the reference's window at least 2 ms). It tells how much of a chunk's time Poly1305 is.
 // - kdf_open: crypto::derive_password_key with the defaults (kDefaultKdfKib, kDefaultKdfPasses), one untimed run then 11 timed ones:
 //   the median, lowest and highest milliseconds. Task 13 records it against the spec's "well under 100 ms" (here at most 50 ms).
@@ -298,22 +298,24 @@ Chunk chunk;
 const auto* message=reinterpret_cast<const std::uint8_t*>(chunk.plain.data());
 std::uint8_t key[32];
 std::memcpy(key,chunk.key.data(),32);
+MacFunction* const reference_mac=&crypto::detail::poly1305_monocypher;
+MacFunction* const donna_mac=&crypto::detail::poly1305;
 std::uint8_t expected[16];
 std::uint8_t tag[16];
-crypto::detail::poly1305(expected,message,kChunk,key);
-crypto::detail::poly1305_donna(tag,message,kChunk,key);
+reference_mac(expected,message,kChunk,key);
+donna_mac(tag,message,kChunk,key);
 if(std::memcmp(expected,tag,16)!=0)fail(3,"poly1305_chunk: donna64 disagrees with the reference");
 unsigned sink=0;
 int reps=1;
-while(time_mac(&crypto::detail::poly1305,message,key,reps,sink)<2'000'000&&reps<(1<<20))reps*=2;
+while(time_mac(reference_mac,message,key,reps,sink)<2'000'000&&reps<(1<<20))reps*=2;
 std::vector<double> ratios;
 std::vector<double> donna_ns;
 std::vector<double> reference_ns;
 for(int round=0;round<rounds;++round){
-const std::int64_t a1=time_mac(&crypto::detail::poly1305,message,key,reps,sink);
-const std::int64_t b1=time_mac(&crypto::detail::poly1305_donna,message,key,reps,sink);
-const std::int64_t b2=time_mac(&crypto::detail::poly1305_donna,message,key,reps,sink);
-const std::int64_t a2=time_mac(&crypto::detail::poly1305,message,key,reps,sink);
+const std::int64_t a1=time_mac(reference_mac,message,key,reps,sink);
+const std::int64_t b1=time_mac(donna_mac,message,key,reps,sink);
+const std::int64_t b2=time_mac(donna_mac,message,key,reps,sink);
+const std::int64_t a2=time_mac(reference_mac,message,key,reps,sink);
 ratios.push_back(static_cast<double>(b1+b2)/static_cast<double>(a1+a2));
 donna_ns.push_back(static_cast<double>(b1+b2)/(2.0*reps));
 reference_ns.push_back(static_cast<double>(a1+a2)/(2.0*reps));

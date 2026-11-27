@@ -211,9 +211,50 @@ const Bytes& message=(*v)["message"];
 std::uint8_t tag[16];
 crypto::detail::poly1305(tag,message.data(),message.size(),(*v)["key"].data());
 CHECK(Bytes(tag,tag+16)==(*v)["tag"]);
-std::uint8_t donna[16];
-crypto::detail::poly1305_donna(donna,message.data(),message.size(),(*v)["key"].data());
-CHECK(Bytes(donna,donna+16)==(*v)["tag"]);
+std::uint8_t monocypher[16];
+crypto::detail::poly1305_monocypher(monocypher,message.data(),message.size(),(*v)["key"].data());
+CHECK(Bytes(monocypher,monocypher+16)==(*v)["tag"]);
+}
+}
+
+TEST_CASE("seal's tag is Monocypher's Poly1305 over RFC 8439 2.8's padded input on random lengths")
+{
+zodiac::Xoshiro256 random;
+random.seed(0x7A6u);
+const auto fill=[&](std::uint8_t* bytes,std::size_t size){
+for(std::size_t i=0;i<size;++i)bytes[i]=static_cast<std::uint8_t>(random.next()>>56);
+};
+const auto padded=[](Bytes& to,const Bytes& from){
+to.insert(to.end(),from.begin(),from.end());
+to.resize((to.size()+15)&~std::size_t{15},0);
+};
+for(int sample=0;sample<200;++sample){
+crypto::Key key;
+crypto::Nonce nonce;
+fill(key.data(),key.size());
+fill(nonce.data(),nonce.size());
+Bytes aad(static_cast<std::size_t>(random.next()%40));
+Bytes plain(sample<199?static_cast<std::size_t>(random.next()%300):65536);
+fill(aad.data(),aad.size());
+fill(plain.data(),plain.size());
+INFO("sample "<<sample<<", aad "<<aad.size()<<", plain "<<plain.size());
+for(const crypto::detail::Keystream* stream:keystreams()){
+INFO(stream->name);
+Bytes cipher(plain.size());
+crypto::Tag tag{};
+crypto::detail::seal_with(*stream,key,nonce,as_bytes(aad),as_bytes(plain),as_writable(cipher),tag);
+std::uint8_t poly_key[32];
+crypto::detail::chacha20_reference(poly_key,nullptr,32,key.data(),nonce.data(),0);
+Bytes input;
+padded(input,aad);
+padded(input,cipher);
+for(const std::uint64_t length:{static_cast<std::uint64_t>(aad.size()),static_cast<std::uint64_t>(plain.size())}){
+for(int i=0;i<8;++i)input.push_back(static_cast<std::uint8_t>(length>>(8*i)));
+}
+std::uint8_t expected[16];
+crypto::detail::poly1305_monocypher(expected,input.data(),input.size(),poly_key);
+CHECK(Bytes(tag.begin(),tag.end())==Bytes(expected,expected+16));
+}
 }
 }
 
@@ -226,9 +267,9 @@ for(std::size_t i=0;i<size;++i)bytes[i]=static_cast<std::uint8_t>(random.next()>
 };
 const auto agree=[](const Bytes& message,const std::uint8_t key[32]){
 std::uint8_t expected[16];
-crypto::detail::poly1305(expected,message.data(),message.size(),key);
+crypto::detail::poly1305_monocypher(expected,message.data(),message.size(),key);
 std::uint8_t tag[16];
-crypto::detail::poly1305_donna(tag,message.data(),message.size(),key);
+crypto::detail::poly1305(tag,message.data(),message.size(),key);
 CHECK(Bytes(tag,tag+16)==Bytes(expected,expected+16));
 // The same message given to the class one block at a time, then its partial end.
 crypto::detail::Poly1305 mac(key);

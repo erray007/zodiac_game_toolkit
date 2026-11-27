@@ -1,14 +1,17 @@
 // The pack cryptography of crypto.hpp on Monocypher 4.0.2: AEAD_CHACHA20_POLY1305 assembled as RFC 8439 2.8 specifies over a
-// chosen keystream (its lead batch gives the Poly1305 key and the first data bytes), Argon2id, BLAKE2b and the entropy source.
+// chosen keystream (its lead batch gives the Poly1305 key and the first data bytes) and poly1305.cpp's Poly1305, Argon2id, BLAKE2b
+// and the entropy source.
 // Small secrets are wiped with crypto_wipe; the lead batch, a refused output and the Argon2 work area, which are large or on the
 // hot path, with memset behind a compiler barrier, which the optimizer cannot remove either and which runs at memset's speed.
 #include <core/pack/clear.hpp>
 #include <core/pack/crypto.hpp>
+#include <core/pack/poly1305.hpp>
 #include <platform/entropy.hpp>
 #include <monocypher.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -38,26 +41,31 @@ const std::uint8_t* bytes_of(std::span<const std::byte> span) noexcept
 {
 return reinterpret_cast<const std::uint8_t*>(span.data());
 }
-// The RFC 8439 2.8 tag: Poly1305 over aad, zeros to a multiple of 16, cipher, zeros to a multiple of 16, then both lengths.
+// size bytes as whole Poly1305 blocks, the last one completed with zeros (RFC 8439 2.8's padding: the zeros are part of the MAC's
+// input, so that block keeps its 2^128 bit like every other).
+void mac_padded(detail::Poly1305& mac,const std::uint8_t* bytes,std::size_t size) noexcept
+{
+const std::size_t whole=size&~std::size_t{15};
+mac.blocks(bytes,whole);
+if(size!=whole){
+std::uint8_t last[16]{};
+std::memcpy(last,bytes+whole,size-whole);
+mac.blocks(last,16);
+}
+}
+// The RFC 8439 2.8 tag: Poly1305 over aad, zeros to a multiple of 16, cipher, zeros to a multiple of 16, then both lengths. That
+// input is whole blocks only, so it goes straight to the block function (poly1305.hpp), with no partial-block buffering.
 void aead_tag(std::uint8_t tag[16],const std::uint8_t poly_key[32],std::span<const std::byte> aad,const std::uint8_t* cipher,std::size_t size) noexcept
 {
-static constexpr std::uint8_t zeros[16]{};
-crypto_poly1305_ctx context;
-crypto_poly1305_init(&context,poly_key);
-if(!aad.empty()){
-crypto_poly1305_update(&context,bytes_of(aad),aad.size());
-crypto_poly1305_update(&context,zeros,(0-aad.size())&15);
-}
-if(size!=0){
-crypto_poly1305_update(&context,cipher,size);
-crypto_poly1305_update(&context,zeros,(0-size)&15);
-}
+detail::Poly1305 mac(poly_key);
+mac_padded(mac,bytes_of(aad),aad.size());
+mac_padded(mac,cipher,size);
 std::uint8_t lengths[16];
 store64(lengths,aad.size());
 store64(lengths+8,size);
-crypto_poly1305_update(&context,lengths,16);
-// crypto_poly1305_final wipes the context.
-crypto_poly1305_final(&context,tag);
+mac.blocks(lengths,16);
+// finish wipes the state.
+mac.finish(tag);
 }
 // out = in ^ keystream for the data bytes the lead batch covers (block 1 onwards of it).
 void xor_lead(std::uint8_t* out,const std::uint8_t* in,const std::uint8_t* lead,std::size_t size) noexcept
@@ -77,7 +85,7 @@ void chacha20_reference(std::uint8_t* out,const std::uint8_t* in,std::size_t siz
 crypto_chacha20_ietf(out,in,size,key,nonce,counter);
 }
 
-void poly1305(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept
+void poly1305_monocypher(std::uint8_t tag[16],const std::uint8_t* message,std::size_t size,const std::uint8_t key[32]) noexcept
 {
 crypto_poly1305(tag,message,size,key);
 }
