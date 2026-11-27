@@ -456,17 +456,30 @@ std::unordered_map<Key,bool,Hash> shown;
 template<class Ask>
 Vfs::Decided Vfs::decide(const Table& table,const VfsPath& p,const Mount* after,Ask&& ask,ShownMemo* memo)
 {
+// Each source answers on its own, so a change of a newer source between its answer and an older folder's decision could mix two
+// moments: a writable pack that held only markers answers nothing, a write there then turns one marker into a file, and the older
+// pack's folder counts one marker fewer and is taken for shown (a delete_directory then failed with read_only_pack, the race test
+// of test_pack_mount). So when an older mount's folder is decided, the newer mounts that answered nothing are asked again whether
+// they now hold a file below p; one that does changed meanwhile, and the lookup starts over on the sources' new state (at most
+// kAttempts times; the last answer stands, as a lookup made just before the change would have given it). Positions past 64 in
+// the visit order are not re-asked (no table holds that many mounts of one path).
+constexpr int kAttempts=4;
+std::optional<ShownMemo> own;
+for(int attempt=1;;++attempt){
 Decided decided;
 bool past=after==nullptr;
 // A newer deletion marker hides the older files of the name, not its folders.
 bool hidden=false;
+// The positions (in visit order) of the mounts that answered nothing.
+std::uint64_t answered_none=0;
+int position=-1;
 // Made by the first folder this lookup decides, when no caller's memo is given.
-std::optional<ShownMemo> own;
 const auto shown=[&](const Target& target){
 if(!memo)memo=&own.emplace();
 return folder_shown(table,p,target.mount,target.sub,memo);
 };
 visit_covering(table,p,[&](const Target& target){
+++position;
 if(!past){
 past=target.mount==after;
 return false;
@@ -474,6 +487,7 @@ return false;
 const Seen seen=ask(target);
 switch(seen){
 case Seen::none:
+if(position<64)answered_none|=std::uint64_t{1}<<position;
 return false;
 case Seen::marker:
 hidden=true;
@@ -498,7 +512,19 @@ break;
 decided=Decided{target,seen};
 return true;
 });
-return decided;
+if(decided.seen!=Seen::directory||answered_none==0||attempt==kAttempts)return decided;
+bool changed=false;
+int again=-1;
+visit_covering(table,p,[&](const Target& target){
+++again;
+if(target.mount==decided.target.mount)return true;
+if(again<64&&(answered_none>>again&1)&&target.mount->source->count_below(target.sub).files>0)changed=true;
+return changed;
+});
+if(!changed)return decided;
+// The sources changed under this lookup: what was decided about folders no longer holds either.
+if(memo)memo->shown.clear();
+}
 }
 
 bool Vfs::folder_shown(const Table& table,const VfsPath& p,const Mount* mount,std::string_view sub,ShownMemo* memo)

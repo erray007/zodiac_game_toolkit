@@ -66,7 +66,10 @@
 // Threads: the file operations, mount and unmount may be called from any thread at any time. The mount table is copy-on-write
 // behind a shared_mutex: a lookup copies a shared_ptr<const Table> under the shared lock and resolves without holding it, so a
 // lookup sees the table of one moment and an unmount never waits for (or breaks) a read in progress; a reader keeps its source
-// alive. The setters run before the Vfs is shared with other threads.
+// alive. The setters run before the Vfs is shared with other threads. Sources change under a lookup (a write in a writable pack
+// replaces a marker with a file): a lookup that takes an older mount's folder checks that no newer mount which answered nothing
+// holds a file below the path by then, and starts over when one does (at most 4 times), so it never mixes two moments of the
+// sources into a folder that was never shown (decide in vfs.cpp).
 #pragma once
 #include <core/vfs/path.hpp>
 #include <zodiac/plugin.h>
