@@ -736,4 +736,19 @@
   - Push and confirm CI is green on Windows, Linux and the kit jobs.
 - [ ] **Step 6: Commit** the second commit with `git commit -m "Gate pack reads against disk at the measured limit"`.
 
-**Outcome:** (filled in by Task 13: the bench_files limit ruling with its numbers, the chunk size, the hello size, and whether the SIMD ChaCha20 was kept)
+**Outcome:** (Task 13; all measurements on GitHub CI, the owner's PC runs no benches)
+- **Method.** The gate follows the current spec 8.4 design, not the old one-retry rule: bench_files' read ops are equal-time calibrated per side (window 10 ms), run in 3 processes each from its own copy of the build (tools/bench_files_gate.py), and gated by check_bench.py (`--limit OP=RATIO`, new) on the median of the 3 ratios, with no retry. new_ns is the pack's ns per read, addon_ns the disk's.
+- **Limit ruling** (per operation and system: the highest 3-process median measured on that system × 1.25, rounded up to 0.1; per system rather than one value for both, because Windows' 4 KiB ReadFile, about 4 µs, puts its seek ratio near 7 where Linux's 0.6 µs pread puts it near 30). Data at the final code: bench-files-study 46032850913 (8 Windows, 8 Linux jobs) and CI 46032831267.
+  - Windows: pack_read_sequential 5.81-8.75 (max EPYC 7763) → **11.0**; pack_read_random_seek 6.16-7.13 (max Xeon 8573C) → **9.0**.
+  - Linux: pack_read_sequential 7.70-12.33 (max Xeon 6975P-C) → **15.5**; pack_read_random_seek 17.72-36.64 (max Xeon 8573C) → **45.9**.
+  - Validation: bench-files-study 46040308898 gating at these limits, 16 jobs (8 per system, 6 runner classes), 0 false failures (largest: Windows 8.21 / 7.52, Linux 11.83 / 36.04), plus CI 46040289555 green on both systems.
+  - Raw per-read times (Windows EPYC 7763): pack 80.4 µs per 64 KiB read against disk 9.6 µs; pack 27.1 µs per 4 KiB seek against disk 4.2 µs.
+- **Poly1305 ruling (from Task 6).** Monocypher's Poly1305 was 39-61 % of pack_read_sequential (median 52 % Windows, 54 % Linux; bench-files-study 46020098583), over the 10 % bar, so the AEAD now uses Poly1305 after poly1305-donna-64 (src/core/pack/poly1305.cpp). It is checked against the RFC 8439 vectors, against Monocypher on random and extreme inputs, and through seal's tags. It takes a median 0.856 of Monocypher's time on Windows and 0.874 on Linux, but 1.036-1.045 on the EPYC 9V45.
+- **Chunk size.** 16 KiB made pack_read_random_seek 0.339 (Windows) and 0.308 (Linux) of 64 KiB's time, more than 10 % faster on both, so `kDefaultChunkLog2` is now **14**. Sequential reads cost 1.081 and 1.029 of 64 KiB's time. 256 KiB was 3.66-3.76 times slower at seeks.
+- **kdf_open** (Argon2id 8 MiB, 3 passes): Windows 9.4-16.7 ms, Linux 8.5-14.5 ms (median of 11 per job), well under 50 ms.
+- **SIMD ChaCha20** is kept (Task 6's ruling stands).
+- **hello.exe**: 3 485 184 bytes (kit-clean-machine, CI 46040289555), under 5 242 880.
+- **bench_types against main c380dd9** (gate-replica 46032896179, main=c380dd9, 8 Windows jobs, each process from its own copy). The geometric mean of best/best is 0.830-0.863 (CI 46040289555: 0.836).
+  - string_code_ascii is above 1.02 in 3 of 8 jobs (max 1.058) and string_byte_ascii in 2 (max 1.042), all on EPYC 7763s. Both are beyond their largest A/A' sample (1.041, 1.023) and inside their A/A'-derived limits (1.08, 1.06).
+  - The comparison is report-only, because c380dd9 calibrates both sides together.
+- **Identity.** blood_bath_style is identical to zodiac run (stdout, stderr and exit code) in the embedded, external and plain pack modes, each run with its own empty data:/. The cased read of Sounds/A.OGG gives the same stdout in all three modes, and only zodiac run prints its case warning. The plain mode found that copied assets lost their modification time; build now keeps it.
