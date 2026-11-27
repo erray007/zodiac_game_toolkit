@@ -747,7 +747,8 @@
 - **Chunk size.** 16 KiB made pack_read_random_seek 0.339 (Windows) and 0.308 (Linux) of 64 KiB's time, more than 10 % faster on both, so `kDefaultChunkLog2` is now **14**. Sequential reads cost 1.081 and 1.029 of 64 KiB's time. 256 KiB was 3.66-3.76 times slower at seeks.
 - **kdf_open** (Argon2id 8 MiB, 3 passes): Windows 9.4-16.7 ms, Linux 8.5-14.5 ms (median of 11 per job), well under 50 ms.
 - **SIMD ChaCha20** is kept (Task 6's ruling stands).
-- **hello.exe**: 3 485 184 bytes (kit-clean-machine, CI 46040289555), under 5 242 880.
+- **hello.exe**: 3 497 984 bytes at the final head 20134cc (kit-clean-machine, CI 46047506314; 3 485 184 at a4e2868), under 5 242 880.
+- **Race fixed on the way** (Task 11/12 code): a lookup could take an older read-only folder as shown while a newer writable pack turned a marker into a file (test_pack_mount's delete/write race, CI 46045703407). Vfs::decide now starts over when a newer mount that answered nothing holds a file below the path by then.
 - **bench_types against main c380dd9** (gate-replica 46032896179, main=c380dd9, 8 Windows jobs, each process from its own copy). The geometric mean of best/best is 0.830-0.863 (CI 46040289555: 0.836).
   - string_code_ascii is above 1.02 in 3 of 8 jobs (max 1.058) and string_byte_ascii in 2 (max 1.042), all on EPYC 7763s. Both are beyond their largest A/A' sample (1.041, 1.023) and inside their A/A'-derived limits (1.08, 1.06).
   - The comparison is report-only, because c380dd9 calibrates both sides together.
