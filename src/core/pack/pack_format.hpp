@@ -44,7 +44,11 @@ inline constexpr std::size_t kTagSize=16;
 inline constexpr std::uint32_t kFormatVersion=1;
 inline constexpr std::uint8_t kMinChunkLog2=12;
 inline constexpr std::uint8_t kMaxChunkLog2=24;
-inline constexpr std::uint8_t kDefaultChunkLog2=16;
+// 16 KiB (Task 13's measurement, bench-files-study 46020098583, 8 Windows and 8 Linux runners): a 4 KiB read at a random offset
+// decrypts and authenticates one whole chunk, so 16 KiB chunks made pack_read_random_seek 2.9 to 3.3 times faster than 64 KiB
+// (median 0.342 of its time on Windows, 0.306 on Linux) for 2-8 % on whole-file reads (sequential 1.023-1.082) and 16 bytes of tag
+// per 16 KiB stored. 256 KiB was 3.7 times slower at seeks and no faster sequentially. A pack keeps the size it was made with.
+inline constexpr std::uint8_t kDefaultChunkLog2=14;
 inline constexpr std::string_view kHeaderMagic{"ZDPACK\x1a\n",8};
 inline constexpr std::string_view kFooterMagic{"ZDPKEND1",8};
 // The fixed fields of an index plaintext: generation, wasted bytes, meta_len and count.

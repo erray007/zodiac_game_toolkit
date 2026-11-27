@@ -8,10 +8,6 @@
 name: bench-files-study
 
 on:
-  # Registers the workflow (GitHub dispatches a workflow off the default branch only once a push has); only a push of this file starts it.
-  push:
-    paths:
-      - .github/workflows/bench-files-study.yml
   workflow_dispatch:
     inputs:
       chunks:
