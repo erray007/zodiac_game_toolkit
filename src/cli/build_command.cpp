@@ -463,11 +463,16 @@ left-=count;
 return true;
 }
 
+// Copies from over to and gives the copy from's modification time, so a release's plain asset reports the time zodiac run sees
+// (file_modified; dev and release are identical): std::filesystem::copy_file keeps it on some platforms only.
 bool copy_into(const fs::path& from,const fs::path& to,Diagnostics& diagnostics)
 {
 std::error_code ec;
 fs::create_directories(to.parent_path(),ec);
 if(!ec)fs::copy_file(from,to,fs::copy_options::overwrite_existing,ec);
+fs::file_time_type modified;
+if(!ec)modified=fs::last_write_time(from,ec);
+if(!ec)fs::last_write_time(to,modified,ec);
 if(!ec)return true;
 fail(diagnostics,"error: cannot copy "+quoted_path(from)+" to "+quoted_path(to)+": "+error_text(ec));
 return false;
