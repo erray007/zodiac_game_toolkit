@@ -8,6 +8,10 @@ must match fn's signature. Supported types:
 - return: void, int32_t, int64_t, float, double, bool, std::string, std::vector<std::string> (script array<string>@)
 Any C++ exception escaping fn becomes a catchable script exception carrying e.what().
 
+zodiac::plugin::VfsFile opens game files through the host's VFS (plugin.h, VFS rules): VfsFile::open(host, "sounds/a.ogg")
+gives a VfsResult<VfsFile> (value and a ZODIAC_E_* code), and the file reads into a span, seeks and closes itself. It checks
+the host's struct_size itself, so an older host gives ZODIAC_E_UNAVAILABLE instead of a call through a missing entry.
+
 The wrapper reaches the host table through a per-function pointer set at registration. Registration runs on the main
 thread before scripts execute, so calls only read it. Registering the same function with several hosts makes it use the
 last one, which is safe because every Zodiac host in a process shares one implementation.
@@ -16,8 +20,12 @@ last one, which is safe because every Zodiac host in a process shares one implem
 #define ZODIAC_PLUGIN_HPP
 
 #include <zodiac/plugin.h>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
+#include <new>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -119,6 +127,161 @@ if(!host)return ZODIAC_E_INVALID_ARGUMENT;
 detail::bound_host<Fn> = host;
 return host->register_function(host,declaration,&detail::wrapper<Fn>,nullptr);
 }
+
+// The outcome of a VfsFile call: value when code is ZODIAC_OK, else code is a negative ZODIAC_E_* code (plugin.h, VFS rules)
+// and value is T().
+template<class T> struct VfsResult{
+T value{};
+int code=ZODIAC_OK;
+bool ok() const noexcept{return code==ZODIAC_OK;}
+explicit operator bool() const noexcept{return ok();}
+};
+namespace detail {
+// A NUL-terminated copy of a path for the C entries: on the stack when it is short, otherwise one allocation. A path holding a
+// NUL byte would name another file, so it is refused (ZODIAC_E_BAD_PATH); a failed allocation is ZODIAC_E_IO.
+class vfs_path{
+public:
+explicit vfs_path(std::string_view path) noexcept
+{
+if(path.find('\0')!=std::string_view::npos){
+code_=ZODIAC_E_BAD_PATH;
+return;
+}
+char* to=local_;
+if(path.size()>=sizeof local_){
+heap_=new(std::nothrow) char[path.size()+1];
+if(!heap_){
+code_=ZODIAC_E_IO;
+return;
+}
+to=heap_;
+}
+if(!path.empty())std::memcpy(to,path.data(),path.size());
+to[path.size()]='\0';
+text_=to;
+}
+~vfs_path()
+{
+delete[] heap_;
+}
+vfs_path(const vfs_path&)=delete;
+vfs_path& operator=(const vfs_path&)=delete;
+const char* c_str() const noexcept{return text_;}
+int code() const noexcept{return code_;}
+private:
+char local_[512];
+char* heap_=nullptr;
+const char* text_=nullptr;
+int code_=ZODIAC_OK;
+};
+}
+// A game file opened through the host's VFS (plugin.h, VFS rules), closed when it is destroyed. Move-only; every call is noexcept
+// and compiles down to the C entries. A host whose table lacks the VFS entries (ZODIAC_HOST_HAS) gives ZODIAC_E_UNAVAILABLE from
+// open and exists, so a module using VfsFile still loads in an older host. One VfsFile belongs to one thread at a time.
+class VfsFile{
+public:
+VfsFile() noexcept=default;
+VfsFile(VfsFile&& other) noexcept:host_(other.host_),file_(other.file_)
+{
+other.host_=nullptr;
+other.file_=nullptr;
+}
+VfsFile& operator=(VfsFile&& other) noexcept
+{
+if(this!=&other){
+close();
+host_=other.host_;
+file_=other.file_;
+other.host_=nullptr;
+other.file_=nullptr;
+}
+return *this;
+}
+VfsFile(const VfsFile&)=delete;
+VfsFile& operator=(const VfsFile&)=delete;
+~VfsFile()
+{
+close();
+}
+// True when host's table holds the VFS entries.
+static bool available(const zodiac_host* host) noexcept
+{
+return host&&ZODIAC_HOST_HAS(host,vfs_exists);
+}
+static VfsResult<VfsFile> open(zodiac_host* host,const char* path) noexcept
+{
+VfsResult<VfsFile> result;
+if(!available(host)){
+result.code=host?ZODIAC_E_UNAVAILABLE:ZODIAC_E_INVALID_ARGUMENT;
+return result;
+}
+zodiac_vfs_file* file=nullptr;
+result.code=host->vfs_open(host,path,&file);
+if(result.code==ZODIAC_OK){
+result.value.host_=host;
+result.value.file_=file;
+}
+return result;
+}
+static VfsResult<VfsFile> open(zodiac_host* host,std::string_view path) noexcept
+{
+const detail::vfs_path text(path);
+if(text.code()!=ZODIAC_OK)return {VfsFile(),text.code()};
+return open(host,text.c_str());
+}
+// 1 (true) when path names a file, false when it names nothing or a folder.
+static VfsResult<bool> exists(zodiac_host* host,const char* path) noexcept
+{
+if(!available(host))return {false,host?ZODIAC_E_UNAVAILABLE:ZODIAC_E_INVALID_ARGUMENT};
+const int found=host->vfs_exists(host,path);
+if(found<0)return {false,found};
+return {found==1,ZODIAC_OK};
+}
+static VfsResult<bool> exists(zodiac_host* host,std::string_view path) noexcept
+{
+const detail::vfs_path text(path);
+if(text.code()!=ZODIAC_OK)return {false,text.code()};
+return exists(host,text.c_str());
+}
+bool is_open() const noexcept{return file_!=nullptr;}
+zodiac_vfs_file* handle() const noexcept{return file_;}
+// Up to size bytes at the position, which moves on: the bytes read (fewer only at the end of the file, 0 there).
+VfsResult<size_t> read(void* buffer,size_t size) noexcept
+{
+if(!file_)return {0,ZODIAC_E_INVALID_ARGUMENT};
+const int64_t got=host_->vfs_read(host_,file_,buffer,size);
+if(got<0)return {0,static_cast<int>(got)};
+return {static_cast<size_t>(got),ZODIAC_OK};
+}
+VfsResult<size_t> read(std::span<std::byte> buffer) noexcept{return read(buffer.data(),buffer.size());}
+VfsResult<size_t> read(std::span<char> buffer) noexcept{return read(buffer.data(),buffer.size());}
+VfsResult<size_t> read(std::span<unsigned char> buffer) noexcept{return read(buffer.data(),buffer.size());}
+// The new position; origin is ZODIAC_SEEK_SET, ZODIAC_SEEK_CUR or ZODIAC_SEEK_END, and the position must stay in 0..size.
+VfsResult<uint64_t> seek(int64_t offset,int origin=ZODIAC_SEEK_SET) noexcept
+{
+if(!file_)return {0,ZODIAC_E_INVALID_ARGUMENT};
+const int64_t at=host_->vfs_seek(host_,file_,offset,origin);
+if(at<0)return {0,static_cast<int>(at)};
+return {static_cast<uint64_t>(at),ZODIAC_OK};
+}
+VfsResult<uint64_t> position() noexcept{return seek(0,ZODIAC_SEEK_CUR);}
+VfsResult<uint64_t> size() const noexcept
+{
+if(!file_)return {0,ZODIAC_E_INVALID_ARGUMENT};
+const int64_t bytes=host_->vfs_size(host_,file_);
+if(bytes<0)return {0,static_cast<int>(bytes)};
+return {static_cast<uint64_t>(bytes),ZODIAC_OK};
+}
+void close() noexcept
+{
+if(file_)host_->vfs_close(host_,file_);
+host_=nullptr;
+file_=nullptr;
+}
+private:
+zodiac_host* host_=nullptr;
+zodiac_vfs_file* file_=nullptr;
+};
 }
 
 #endif

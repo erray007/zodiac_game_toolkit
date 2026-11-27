@@ -5,15 +5,24 @@
 // - int vfs_threads(const string &in path,int threads): reads path once here, then on threads threads at once, each through a
 //   handle of its own: even threads forward in blocks of their own size, odd ones backwards with a seek before every block.
 //   0 when every thread read exactly those bytes, else how many did not; the first read's negative code when it fails.
-// Both check struct_size first: in a host without the VFS entries they raise "the host has no VFS entries".
+// - string vfs_read_hpp(const string &in path): the file's bytes through zodiac::plugin::VfsFile (plugin.hpp): opened by
+//   string_view, moved, read backwards into spans with seeks, checked at the end and after close. A failure raises
+//   "VfsFile::<call> failed: <code>".
+// - int vfs_exists_hpp(const string &in path): VfsFile::exists: 1, 0 or the negative code.
+// register_module fails with ZODIAC_E_UNAVAILABLE (logging why) in a host without the VFS entries, as plugin.h tells modules that
+// need them to; vfs_read_all and vfs_threads also check struct_size at every call, raising "the host has no VFS entries".
 // CMake sets ZODIAC_FIXTURE_NAME. ZODIAC_FIXTURE_OLD_ABI builds it as a module made before the VFS entries: its info has the
 // ABI v1 size (64 bytes, without link_modes), and it registers only int vfs_reader_old(int), which never uses them.
 #include <zodiac/plugin.h>
+#include <zodiac/plugin.hpp>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -154,11 +163,88 @@ catch(...){
 g_host->set_exception(call,"vfs_threads: cannot start the threads");
 }
 }
+void fail(zodiac_call* call,const char* entry,int code)
+{
+const std::string message=std::string(entry)+" failed: "+std::to_string(code);
+g_host->set_exception(call,message.c_str());
+}
+std::string_view path_argument(zodiac_call* call)
+{
+size_t length=0;
+const char* data=g_host->arg_string(call,0,&length);
+return data?std::string_view(data,length):std::string_view();
+}
+void vfs_read_hpp(zodiac_call* call)
+{
+using zodiac::plugin::VfsFile;
+try{
+auto opened=VfsFile::open(g_host,path_argument(call));
+if(!opened){
+fail(call,"VfsFile::open",opened.code);
+return;
+}
+VfsFile file=std::move(opened.value);
+if(opened.value.is_open()||!file.is_open()){
+g_host->set_exception(call,"a moved VfsFile did not move");
+return;
+}
+const auto size=file.size();
+if(!size){
+fail(call,"VfsFile::size",size.code);
+return;
+}
+std::string bytes(static_cast<std::size_t>(size.value),'\0');
+// Backwards in spans of 10000 bytes, with a seek before each.
+std::size_t end=bytes.size();
+while(end>0){
+const std::size_t start=end>10000?end-10000:0;
+const auto at=file.seek(static_cast<int64_t>(start));
+if(!at||at.value!=start){
+fail(call,"VfsFile::seek",at?ZODIAC_E_IO:at.code);
+return;
+}
+const auto got=file.read(std::span<char>(bytes.data()+start,end-start));
+if(!got||got.value!=end-start){
+fail(call,"VfsFile::read",got?ZODIAC_E_IO:got.code);
+return;
+}
+end=start;
+}
+std::byte extra[4];
+const auto tail=file.seek(0,ZODIAC_SEEK_END);
+const auto none=file.read(std::span<std::byte>(extra));
+if(!tail||tail.value!=bytes.size()||!none||none.value!=0||file.position().value!=bytes.size()){
+g_host->set_exception(call,"VfsFile read past the end");
+return;
+}
+file.close();
+if(file.is_open()||file.size().code!=ZODIAC_E_INVALID_ARGUMENT||file.read(extra,sizeof extra).code!=ZODIAC_E_INVALID_ARGUMENT){
+g_host->set_exception(call,"a closed VfsFile still answers");
+return;
+}
+g_host->ret_string(call,bytes.data(),bytes.size());
+}
+catch(...){
+g_host->set_exception(call,"vfs_read_hpp: out of memory");
+}
+}
+void vfs_exists_hpp(zodiac_call* call)
+{
+const auto found=zodiac::plugin::VfsFile::exists(g_host,path_argument(call));
+g_host->ret_int32(call,found?(found.value?1:0):found.code);
+}
 int register_module(zodiac_host* host)
 {
 g_host=host;
+// It cannot work without the VFS: refuse to register in a host whose table lacks the entries (plugin.h, VFS rules).
+if(!ZODIAC_HOST_HAS(host,vfs_exists)){
+host->log(host,ZODIAC_LOG_ERROR,ZODIAC_FIXTURE_NAME " needs a Zodiac whose plugin table has the VFS entries");
+return ZODIAC_E_UNAVAILABLE;
+}
 if(const int result=host->register_function(host,"string vfs_read_all(const string &in path)",&vfs_read_all,nullptr);result!=ZODIAC_OK)return result;
-return host->register_function(host,"int vfs_threads(const string &in path,int threads)",&vfs_threads,nullptr);
+if(const int result=host->register_function(host,"int vfs_threads(const string &in path,int threads)",&vfs_threads,nullptr);result!=ZODIAC_OK)return result;
+if(const int result=host->register_function(host,"string vfs_read_hpp(const string &in path)",&vfs_read_hpp,nullptr);result!=ZODIAC_OK)return result;
+return host->register_function(host,"int vfs_exists_hpp(const string &in path)",&vfs_exists_hpp,nullptr);
 }
 const zodiac_module_info g_info={ZODIAC_ABI_VERSION,sizeof(zodiac_module_info),ZODIAC_FIXTURE_NAME,"0.0.1","Zlib",nullptr,0,&register_module,nullptr,0};
 #endif

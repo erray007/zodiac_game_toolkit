@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <latch>
 #include <memory>
 #include <optional>
 #include <random>
@@ -1237,11 +1238,22 @@ const std::uint64_t start=++clock;
 REQUIRE(m.vfs.write_file("levels/"+names[1],span_of("first")));
 last[1]={{start,++clock},"first"};
 }
+// Both threads start together, and they must be seen to overlap: writes made while a delete was running, and deletes that came
+// between two writes, so the test cannot pass with the two run one after the other.
+std::latch start_line(2);
+std::atomic<bool> in_delete{false};
+std::atomic<std::uint64_t> deletes_done{0};
+std::uint64_t writes_during_deletes=0;
+std::uint64_t deletes_between_writes=0;
 {
 std::thread deleter([&]{
+start_line.arrive_and_wait();
 for(int i=0;i<150;++i){
 const std::uint64_t start=++clock;
+in_delete.store(true);
 const auto removed=m.vfs.delete_directory("levels",true);
+in_delete.store(false);
+deletes_done.fetch_add(1);
 const std::uint64_t end=++clock;
 if(removed)deletes.push_back({start,end});
 // Nothing shown in the folder between a delete and the next write: not_found, and nothing changed.
@@ -1250,23 +1262,33 @@ else if(removed.error().code!=FileError::not_found)++unexpected;
 stop.store(true);
 });
 std::thread writer([&]{
+start_line.arrive_and_wait();
+std::uint64_t seen_deletes=0;
 for(std::uint64_t i=0;!stop.load();++i){
 const std::size_t which=i%names.size();
 const std::string bytes="write "+std::to_string(i);
 const std::uint64_t start=++clock;
+const bool deleting_before=in_delete.load();
 const auto written=m.vfs.write_file("levels/"+names[which],span_of(bytes));
+const bool deleting_after=in_delete.load();
 const std::uint64_t end=++clock;
 if(written)last[which]={{start,end},bytes};
 else ++unexpected;
 ++writes;
+if(deleting_before||deleting_after)++writes_during_deletes;
+const std::uint64_t done=deletes_done.load();
+if(i>0&&done!=seen_deletes)++deletes_between_writes;
+seen_deletes=done;
 }
 });
 deleter.join();
 writer.join();
 }
 CHECK(unexpected.load()==0);
-REQUIRE_FALSE(deletes.empty());
-MESSAGE(writes<<" writes and "<<deletes.size()<<" deletes");
+REQUIRE(deletes.size()>=2);
+MESSAGE(writes<<" writes ("<<writes_during_deletes<<" while a delete ran) and "<<deletes.size()<<" deletes ("<<deletes_between_writes<<" times between two writes)");
+CHECK(writes_during_deletes>0);
+CHECK(deletes_between_writes>=2);
 const auto check=[&]{
 std::vector<std::string> present;
 for(std::size_t i=0;i<names.size();++i){

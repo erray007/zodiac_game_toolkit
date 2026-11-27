@@ -188,6 +188,9 @@ default:return ZODIAC_E_IO;
 // stale or forged handle and serializes the calls on one handle (a waiter sleeps on the word; an unlock wakes it only when the
 // waiting bit says someone sleeps, so the usual call costs one compare-exchange and one exchange). close moves the generation on
 // under the lock, then returns the index to the free list, whose room was reserved when the slot was made, so it never allocates.
+// Every table starts its slots at a generation of its own (base_, taken from a process-wide counter in golden-ratio steps over the
+// whole range), so a handle of another host in the process (two runtimes, a tool) names a generation this table only reaches after
+// hundreds of millions of reuses of that slot: it is refused, though it cannot be ruled out entirely (plugin.h).
 class PluginFiles{
 public:
 // One slot per cache line, so threads reading different handles never share the line their state words are on.
@@ -218,7 +221,7 @@ private:
 Slot* slot_=nullptr;
 std::uint32_t generation_=0;
 };
-PluginFiles()=default;
+PluginFiles() noexcept:base_(next_base()){}
 PluginFiles(const PluginFiles&)=delete;
 PluginFiles& operator=(const PluginFiles&)=delete;
 ~PluginFiles()
@@ -261,8 +264,11 @@ return nullptr;
 }
 const unsigned segment=segment_of(made_);
 if(!segments_[segment].load(std::memory_order_relaxed)){
-Slot* fresh=new(std::nothrow) Slot[std::size_t{first_segment_size}<<segment];
+const std::size_t count=std::size_t{first_segment_size}<<segment;
+Slot* fresh=new(std::nothrow) Slot[count];
 if(!fresh)return nullptr;
+// Published by the release store below, so plain stores do.
+for(std::size_t i=0;i<count;++i)fresh[i].state.store(base_<<generation_shift,std::memory_order_relaxed);
 segments_[segment].store(fresh,std::memory_order_release);
 }
 index=made_++;
@@ -298,6 +304,13 @@ static constexpr std::uint32_t locked_bit=1;
 static constexpr std::uint32_t waiting=2;
 static constexpr unsigned generation_shift=2;
 static constexpr std::uint32_t first_generation=1;
+// The starting generation of the next table made in this process.
+static std::uint32_t next_base() noexcept
+{
+static std::atomic<std::uint32_t> tables{0};
+const std::uint32_t n=tables.fetch_add(1,std::memory_order_relaxed);
+return first_generation+static_cast<std::uint32_t>((std::uint64_t{n}*0x9e3779b9u)%max_generation);
+}
 static constexpr std::uint32_t max_generation=(std::uint32_t{1}<<(32-generation_shift))-1;
 static constexpr unsigned first_segment_log2=6;
 static constexpr std::uint32_t first_segment_size=std::uint32_t{1}<<first_segment_log2;
@@ -338,6 +351,8 @@ static void unlock(Slot& slot,std::uint32_t generation) noexcept
 if(slot.state.exchange(generation<<generation_shift,std::memory_order_release)&waiting)slot.state.notify_all();
 }
 std::array<std::atomic<Slot*>,segment_count> segments_{};
+// The generation every slot of this table starts at.
+const std::uint32_t base_;
 // Guards made_ and free_; open and close only, never a read.
 std::mutex mutex_;
 std::uint32_t made_=0;
@@ -719,6 +734,7 @@ case ZODIAC_SEEK_END:base=static_cast<std::int64_t>(slot->size);break;
 default:return ZODIAC_E_INVALID_ARGUMENT;
 }
 std::int64_t target=0;
+// std::ckd_add (<stdckdint.h>) is C++26, and C++23 libc++ does not offer it, so the clang/gcc builtin it is defined by.
 if(__builtin_add_overflow(base,offset,&target)||target<0||static_cast<std::uint64_t>(target)>slot->size)return ZODIAC_E_INVALID_ARGUMENT;
 slot->position=static_cast<std::uint64_t>(target);
 return target;

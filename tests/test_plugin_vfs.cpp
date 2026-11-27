@@ -2,7 +2,9 @@
 // - the vfs_reader fixture module reads a packed file as scripts do (case-insensitive names), gets NOT_FOUND, BAD_PATH and
 //   DAMAGED (none of a damaged chunk's bytes delivered), and reads one file on 8 threads at once, each through its own handle;
 // - a module built against an older struct_size still loads and registers, and the fixture's struct_size check refuses a host
-//   table without the VFS entries;
+//   table without the VFS entries, at registration and at a call;
+// - the C++ VfsFile of plugin.hpp, from the fixture module and directly (string_view paths, a NUL in one, moves, struct_size);
+// - a handle of one host refused by another in the same process; drive and host: paths refused with host paths off;
 // - straight through the table: bad, closed, double-closed and forged handles; bounds-checked seeks; reads at chunk edges and
 //   past the end; vfs_exists; a host without a VFS; one handle shared by several threads (serialized: every byte read once) and
 //   closed under them; slot reuse; a file read after its pack is unmounted; and many handles at once.
@@ -18,6 +20,7 @@
 #include <platform/console.hpp>
 #include <doctest/doctest.h>
 #include <zodiac/plugin.h>
+#include <zodiac/plugin.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -153,7 +156,8 @@ zodiac::Diagnostics diagnostics;
 std::unique_ptr<zodiac::ScriptRuntime> runtime;
 std::string big=text_of(kBigSize,1);
 std::string broken=text_of(kBigSize,2);
-Game(std::string_view main,std::string_view modules)
+// host_size, when set, cuts the host table to that struct_size before the modules register; build must then give built.
+Game(std::string_view main,std::string_view modules,std::uint32_t host_size=0,int built=0)
 {
 const fs::path root=dir.path/"game";
 put_bytes(root/"zodiac.toml","[game]\nmain = \"main.zs\"\n[modules]\ndynamic = ["+std::string(modules)+"]\n");
@@ -174,8 +178,13 @@ REQUIRE(runtime->vfs().mount("/",pack::make_pack_source(open_pack(damaged,4),fal
 auto project=zodiac::load_project(root);
 INFO(project.error_or(""));
 REQUIRE(project);
+zodiac_host* table=runtime->host().abi();
+const std::uint32_t size=table->struct_size;
+if(host_size)table->struct_size=host_size;
+const int result=runtime->build(*project);
+table->struct_size=size;
 INFO(joined(lines));
-REQUIRE(runtime->build(*project)==0);
+REQUIRE(result==built);
 }
 ~Game()
 {
@@ -267,6 +276,127 @@ if(damaged!=-8)throw("vfs_threads on the damaged file gave "+damaged);
 return 0;
 })","\"vfs_reader\"");
 CHECK(game.run()==0);
+}
+
+TEST_CASE("a plugin reads through the C++ VfsFile of plugin.hpp")
+{
+Game game(R"(void expect(const string &in got,const string &in want)
+{
+if(got!=want)throw("got \""+got+"\", want \""+want+"\"");
+}
+string failure(const string &in path)
+{
+try{
+vfs_read_hpp(path);
+}
+catch{
+return exception_info();
+}
+return "no failure";
+}
+int main()
+{
+expect(vfs_read_hpp("data/B.txt"),"hello pack");
+if(vfs_read_hpp("Data/A.TXT")!=read_file("data/a.txt"))throw("VfsFile read other bytes than the script");
+expect(failure("missing.txt"),"VfsFile::open failed: -6");
+expect(failure("../x"),"VfsFile::open failed: -9");
+expect(failure("broken/c.bin"),"VfsFile::read failed: -8");
+if(vfs_exists_hpp("data/b.txt")!=1)throw("data/b.txt is no file");
+if(vfs_exists_hpp("data")!=0)throw("data is a file");
+if(vfs_exists_hpp("nothing.txt")!=0)throw("nothing.txt is a file");
+if(vfs_exists_hpp("../x")!=-9)throw("../x is a valid path");
+return 0;
+})","\"vfs_reader\"");
+CHECK(game.run()==0);
+}
+
+TEST_CASE("a module that needs the VFS refuses to register in a host table without the VFS entries")
+{
+Game game(kNoScript,"\"vfs_reader\"",static_cast<std::uint32_t>(offsetof(zodiac_host,vfs_open)),2);
+CHECK(std::ranges::any_of(game.lines,[](const std::string& line){return line.find("vfs_reader needs a Zodiac whose plugin table has the VFS entries")!=std::string::npos;}));
+// The module made before the VFS entries does not need them, so it registers in such a table.
+Game old(R"(int main(){return vfs_reader_old(1)==2?0:1;})","\"vfs_reader_old\"",static_cast<std::uint32_t>(offsetof(zodiac_host,vfs_open)));
+CHECK(old.run()==0);
+}
+
+TEST_CASE("the C++ VfsFile copies a string_view path, refuses a NUL in it, moves, and checks struct_size itself")
+{
+using zodiac::plugin::VfsFile;
+Game game(kNoScript,"");
+zodiac_host* host=game.host();
+// A string_view that is not NUL-terminated where it ends.
+const std::string text="data/b.txtXYZ";
+auto opened=VfsFile::open(host,std::string_view(text).substr(0,10));
+REQUIRE(opened);
+VfsFile file=std::move(opened.value);
+char buffer[16];
+const auto got=file.read(std::span<char>(buffer));
+REQUIRE(got);
+CHECK(std::string_view(buffer,got.value)=="hello pack");
+// A NUL inside the path would name another file.
+CHECK(VfsFile::open(host,std::string_view("data/b.txt\0x",12)).code==ZODIAC_E_BAD_PATH);
+CHECK(VfsFile::exists(host,std::string_view("data/b.txt\0x",12)).code==ZODIAC_E_BAD_PATH);
+// A path longer than the stack copy is copied too.
+const std::string long_path="data/"+std::string(600,'n')+".txt";
+CHECK(VfsFile::open(host,std::string_view(long_path)).code==ZODIAC_E_NOT_FOUND);
+const auto exists=VfsFile::exists(host,std::string_view("DATA/A.TXT"));
+CHECK((exists&&exists.value));
+// Move assignment closes the file it held.
+zodiac_vfs_file* first=file.handle();
+auto other=VfsFile::open(host,"data/a.txt");
+REQUIRE(other);
+file=std::move(other.value);
+CHECK(host->vfs_size(host,first)==ZODIAC_E_INVALID_ARGUMENT);
+CHECK(file.size().value==kBigSize);
+CHECK(file.seek(-7,ZODIAC_SEEK_END).value==kBigSize-7);
+CHECK(file.seek(1,ZODIAC_SEEK_END).code==ZODIAC_E_INVALID_ARGUMENT);
+CHECK(file.position().value==kBigSize-7);
+// A table without the VFS entries, and no host at all.
+const std::uint32_t size=host->struct_size;
+host->struct_size=static_cast<std::uint32_t>(offsetof(zodiac_host,vfs_open));
+CHECK_FALSE(VfsFile::available(host));
+CHECK(VfsFile::open(host,"data/a.txt").code==ZODIAC_E_UNAVAILABLE);
+CHECK(VfsFile::exists(host,"data/a.txt").code==ZODIAC_E_UNAVAILABLE);
+host->struct_size=size;
+CHECK(VfsFile::open(nullptr,"data/a.txt").code==ZODIAC_E_INVALID_ARGUMENT);
+VfsFile closed;
+CHECK(closed.read(buffer,sizeof buffer).code==ZODIAC_E_INVALID_ARGUMENT);
+CHECK(closed.seek(0).code==ZODIAC_E_INVALID_ARGUMENT);
+CHECK(closed.size().code==ZODIAC_E_INVALID_ARGUMENT);
+}
+
+TEST_CASE("a handle of one host is refused by another host in the same process")
+{
+TempDir dir;
+put_bytes(dir.path/"one"/"f.txt","from one");
+put_bytes(dir.path/"two"/"f.txt","from two");
+zodiac::vfs::Vfs vfs_one;
+zodiac::vfs::Vfs vfs_two;
+REQUIRE(vfs_one.mount_folder("/",dir.path/"one",false));
+REQUIRE(vfs_two.mount_folder("/",dir.path/"two",false));
+zodiac::Host one(nullptr);
+zodiac::Host two(nullptr);
+one.set_vfs(&vfs_one);
+two.set_vfs(&vfs_two);
+zodiac_host* a=one.abi();
+zodiac_host* b=two.abi();
+zodiac_vfs_file* from_a=nullptr;
+zodiac_vfs_file* from_b=nullptr;
+REQUIRE(a->vfs_open(a,"f.txt",&from_a)==ZODIAC_OK);
+REQUIRE(b->vfs_open(b,"f.txt",&from_b)==ZODIAC_OK);
+// Both are each table's first slot, under generations of their own.
+CHECK(from_a!=from_b);
+char buffer[16];
+CHECK(b->vfs_read(b,from_a,buffer,sizeof buffer)==ZODIAC_E_INVALID_ARGUMENT);
+CHECK(a->vfs_read(a,from_b,buffer,sizeof buffer)==ZODIAC_E_INVALID_ARGUMENT);
+CHECK(b->vfs_size(b,from_a)==ZODIAC_E_INVALID_ARGUMENT);
+b->vfs_close(b,from_a);
+CHECK(a->vfs_read(a,from_a,buffer,sizeof buffer)==8);
+CHECK(std::string_view(buffer,8)=="from one");
+CHECK(b->vfs_read(b,from_b,buffer,sizeof buffer)==8);
+CHECK(std::string_view(buffer,8)=="from two");
+a->vfs_close(a,from_a);
+b->vfs_close(b,from_b);
 }
 
 TEST_CASE("a module built against an older struct_size loads and registers next to one that reads the VFS")
@@ -434,8 +564,12 @@ CHECK(host->vfs_exists(host,"host:C:/x")==ZODIAC_E_BAD_PATH);
 zodiac_vfs_file* file=nullptr;
 CHECK(host->vfs_open(host,"data/missing.txt",&file)==ZODIAC_E_NOT_FOUND);
 CHECK(file==nullptr);
-CHECK(host->vfs_open(host,"host:C:/x",&file)==ZODIAC_E_BAD_PATH);
+// With host paths off (the default), neither a drive path nor a host: path opens anything.
+for(const char* host_path:{"host:C:/x","host:/x","C:/x","C:\\Windows\\win.ini"}){
+INFO(host_path);
+CHECK(host->vfs_open(host,host_path,&file)==ZODIAC_E_BAD_PATH);
 CHECK(file==nullptr);
+}
 }
 
 TEST_CASE("a host without a VFS gives ZODIAC_E_UNAVAILABLE")

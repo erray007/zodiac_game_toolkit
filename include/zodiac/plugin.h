@@ -19,7 +19,8 @@ VFS rules (vfs_open, vfs_read, vfs_seek, vfs_size, vfs_close, vfs_exists; presen
 - vfs_seek: origin ZODIAC_SEEK_SET, ZODIAC_SEEK_CUR or ZODIAC_SEEK_END; the new position must lie in 0..size, otherwise ZODIAC_E_INVALID_ARGUMENT and the position stays. Returns the new position.
 - vfs_size: the size at open, or ZODIAC_E_INVALID_ARGUMENT. vfs_close: closes the handle; NULL, a closed or an unknown handle is ignored.
 - vfs_exists: 1 when path names a file, 0 when it names nothing or a folder, or a negative code.
-- Handles are opaque and checked on every call: a closed, double-closed, forged or foreign handle gives ZODIAC_E_INVALID_ARGUMENT (vfs_close ignores it), never a crash. A closed handle's value stays invalid until its slot has been reused 2^30 times.
+- Handles are opaque and checked on every call: a closed, double-closed or forged handle gives ZODIAC_E_INVALID_ARGUMENT (vfs_close ignores it), never a crash. A closed handle's value stays invalid until its slot has been reused 2^30 times. Each host numbers its handles from its own starting point, so a handle from another host is usually refused too, but it may alias one of this host's handles: never pass handles between hosts.
+- A module that cannot work without the VFS fails register_module (with ZODIAC_E_UNAVAILABLE) when !ZODIAC_HOST_HAS(host,vfs_exists), so an older host refuses it with a clear error instead of the module calling through a missing entry later. A module that can do without checks before each use and degrades.
 - Threads: every call may be made from any thread, such as an audio streaming thread, and different handles may be used concurrently. One handle belongs to one thread at a time: the host serializes calls on one handle (each waits for the one before), so misuse cannot corrupt the host, but threads sharing a handle share its position.
 - Lifetime: close every handle, and stop every thread that calls these entries, before shutdown_module returns. The host closes what is left when it is destroyed; no call may be made after that.
 
@@ -128,7 +129,7 @@ int64_t (*vfs_size)(zodiac_host*,zodiac_vfs_file*);                             
 void (*vfs_close)(zodiac_host*,zodiac_vfs_file*);
 int (*vfs_exists)(zodiac_host*,const char* path);                                    /* 1, 0 or a negative code */
 };
-/* ZODIAC_HOST_HAS(host,member): nonzero when the host table holds member (its struct_size covers it) */
+/* ZODIAC_HOST_HAS(host,member): nonzero when the host table holds member (its struct_size covers it). host is expanded twice: once evaluated, once inside sizeof (not evaluated), so pass a plain pointer, not an expression with side effects. */
 #define ZODIAC_HOST_HAS(host,member) ((host)->struct_size>=offsetof(zodiac_host,member)+sizeof((host)->member))
 #define ZODIAC_MODULE_ENTRY_NAME "zodiac_module_get_info"
 /* ZODIAC_EXPORT expands to __declspec(dllexport) on Windows, visibility("default") elsewhere */
