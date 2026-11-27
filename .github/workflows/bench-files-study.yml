@@ -1,10 +1,12 @@
 # Pack read study (Task 13), never part of the gate: on 8 Windows and 8 Linux runners at once, bench_files' pack read gate exactly as
 # ci.yml runs it (tools/bench_files_gate.py: 3 processes, each from its own copy of the build), then, with chunks=true, the chunk size
 # study (pack_read_random_seek and pack_read_sequential with chunks of 16, 64 and 256 KiB, 3 passes of one process per size from its own
-# copy, the order rotated per pass) and the cryptography (crypto_chunk, poly1305_chunk, kdf_open). With limits set (the gate's
-# --limit values, space-separated) every job gates at them, so the run counts false failures; without, the gate is report-only.
+# copy, the order rotated per pass) and the cryptography (crypto_chunk, poly1305_chunk, kdf_open). With windows_limits and
+# linux_limits set (the gate's --limit values per system, space-separated, as ci.yml passes them) every job gates at its system's,
+# so the run counts false failures; without, the gate is report-only.
 # A last job merges every job's files into one artifact, bench-files-study. Trigger:
-#   gh workflow run bench-files-study.yml --ref <branch> [-f chunks=true] [-f limits="pack_read_sequential=X pack_read_random_seek=Y"]
+#   gh workflow run bench-files-study.yml --ref <branch> [-f chunks=true] [-f windows_limits="pack_read_sequential=X pack_read_random_seek=Y"]
+#   [-f linux_limits="..."]
 name: bench-files-study
 
 on:
@@ -13,8 +15,11 @@ on:
       chunks:
         description: "true: also the chunk size study and the cryptography"
         default: "true"
-      limits:
-        description: "check_bench.py --limit values, space-separated (empty: report-only)"
+      windows_limits:
+        description: "check_bench.py --limit values for the Windows jobs, space-separated (empty: report-only)"
+        default: ""
+      linux_limits:
+        description: "check_bench.py --limit values for the Linux jobs, space-separated (empty: report-only)"
         default: ""
 
 permissions:
@@ -23,7 +28,8 @@ permissions:
 # The inputs reach the scripts only through the environment, never spliced into their text.
 env:
   CHUNKS: ${{ inputs.chunks || 'true' }}
-  LIMITS: ${{ inputs.limits || '' }}
+  WINDOWS_LIMITS: ${{ inputs.windows_limits || '' }}
+  LINUX_LIMITS: ${{ inputs.linux_limits || '' }}
 
 jobs:
   study:
@@ -80,6 +86,8 @@ jobs:
           JOB: ${{ matrix.job }}
         run: |
           mkdir -p out
+          LIMITS="$LINUX_LIMITS"
+          if [ "$RUNNER_OS" = Windows ]; then LIMITS="$WINDOWS_LIMITS"; fi
           limits=()
           read -r -a values <<< "$LIMITS"
           for value in "${values[@]}"; do limits+=(--limit "$value"); done

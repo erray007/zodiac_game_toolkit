@@ -37,8 +37,8 @@ endif()
 if(WIN32 AND NOT ZODIAC_BENCH_ALLOCATOR STREQUAL "nt")
 target_sources(bench_types PRIVATE $<TARGET_OBJECTS:zodiac_application_manifest>)
 endif()
-# bench_files: report-only measurements of the pack code (crypto_chunk, kdf_open; Task 13 adds the read operations and gates them).
-# Built with everything, not a ctest test and not part of the bench_types gate: CI runs it on the release presets and prints its lines.
+# bench_files: the pack code's measurements: the pack reads against disk, which CI gates (tools/bench_files_gate.py, Task 13), and the
+# report-only crypto_chunk, poly1305_chunk and kdf_open. Built with everything, not a ctest test and not part of the bench_types gate.
 # Like bench_types, it links the release core and carries the shipped manifest, so it measures what a game gets.
 add_executable(bench_files bench_files.cpp)
 target_link_libraries(bench_files PRIVATE zodiac_core_release)

@@ -111,10 +111,13 @@ jobs:
       # 32 MiB file read sequentially in 64 KiB reads and in 2 000 seeks of 4 KiB, from a mounted pack and from a mounted folder,
       # through Vfs::open_read. As the bench_types gate (spec 8.4): each side equal-time calibrated, 3 processes each from its own copy
       # of the build, gated on the median of their pack/disk ratios per operation (tools/bench_files_gate.py, tools/check_bench.py).
-      # Report-only until Task 13 measures the limits.
-      - name: Benchmark pack reads against disk (report-only)
-        continue-on-error: true
-        run: python -I tools/bench_files_gate.py --bench build/windows-release/tests/bench/bench_files.exe --out-dir bench-files-gate --report-only
+      # Limits (Task 13's ruling): per operation and system, the highest 3-process median ratio measured on that system's runners at
+      # the final code (bench-files-study 46032850913, 8 jobs, and CI 46032831267) times 1.25, rounded up to 0.1. Windows: sequential
+      # 8.753 (EPYC 7763) -> 11.0, random seek 7.131 (Xeon 8573C) -> 9.0. A pack read costs a pread of the chunk plus its ChaCha20
+      # and Poly1305 (16 KiB chunks); the disk's 4 KiB ReadFile is about 4 us here against 0.6 us for Linux's pread, hence the lower
+      # seek ratio. No retry: the 3-process median is the noise handling, as in the bench_types gate.
+      - name: Benchmark pack reads against disk
+        run: python -I tools/bench_files_gate.py --bench build/windows-release/tests/bench/bench_files.exe --out-dir bench-files-gate --limit pack_read_sequential=11.0 --limit pack_read_random_seek=9.0
       - name: Upload the pack read results
         if: always()
         uses: actions/upload-artifact@v4
@@ -351,10 +354,10 @@ jobs:
       # As in the windows job; bench-files.json goes up with the bench results.
       - name: Measure the pack cryptography (report-only)
         run: build/linux-release/tests/bench/bench_files --op crypto_chunk --op poly1305_chunk --op kdf_open --out bench-files.json
-      # As in the windows job.
-      - name: Benchmark pack reads against disk (report-only)
-        continue-on-error: true
-        run: python -I tools/bench_files_gate.py --bench build/linux-release/tests/bench/bench_files --out-dir bench-files-gate --report-only
+      # As in the windows job, and gating here too (unlike bench_types): the pack/disk ratios are far from their limits' 25 % margin.
+      # Linux limits from the same data: sequential 12.329 (Xeon 6975P-C) -> 15.5, random seek 36.640 (Xeon 8573C) -> 45.9.
+      - name: Benchmark pack reads against disk
+        run: python -I tools/bench_files_gate.py --bench build/linux-release/tests/bench/bench_files --out-dir bench-files-gate --limit pack_read_sequential=15.5 --limit pack_read_random_seek=45.9
       - name: Upload the pack read results
         if: always()
         uses: actions/upload-artifact@v4
